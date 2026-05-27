@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/nelsong6/shows/internal/auth"
 	"github.com/nelsong6/shows/internal/ordering"
@@ -34,11 +35,18 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(metricsMiddleware)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	r.Get("/readyz", s.handleReady)
+
+	// /metrics — unauthenticated. kube-prometheus-stack scrapes via
+	// the PodMonitor in k8s/templates/podmonitor.yaml. The handler
+	// exposes shows_* counters/histograms plus prom client's default
+	// Go runtime / process metrics.
+	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
 
 	r.Route("/api", func(r chi.Router) {
 		r.Use(auth.Middleware(s.Verifier))
@@ -147,9 +155,11 @@ func (s *Server) handleNextRound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(next) == 0 {
+		roundResponseSize.Observe(0)
 		writeJSON(w, http.StatusOK, map[string]any{"round": []RoundEntry{}})
 		return
 	}
+	roundResponseSize.Observe(float64(len(next)))
 
 	cands := make([]ordering.Candidate, len(next))
 	for i, n := range next {
@@ -215,6 +225,8 @@ func (s *Server) handleAdvance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	advancedEpisodesTotal.Add(float64(result.AdvancedCount))
+	removedShowsTotal.Add(float64(len(result.RemovedShowIDs)))
 
 	// Build the "removed shows" payload so the client can show the
 	// reveal. One row per show that just got tombstoned.
