@@ -113,19 +113,12 @@ func (a *App) shutdown(ctx context.Context) {
 // errors via the runner's own backoff; fatal errors (auth refused,
 // mpv shutdown) terminate the goroutine and set the status to error.
 func (a *App) runForever(ctx context.Context) {
-	a.setStatus("auth", "obtaining auth.romaine.life token")
-	host, _ := os.Hostname()
-	tok, err := oauth.EnsureToken(ctx, oauth.Config{
-		Info: oauth.RequesterInfo{
-			WhereHappening: fmt.Sprintf("shows-desktop on %s", host),
-			IntendedUse:    "play episodes via shows.romaine.life",
-			MiscIdentifier: "couch",
-		},
-		Opener: func(url string) error {
-			wruntime.BrowserOpenURL(a.ctx, url)
-			return nil
-		},
-	})
+	a.setStatus("auth", "signing in via auth.romaine.life")
+	openInBrowser := func(url string) error {
+		wruntime.BrowserOpenURL(a.ctx, url)
+		return nil
+	}
+	tok, err := oauth.EnsureToken(ctx, oauth.Config{Opener: openInBrowser})
 	if err != nil {
 		a.setStatus("error", fmt.Sprintf("auth: %v", err))
 		a.logger.Error("oauth.EnsureToken", "err", err)
@@ -133,21 +126,11 @@ func (a *App) runForever(ctx context.Context) {
 	}
 
 	client := apiclient.New("", tok.Token)
-	// Token refresh on 401: re-runs the device flow. If the cached
-	// token is still valid, EnsureToken short-circuits without
-	// prompting the user; if not, the browser opens for re-approval.
+	// Token refresh on 401: re-runs the sign-in flow. If the cached
+	// token is still valid, EnsureToken short-circuits silently; if
+	// not, the browser opens for sign-in again.
 	client.RefreshToken = func() (string, error) {
-		fresh, err := oauth.EnsureToken(ctx, oauth.Config{
-			Info: oauth.RequesterInfo{
-				WhereHappening: fmt.Sprintf("shows-desktop on %s (refresh)", host),
-				IntendedUse:    "play episodes via shows.romaine.life",
-				MiscIdentifier: "couch",
-			},
-			Opener: func(url string) error {
-				wruntime.BrowserOpenURL(a.ctx, url)
-				return nil
-			},
-		})
+		fresh, err := oauth.EnsureToken(ctx, oauth.Config{Opener: openInBrowser})
 		if err != nil {
 			return "", err
 		}

@@ -1,17 +1,29 @@
-// Package oauth runs the auth.romaine.life CLI device flow in its
-// PKCE+loopback variant: spins up a localhost HTTP listener, sends
-// the user's browser to the approval page with a redirect_uri pointing
-// at the listener, and catches the auth code on redirect — no polling,
-// no user_code-display dance.
+// Package oauth runs the auth.romaine.life user-login flow for this
+// native desktop app: the user signs in to the browser with
+// Microsoft/Google (their normal romaine.life sign-in), and a one-time
+// authorization code comes back to a loopback HTTP listener. The desktop
+// then exchanges the code for the user's own JWT — never an admin-
+// approved bot token, never the where_happening/intended_use ceremony.
 //
-// auth.romaine.life's /api/cli/device endpoint accepts both:
-//   - device-code grant (no redirect_uri; client polls /api/cli/token)
-//   - authorization-code grant with loopback redirect_uri + PKCE
+// Flow (RFC 8252 — OAuth 2.0 for Native Apps):
 //
-// We use the second flow because shows-desktop is a real Windows app
-// with a real browser — there's no reason to ask the user to read a
-// VK-XXXX-XXXX code off a console window. See cli-device-flow.ts in
-// nelsong6/auth for the server-side contract.
+//  1. Generate a PKCE verifier/challenge (S256) and a CSRF state value.
+//  2. Bind a loopback listener at 127.0.0.1:<ephemeral>/callback.
+//  3. Open the user's browser at
+//     GET /api/auth/cli/user-login?
+//     redirect_uri=http://127.0.0.1:PORT/callback
+//     &state=...&code_challenge=...&code_challenge_method=S256
+//     The server checks for a session cookie. If none, it bounces the
+//     user through Microsoft/Google sign-in and returns here. Once
+//     signed in, it redirects to the loopback URL with `?code=...`.
+//  4. POST the code + code_verifier + redirect_uri to
+//     /api/auth/cli/user-token (grant_type=authorization_code)
+//     and receive the user's JWT in the response body.
+//
+// The JWT never travels through the browser. The desktop owns the
+// loopback listener; the server validates that redirect_uri is loopback
+// with an explicit port; PKCE binds the redemption to this specific
+// flow so a leaked code is useless without the verifier still in memory.
 package oauth
 
 import (
@@ -26,6 +38,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -34,23 +47,21 @@ import (
 const (
 	DefaultAuthBaseURL = "https://auth.romaine.life"
 
-	deviceEndpoint = "/api/cli/device"
-	tokenEndpoint  = "/api/cli/token"
+	loginEndpoint = "/api/auth/cli/user-login"
+	tokenEndpoint = "/api/auth/cli/user-token"
 )
 
-// Token is the cached bot token. Persisted to disk between launches
-// at %APPDATA%\shows\token.json so the user only sees the browser
-// approval on the first launch (and again ~weekly when the JWT expires).
+// Token is the cached user JWT. Persisted to disk between launches at
+// %APPDATA%\shows\token.json so the user only sees the browser once and
+// then again ~daily when the JWT expires.
 type Token struct {
 	Token     string `json:"token"`
 	ExpiresAt int64  `json:"expires_at"`
-	Purpose   string `json:"purpose"`
 }
 
 // Expired returns true when the cached token is close enough to expiry
-// that we should treat it as gone. 60s safety margin so a refresh
-// kicks off before requests start failing with expired-token errors
-// at the API gate.
+// that a refresh should kick off. 60s safety margin so the new token is
+// in hand before requests start failing at the API gate.
 func (t *Token) Expired() bool {
 	if t == nil || t.Token == "" {
 		return true
@@ -58,38 +69,23 @@ func (t *Token) Expired() bool {
 	return time.Now().Unix()+60 >= t.ExpiresAt
 }
 
-// RequesterInfo is the human-facing description of who's asking for a
-// token — presented on the approval page so the admin (you) can
-// recognize the request. Required fields per cli-device-flow.ts.
-type RequesterInfo struct {
-	WhereHappening string
-	IntendedUse    string
-	MiscIdentifier string
-}
-
 // Config drives a single Authenticate call.
 type Config struct {
 	AuthBaseURL string
-	Info        RequesterInfo
 
-	// Opener is called once with the verification URL the user must
-	// approve at. Typically wired to wails runtime.BrowserOpenURL so
-	// the browser opens via the platform's preferred mechanism. If
-	// nil, the URL is just printed to stderr and the user is expected
-	// to open it themselves.
+	// Opener is called once with the sign-in URL the user must visit.
+	// Typically wired to wails runtime.BrowserOpenURL so the browser
+	// opens via the platform's preferred mechanism. If nil, the URL is
+	// printed to stderr and the user opens it themselves.
 	Opener func(url string) error
 }
 
-// Authenticate runs the full PKCE+loopback flow and returns the
-// minted Token. Blocks until the user approves or the device code
-// expires (typically 10 minutes per the auth.romaine.life mint
-// helpers).
+// Authenticate runs the full sign-in flow and returns the minted Token.
+// Blocks until the user finishes signing in or the code TTL expires
+// (~5 minutes per auth.romaine.life's user-login store).
 func Authenticate(ctx context.Context, cfg Config) (*Token, error) {
 	if cfg.AuthBaseURL == "" {
 		cfg.AuthBaseURL = DefaultAuthBaseURL
-	}
-	if cfg.Info.WhereHappening == "" || cfg.Info.IntendedUse == "" || cfg.Info.MiscIdentifier == "" {
-		return nil, errors.New("oauth: requester info required (where_happening, intended_use, misc_identifier)")
 	}
 
 	verifier, err := randomURLToken(32)
@@ -109,7 +105,7 @@ func Authenticate(ctx context.Context, cfg Config) (*Token, error) {
 	}
 	defer listener.Close()
 	port := listener.Addr().(*net.TCPAddr).Port
-	redirectURI := fmt.Sprintf("http://localhost:%d/callback", port)
+	redirectURI := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
@@ -141,9 +137,9 @@ func Authenticate(ctx context.Context, cfg Config) (*Token, error) {
 				return
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><html><head><title>shows: authorized</title></head>
+			_, _ = w.Write([]byte(`<!doctype html><html><head><title>shows: signed in</title></head>
 <body style="background:#0a0a0a;color:#eee;font-family:monospace;padding:32px;">
-<h2 style="text-transform:uppercase;letter-spacing:0.05em;color:#888;">shows: authorized</h2>
+<h2 style="text-transform:uppercase;letter-spacing:0.05em;color:#888;">shows: signed in</h2>
 <p>You can close this tab. The desktop app has your token.</p>
 </body></html>`))
 			select {
@@ -155,110 +151,66 @@ func Authenticate(ctx context.Context, cfg Config) (*Token, error) {
 	}
 	go func() { _ = srv.Serve(listener) }()
 	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(ctx)
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	dev, err := requestDeviceCode(ctx, cfg.AuthBaseURL, cfg.Info, redirectURI, challenge, state)
+	loginURL, err := buildLoginURL(cfg.AuthBaseURL, redirectURI, challenge, state)
 	if err != nil {
 		return nil, err
 	}
-
-	verifyURL := dev.VerificationURIComplete
-	if verifyURL == "" {
-		verifyURL = dev.VerificationURI
-	}
 	if cfg.Opener != nil {
-		_ = cfg.Opener(verifyURL)
+		_ = cfg.Opener(loginURL)
 	} else {
-		fmt.Fprintln(os.Stderr, "oauth: approve at "+verifyURL)
+		fmt.Fprintln(os.Stderr, "oauth: sign in at "+loginURL)
 	}
 
-	expiry := time.Duration(dev.ExpiresIn) * time.Second
-	if expiry == 0 {
-		expiry = 10 * time.Minute
-	}
-
+	// 10-minute ceiling matches the server's code TTL window plus headroom
+	// for the Microsoft/Google round-trip.
 	var code string
 	select {
 	case code = <-codeCh:
 	case err := <-errCh:
 		return nil, err
-	case <-time.After(expiry):
-		return nil, errors.New("oauth: code expired before approval")
+	case <-time.After(10 * time.Minute):
+		return nil, errors.New("oauth: code never arrived (sign-in window timed out)")
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 
-	return exchangeCode(ctx, cfg.AuthBaseURL, code, verifier)
+	return exchangeCode(ctx, cfg.AuthBaseURL, code, verifier, redirectURI)
 }
 
 // ─── server interactions ────────────────────────────────────────────
 
-type deviceRequest struct {
-	WhereHappening      string `json:"where_happening"`
-	IntendedUse         string `json:"intended_use"`
-	MiscIdentifier      string `json:"misc_identifier"`
-	RedirectURI         string `json:"redirect_uri,omitempty"`
-	CodeChallenge       string `json:"code_challenge,omitempty"`
-	CodeChallengeMethod string `json:"code_challenge_method,omitempty"`
-	State               string `json:"state,omitempty"`
-}
-
-type deviceResponse struct {
-	DeviceCode              string `json:"device_code"`
-	UserCode                string `json:"user_code"`
-	VerificationURI         string `json:"verification_uri"`
-	VerificationURIComplete string `json:"verification_uri_complete"`
-	ExpiresIn               int    `json:"expires_in"`
-	Interval                int    `json:"interval"`
-}
-
-func requestDeviceCode(ctx context.Context, baseURL string, info RequesterInfo, redirectURI, challenge, state string) (*deviceResponse, error) {
-	body, _ := json.Marshal(deviceRequest{
-		WhereHappening:      info.WhereHappening,
-		IntendedUse:         info.IntendedUse,
-		MiscIdentifier:      info.MiscIdentifier,
-		RedirectURI:         redirectURI,
-		CodeChallenge:       challenge,
-		CodeChallengeMethod: "S256",
-		State:               state,
-	})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+deviceEndpoint, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpDo(req)
+func buildLoginURL(baseURL, redirectURI, challenge, state string) (string, error) {
+	u, err := url.Parse(baseURL + loginEndpoint)
 	if err != nil {
-		return nil, fmt.Errorf("oauth: device request: %w", err)
+		return "", fmt.Errorf("oauth: build login URL: %w", err)
 	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("oauth: device request: %d %s", resp.StatusCode, bytes.TrimSpace(raw))
-	}
-	var dev deviceResponse
-	if err := json.Unmarshal(raw, &dev); err != nil {
-		return nil, fmt.Errorf("oauth: device parse: %w", err)
-	}
-	if dev.DeviceCode == "" {
-		return nil, fmt.Errorf("oauth: device response missing fields: %s", raw)
-	}
-	return &dev, nil
+	q := u.Query()
+	q.Set("redirect_uri", redirectURI)
+	q.Set("code_challenge", challenge)
+	q.Set("code_challenge_method", "S256")
+	q.Set("state", state)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 type tokenResponse struct {
 	Token            string `json:"token"`
 	ExpiresAt        int64  `json:"expires_at"`
-	Purpose          string `json:"purpose"`
 	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description"`
 }
 
-func exchangeCode(ctx context.Context, baseURL, code, verifier string) (*Token, error) {
+func exchangeCode(ctx context.Context, baseURL, code, verifier, redirectURI string) (*Token, error) {
 	body, _ := json.Marshal(map[string]string{
 		"grant_type":    "authorization_code",
 		"code":          code,
 		"code_verifier": verifier,
+		"redirect_uri":  redirectURI,
 	})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+tokenEndpoint, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -273,7 +225,7 @@ func exchangeCode(ctx context.Context, baseURL, code, verifier string) (*Token, 
 		return nil, fmt.Errorf("oauth: token parse: %w (body=%s)", err, raw)
 	}
 	if tr.Token != "" {
-		return &Token{Token: tr.Token, ExpiresAt: tr.ExpiresAt, Purpose: tr.Purpose}, nil
+		return &Token{Token: tr.Token, ExpiresAt: tr.ExpiresAt}, nil
 	}
 	if tr.Error != "" {
 		desc := ""
@@ -287,9 +239,7 @@ func exchangeCode(ctx context.Context, baseURL, code, verifier string) (*Token, 
 
 // ─── token cache ────────────────────────────────────────────────────
 
-// CachePath is %APPDATA%\shows\token.json on Windows. Shared with the
-// retired cmd/shows-client and the still-living cmd/shows-migrate so
-// any of them can warm the cache for the others.
+// CachePath is %APPDATA%\shows\token.json on Windows.
 func CachePath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -332,7 +282,7 @@ func SaveToken(t *Token) error {
 	return os.WriteFile(path, raw, 0o600)
 }
 
-// EnsureToken returns a cached token if it's still valid, otherwise
+// EnsureToken returns the cached token if it's still valid, otherwise
 // runs Authenticate and persists the result.
 func EnsureToken(ctx context.Context, cfg Config) (*Token, error) {
 	cached, err := LoadCachedToken()

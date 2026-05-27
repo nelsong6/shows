@@ -7,7 +7,7 @@ Replaces a set of PowerShell + JSON scripts from [nelsong6/play_show](https://gi
 ## Components
 
 - **`cmd/shows-api`** — HTTP API deployed to AKS at `shows.romaine.life`. Owns playlist state, computes round ordering, records watch history. Backed by Cosmos DB on the shared `infra-cosmos-serverless` account. JWT auth via auth.romaine.life. Prometheus-instrumented.
-- **`desktop/`** — Wails v2 + React/TS app embedding libmpv via cgo. Single window — mpv renders inside the Wails host via `--wid`. PKCE+loopback auth flow caches a token at `%APPDATA%\shows\token.json`. Runs forever until you close it.
+- **`desktop/`** — Wails v2 + React/TS app embedding libmpv via cgo. Single window — mpv renders inside the Wails host via `--wid`. First launch opens a browser for the normal auth.romaine.life Microsoft/Google sign-in; the resulting user JWT caches at `%APPDATA%\shows\token.json`. Runs forever until you close it.
 - **`cmd/shows-migrate`** — one-shot CLI that imports the legacy `nelson.json` + per-show JSONs into the API. Deleted in a future phase when the desktop grows an in-app import surface.
 
 ## Architecture
@@ -16,7 +16,7 @@ Replaces a set of PowerShell + JSON scripts from [nelsong6/play_show](https://gi
 PC (D:\Downloads\Group-Nelson\*.mkv)
 └─ desktop\build\bin\shows.exe       (Wails host, libmpv embedded via cgo)
     ├─ mpv parented into the Wails window via --wid
-    ├─ PKCE+loopback auth against auth.romaine.life
+    ├─ Microsoft/Google sign-in via auth.romaine.life (PKCE + loopback)
     │  └─ Token cached at %APPDATA%\shows\token.json
     └─ HTTPS ──► shows.romaine.life
                     └─ cmd/shows-api (AKS pod)

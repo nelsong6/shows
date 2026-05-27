@@ -27,7 +27,7 @@ desktop/
   internal/
     player/           libmpv cgo wrapper (supersonic-app/go-mpv)
     win32/            HWND lookup so libmpv parents into the Wails window
-    oauth/            PKCE+loopback OAuth client against auth.romaine.life
+    oauth/            user-login flow against auth.romaine.life (PKCE + loopback)
     apiclient/        shows.romaine.life HTTP client + 401 refresh hook
     playlist/         round-robin runner (fetch → queue → wait → advance)
   frontend/           Vite + React + TS using glimmung's design-system tokens
@@ -56,9 +56,9 @@ The desktop app (`desktop/`) and the migrate tool (`cmd/shows-migrate`) are **no
 
 Every `/api/*` route requires an auth.romaine.life JWT with `role in {admin, user}`. Tokens are verified against the JWKS at `https://auth.romaine.life/api/auth/jwks` with required claims `["exp", "iat", "iss", "role"]` (mirrors `nelsong6/romaine-auth-py`).
 
-The desktop app uses **PKCE + loopback** at `POST /api/cli/device` (with `redirect_uri=http://localhost:PORT/callback` + `code_challenge`) → browser approval → `POST /api/cli/token` with `grant_type=authorization_code`. The token caches at `%APPDATA%\shows\token.json`; on 401 the apiclient calls back to `oauth.EnsureToken` for an in-place refresh.
+The desktop app uses the **user-login** path at `GET /api/auth/cli/user-login` (PKCE + loopback `redirect_uri`). If the user has no `.romaine.life` session cookie, auth.romaine.life bounces them through Microsoft/Google and returns; the server then redirects to the loopback with a one-time `?code=...`. The desktop POSTs `{grant_type: authorization_code, code, code_verifier, redirect_uri}` to `/api/auth/cli/user-token` and receives the user's own JWT (`role=user|admin`, no `purpose` claim — same shape the browser session would yield). The JWT never travels through the browser. Token caches at `%APPDATA%\shows\token.json`; on 401 the apiclient calls back to `oauth.EnsureToken` for an in-place refresh.
 
-`cmd/shows-migrate` is the one remaining caller of the legacy polling device flow (`internal/device`). Both go away when the desktop grows an in-app import flow.
+`cmd/shows-migrate` still uses the **bot-token** CLI flow (`internal/device` → `/api/cli/device` + `/api/cli/token`) because it's an unattended import script, not a user-facing app. Both go away when the desktop grows an in-app import flow.
 
 ## Cosmos store
 

@@ -19,7 +19,7 @@ Output: `build\bin\shows.exe` (~12 MB) and `build\bin\libmpv-2.dll` (~110 MB, co
 build\bin\shows.exe
 ```
 
-First launch opens a browser tab at auth.romaine.life for approval; thereafter the token caches at `%APPDATA%\shows\token.json` and refreshes silently on 401. Closing the window terminates everything.
+First launch opens a browser tab at auth.romaine.life for the normal Microsoft/Google sign-in; the resulting user JWT caches at `%APPDATA%\shows\token.json` and refreshes silently on 401. Closing the window terminates everything.
 
 ## Dev loop
 
@@ -42,7 +42,7 @@ desktop/
   internal/
     player/              # libmpv cgo wrapper (supersonic-app/go-mpv)
     win32/               # HWND lookup so libmpv embeds into the Wails window
-    oauth/               # PKCE+loopback OAuth client for auth.romaine.life
+    oauth/               # user-login flow against auth.romaine.life (PKCE + loopback)
     apiclient/           # shows.romaine.life HTTP client with 401 refresh
     playlist/            # round-robin runner: fetch → queue → wait → advance
   frontend/              # Vite + React + TS
@@ -65,7 +65,7 @@ desktop/
 
 **During playback, mpv's child window covers the WebView2 chrome.** The React tree is visible at auth time, between rounds, and on drain. Layering chrome on top of the video via the libmpv render API into a `<canvas>` is a future phase; not a blocker for the durable-app shape.
 
-**Auth:** PKCE+loopback against `auth.romaine.life` — `internal/oauth` spins up `127.0.0.1:0`, requests a device code with `redirect_uri=http://localhost:<port>/callback` + `code_challenge=S256(verifier)`, opens the browser via `runtime.BrowserOpenURL`, catches the auth code on redirect, exchanges it for a JWT. No polling, no user-visible code-display dance.
+**Auth:** RFC 8252 user-login flow against `auth.romaine.life` — `internal/oauth` binds `127.0.0.1:0`, opens the browser at `/api/auth/cli/user-login?redirect_uri=...&code_challenge=S256(verifier)&state=...` via `runtime.BrowserOpenURL`. If the user has no session cookie, auth.romaine.life bounces them through Microsoft/Google sign-in and returns. Once signed in, the server redirects to the loopback with a one-time `?code=...`; the desktop POSTs that + `code_verifier` to `/api/auth/cli/user-token` and gets the user's JWT in the response. The JWT never travels through the browser — no token in URL, no token in browser history.
 
 **Playback loop** (`internal/playlist/Runner.Run`):
 
