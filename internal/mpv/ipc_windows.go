@@ -84,11 +84,16 @@ func Start(ctx context.Context, cfg Config) (*Client, error) {
 		bin = "mpv"
 	}
 	args := []string{
-		"--idle",
+		// --idle keeps mpv alive between rounds (when the queued
+		// playlist exhausts and we haven't yet pushed the next round).
+		// --force-window keeps the window visible during that idle
+		// gap. NOT setting --keep-open means mpv won't pause on the
+		// last frame at end-of-file — playback flows continuously
+		// from one queued file to the next within a round.
+		"--idle=yes",
 		"--input-ipc-server=" + PipePath,
 		"--fullscreen",
 		"--osc=yes",
-		"--keep-open=yes",
 		"--force-window=yes",
 	}
 	args = append(args, cfg.ExtraArgs...)
