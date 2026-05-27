@@ -1,0 +1,151 @@
+name: Desktop Build Check
+
+# Mirrors glimmung/.github/workflows/docker-build-check.yaml — the
+# "pre-build PR" pattern. On every PR (and on manual dispatch), compute a
+# content-addressed fingerprint of the desktop/ tree + Dockerfile +
+# dependency manifests, look up an existing image at that tag in ACR, and
+# either reuse it or build + push.
+#
+# By the time a PR merges, the desktop binary is already in ACR tagged
+# with the merge tree's fingerprint. There's no separate main-side
+# build-and-deploy because the desktop isn't deployed to k8s — the ACR
+# image *is* the artifact. Direct main pushes (rare) can re-fire this
+# workflow via workflow_dispatch.
+#
+# To download a built binary:
+#
+#   tag=desktop-<fingerprint>   # from this workflow's logs, or compute locally
+#   docker pull romainecr.azurecr.io/shows-desktop:$tag
+#   docker create --name x romainecr.azurecr.io/shows-desktop:$tag
+#   docker cp x:/shows.exe . && docker cp x:/libmpv-2.dll .
+#   docker rm x
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref or commit SHA to build. Leave blank to build the dispatch revision."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: desktop-build-check-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.git_ref || '' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build desktop image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve requested ref
+        if: github.event_name == 'workflow_dispatch' && inputs.git_ref != ''
+        env:
+          INPUT_REF: ${{ inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if full_sha="$(git rev-parse --verify "${INPUT_REF}^{commit}" 2>/dev/null)"; then
+            :
+          elif git show-ref --verify --quiet "refs/remotes/origin/${INPUT_REF}"; then
+            full_sha="$(git rev-parse "refs/remotes/origin/${INPUT_REF}^{commit}")"
+          elif git show-ref --verify --quiet "refs/tags/${INPUT_REF}"; then
+            full_sha="$(git rev-parse "refs/tags/${INPUT_REF}^{commit}")"
+          else
+            echo "::error::Unable to resolve git_ref '${INPUT_REF}' to a commit."
+            exit 1
+          fi
+          git checkout --detach "$full_sha"
+          echo "Resolved ${INPUT_REF} -> ${full_sha}"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Fork PRs don't have access to repo secrets / OIDC creds, so they
+      # can't push to ACR. They still build the image to verify the
+      # Dockerfile compiles (load: false push: false), they just don't
+      # cache-tag it for reuse.
+      - name: Azure Login (OIDC)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: az acr login --name romainecr
+
+      # Fingerprint paths intentionally exclude desktop/scripts/ — the
+      # build.ps1/setup-libmpv.ps1 are local-dev tools; the Dockerfile is
+      # CI's source of truth for the build environment. wails.json + the
+      # frontend tree + the Go module + the committed wailsjs bindings
+      # are what actually flow into shows.exe.
+      - name: Compute image fingerprint
+        id: fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/image-fingerprint.sh \
+            --image desktop \
+            --dockerfile desktop/Dockerfile \
+            --context . \
+            --paths 'desktop/Dockerfile desktop/go.mod desktop/go.sum desktop/wails.json desktop/main.go desktop/app.go desktop/internal desktop/frontend/package.json desktop/frontend/package-lock.json desktop/frontend/index.html desktop/frontend/vite.config.ts desktop/frontend/tsconfig.json desktop/frontend/tsconfig.node.json desktop/frontend/src desktop/frontend/wailsjs'
+
+      - name: Check ACR candidate image
+        id: candidate
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.fingerprint.outputs.proof_tag }}"
+          if az acr repository show-tags \
+              --name romainecr \
+              --repository shows-desktop \
+              --query "[?@=='${tag}'] | [0]" \
+              --output tsv | grep -qx "${tag}"; then
+            echo "hit=true" >>"${GITHUB_OUTPUT}"
+            echo "Found reusable candidate image: romainecr.azurecr.io/shows-desktop:${tag}"
+          else
+            echo "hit=false" >>"${GITHUB_OUTPUT}"
+            echo "No candidate image found for desktop fingerprint ${{ steps.fingerprint.outputs.fingerprint }}"
+          fi
+
+      - name: Build and push candidate image
+        if: (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && steps.candidate.outputs.hit != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: desktop/Dockerfile
+          push: true
+          tags: romainecr.azurecr.io/shows-desktop:${{ steps.fingerprint.outputs.proof_tag }}
+          cache-from: |
+            type=registry,ref=romainecr.azurecr.io/shows-build-cache:desktop
+            type=gha,scope=desktop
+          cache-to: |
+            type=registry,ref=romainecr.azurecr.io/shows-build-cache:desktop,mode=max
+            type=gha,mode=max,scope=desktop
+
+      # Fork PRs: build the image to verify the Dockerfile, but don't
+      # push it anywhere. cache-from/cache-to use GHA only (no ACR
+      # credentials available on fork PRs).
+      - name: Build image without pushing (fork PRs)
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: desktop/Dockerfile
+          push: false
+          load: false
+          cache-from: type=gha,scope=desktop
+          cache-to: type=gha,mode=max,scope=desktop
