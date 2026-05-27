@@ -26,6 +26,6 @@ auth:
 # tofu hasn't been applied yet — better than a silently-misconfigured
 # Cluster that thinks it's backing up but isn't.
 backups:
-  storageAccount: ""
+  storageAccount: "showsdbbackupsva1ht8"
   container: "shows-db"
-  workloadIdentityClientId: ""
+  workloadIdentityClientId: "f7024c10-4ce5-4d44-af41-b98a818f3107"
