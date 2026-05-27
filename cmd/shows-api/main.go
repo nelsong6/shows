@@ -32,28 +32,28 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		return errors.New("DATABASE_URL is required")
+	cosmosEndpoint := os.Getenv("COSMOS_ENDPOINT")
+	if cosmosEndpoint == "" {
+		return errors.New("COSMOS_ENDPOINT is required")
+	}
+	cosmosDatabase := os.Getenv("COSMOS_DATABASE")
+	if cosmosDatabase == "" {
+		return errors.New("COSMOS_DATABASE is required")
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	// DB + migrations. Block startup on a healthy DB — k8s will keep
-	// restarting the pod until the CNPG cluster is ready, which is the
-	// behavior we want during a cold deploy.
-	st, err := store.New(ctx, dsn)
+	// Cosmos client. Containers are pre-provisioned by tofu — no
+	// startup schema management needed (Cosmos has no schema). Auth
+	// resolves via DefaultAzureCredential against the projected
+	// workload-identity token.
+	st, err := store.New(ctx, cosmosEndpoint, cosmosDatabase)
 	if err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
-	defer st.Close()
-
-	if err := store.Migrate(ctx, st.Pool()); err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	slog.Info("migrations applied")
+	slog.Info("cosmos store ready", "endpoint", cosmosEndpoint, "database", cosmosDatabase)
 
 	verifier, err := auth.FromEnv(ctx)
 	if err != nil {

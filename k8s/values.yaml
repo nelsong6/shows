@@ -16,16 +16,17 @@ auth:
   issuer: "https://auth.romaine.life"
   jwksUrl: "https://auth.romaine.life/api/auth/jwks"
 
-# CNPG backup destination. storageAccount + workloadIdentityClientId are
-# provisioned by tofu/backups.tf + tofu/workload-identity.tf; on first
-# tofu apply, copy the values of the matching `terraform output` keys into
-# these fields. container is fixed by tofu and matches.
-#
-# Empty storageAccount short-circuits the CNPG backup config to a
-# render-error (no destinationPath), which is the right failure mode while
-# tofu hasn't been applied yet — better than a silently-misconfigured
-# Cluster that thinks it's backing up but isn't.
-backups:
-  storageAccount: "showsdbbackupsva1ht8"
-  container: "shows-db"
-  workloadIdentityClientId: "f7024c10-4ce5-4d44-af41-b98a818f3107"
+# Cosmos DB target. Endpoint + database name come from `tofu output`:
+#   tofu output -raw cosmos_endpoint
+#   tofu output -raw cosmos_database_name
+# Pinned here so a future Cosmos account move is a one-line change.
+cosmos:
+  endpoint: "https://infra-cosmos-serverless.documents.azure.com:443/"
+  database: "shows"
+
+# Workload identity for the pod. The shows-identity UAMI is provisioned
+# in tofu/identity.tf and federated to system:serviceaccount:shows:shows.
+# Copy from `terraform output -raw shows_identity_client_id` whenever tofu
+# rebuilds the identity (rare; only on resource group recreate).
+identity:
+  workloadIdentityClientId: "88ead547-59de-4252-af4b-2bee0325364b"

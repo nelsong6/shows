@@ -54,17 +54,19 @@ func OrderValue(absolutePath string) uint32 {
 	return uint32(n)
 }
 
-// Candidate is one episode being considered for a round.
+// Candidate is one episode being considered for a round. IDs are
+// strings because the Cosmos-backed store uses UUIDs; the legacy
+// Postgres int64 IDs are gone.
 type Candidate struct {
-	EpisodeID    int64
-	ShowID       int64
+	EpisodeID    string
+	ShowID       string
 	RootPath     string
 	RelativePath string
 }
 
 // Ordered is a candidate with its precomputed sort key. Returned from
-// Sort so the caller can persist the order (e.g. into a `rounds` row)
-// without rehashing.
+// Sort so the caller can persist the order (or echo it back to the
+// client) without rehashing.
 type Ordered struct {
 	Candidate
 	AbsolutePath string
@@ -72,8 +74,8 @@ type Ordered struct {
 }
 
 // Sort returns the input candidates in round order. Stable on
-// (OrderValue, EpisodeID) — ties (which are extremely rare with a 32-bit
-// key over a small N) break by EpisodeID so the order is fully
+// (OrderValue, EpisodeID) — ties (which are extremely rare with a
+// 32-bit key over a small N) break by EpisodeID so the order is fully
 // deterministic.
 func Sort(in []Candidate) []Ordered {
 	out := make([]Ordered, len(in))

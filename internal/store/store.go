@@ -1,384 +1,637 @@
-// Package store wraps the Postgres queries the API needs. The schema lives
-// in internal/store/migrations and is applied by Migrate() on startup.
+// Package store backs the shows API with Azure Cosmos DB.
+//
+// Two containers on the shared infra-cosmos-serverless account:
+//
+//	shows          one doc per show, episodes embedded as an array,
+//	               partitioned by /playlist
+//	watch_history  one doc per played episode, append-only,
+//	               partitioned by /show_id
+//
+// Auth: workload identity. The pod's ServiceAccount is annotated with
+// the shows-identity UAMI's client_id (provisioned in tofu/identity.tf),
+// which DefaultAzureCredential picks up via the projected token.
+// Cosmos data-plane role is narrowed to `dbs/shows` only.
 package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/data/azcosmos"
+	"github.com/google/uuid"
 )
 
+const (
+	containerShows        = "shows"
+	containerWatchHistory = "watch_history"
+)
+
+// Store is the data layer. Construct once with New(), share across the
+// process. Methods are safe for concurrent use — the Cosmos SDK client
+// is internally concurrency-safe.
 type Store struct {
-	pool *pgxpool.Pool
+	client       *azcosmos.Client
+	databaseName string
+	shows        *azcosmos.ContainerClient
+	history      *azcosmos.ContainerClient
 }
 
-func New(ctx context.Context, dsn string) (*Store, error) {
-	cfg, err := pgxpool.ParseConfig(dsn)
+// New constructs a Store. endpoint is the Cosmos account URL
+// (https://<account>.documents.azure.com:443/) and databaseName is the
+// SQL database within it ("shows" by default).
+//
+// Credentials are resolved via DefaultAzureCredential, which picks up
+// the projected workload-identity token at /var/run/secrets/azure/tokens
+// when running in-cluster.
+func New(ctx context.Context, endpoint, databaseName string) (*Store, error) {
+	if endpoint == "" {
+		return nil, errors.New("store: empty Cosmos endpoint")
+	}
+	if databaseName == "" {
+		return nil, errors.New("store: empty database name")
+	}
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
-		return nil, fmt.Errorf("store: parse dsn: %w", err)
+		return nil, fmt.Errorf("store: credential: %w", err)
 	}
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	client, err := azcosmos.NewClient(endpoint, cred, nil)
 	if err != nil {
-		return nil, fmt.Errorf("store: connect: %w", err)
+		return nil, fmt.Errorf("store: cosmos client: %w", err)
 	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("store: ping: %w", err)
+	shows, err := client.NewContainer(databaseName, containerShows)
+	if err != nil {
+		return nil, fmt.Errorf("store: shows container: %w", err)
 	}
-	return &Store{pool: pool}, nil
+	history, err := client.NewContainer(databaseName, containerWatchHistory)
+	if err != nil {
+		return nil, fmt.Errorf("store: watch_history container: %w", err)
+	}
+	return &Store{
+		client:       client,
+		databaseName: databaseName,
+		shows:        shows,
+		history:      history,
+	}, nil
 }
 
-func (s *Store) Pool() *pgxpool.Pool { return s.pool }
-func (s *Store) Close()              { s.pool.Close() }
+// Ping does a lightweight check that the Cosmos endpoint is reachable
+// and the configured database exists. Used by the /readyz probe.
+func (s *Store) Ping(ctx context.Context) error {
+	db, err := s.client.NewDatabase(s.databaseName)
+	if err != nil {
+		return err
+	}
+	_, err = db.Read(ctx, nil)
+	return err
+}
 
-// ─── types ─────────────────────────────────────────────────────────
+// ─── document shapes ───────────────────────────────────────────────
+
+// showDoc is the on-disk representation; embedding Episodes as a
+// nested array keeps every advance to a single point-write. JSON
+// field names use snake_case to match the API and the legacy data.
+type showDoc struct {
+	ID         string       `json:"id"`
+	Playlist   string       `json:"playlist"`
+	Name       string       `json:"name"`
+	RootPath   string       `json:"root_path"`
+	DateAdded  time.Time    `json:"date_added"`
+	RemovedAt  *time.Time   `json:"removed_at,omitempty"`
+	CreatedAt  time.Time    `json:"created_at"`
+	Episodes   []episodeDoc `json:"episodes"`
+}
+
+type episodeDoc struct {
+	ID           string     `json:"id"`
+	RelativePath string     `json:"relative_path"`
+	Position     int        `json:"position"`
+	WatchedAt    *time.Time `json:"watched_at,omitempty"`
+}
+
+type historyDoc struct {
+	ID           string    `json:"id"`
+	ShowID       string    `json:"show_id"`
+	EpisodeID    string    `json:"episode_id"`
+	RelativePath string    `json:"relative_path"`
+	PlayedAt     time.Time `json:"played_at"`
+}
+
+// ─── public types ──────────────────────────────────────────────────
 
 type Playlist struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
+	Name string `json:"name"`
 }
 
 type Show struct {
-	ID         int64      `json:"id"`
-	PlaylistID int64      `json:"playlist_id"`
+	ID         string     `json:"id"`
+	Playlist   string     `json:"playlist"`
 	Name       string     `json:"name"`
 	RootPath   string     `json:"root_path"`
 	DateAdded  time.Time  `json:"date_added"`
 	RemovedAt  *time.Time `json:"removed_at,omitempty"`
 }
 
-// NextEpisode is one row of the round-selection query: a show plus its
-// first unwatched episode. Used by the round-ordering logic on the API
-// side; the same struct is JSON-serialized back to the client.
+// NextEpisode is one row of the round-selection: a show plus its first
+// unwatched episode. The Playlist is included so the client can echo
+// it back on advance (it's the partition key for the show doc).
 type NextEpisode struct {
-	ShowID       int64  `json:"show_id"`
+	ShowID       string `json:"show_id"`
 	ShowName     string `json:"show_name"`
-	EpisodeID    int64  `json:"episode_id"`
+	Playlist     string `json:"playlist"`
+	EpisodeID    string `json:"episode_id"`
 	RootPath     string `json:"root_path"`
 	RelativePath string `json:"relative_path"`
 }
 
 type HistoryEvent struct {
-	EpisodeID    int64     `json:"episode_id"`
+	EpisodeID    string    `json:"episode_id"`
 	RelativePath string    `json:"relative_path"`
 	PlayedAt     time.Time `json:"played_at"`
 }
 
-// AdvanceResult summarizes a /advance call: how many episodes were marked
-// watched, and which shows hit their last episode and were closed.
-type AdvanceResult struct {
-	AdvancedCount   int     `json:"advanced_count"`
-	RemovedShowIDs  []int64 `json:"removed_show_ids"`
+// AdvanceEntry is what the client posts back to /advance — one entry
+// per episode it just played. show_id is required because it's the
+// partition key for the show doc; the API can't derive it without an
+// extra round-trip otherwise.
+type AdvanceEntry struct {
+	ShowID    string `json:"show_id"`
+	EpisodeID string `json:"episode_id"`
 }
+
+type AdvanceResult struct {
+	AdvancedCount  int      `json:"advanced_count"`
+	RemovedShowIDs []string `json:"removed_show_ids"`
+}
+
+// ─── errors ────────────────────────────────────────────────────────
+
+var (
+	ErrPlaylistNotFound = errors.New("playlist not found")
+	ErrShowNotFound     = errors.New("show not found")
+	ErrEpisodeNotFound  = errors.New("episode not found")
+)
 
 // ─── playlists ─────────────────────────────────────────────────────
 
+// ListPlaylists returns the distinct playlist names that appear on any
+// show doc. Cross-partition aggregate — rare, called only by humans.
 func (s *Store) ListPlaylists(ctx context.Context) ([]Playlist, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id, name, created_at FROM playlists ORDER BY id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Playlist
-	for rows.Next() {
-		var p Playlist
-		if err := rows.Scan(&p.ID, &p.Name, &p.CreatedAt); err != nil {
+	pager := s.shows.NewQueryItemsPager(
+		"SELECT DISTINCT VALUE c.playlist FROM c",
+		azcosmos.NewPartitionKey(),
+		nil,
+	)
+	seen := map[string]struct{}{}
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, p)
+		for _, raw := range page.Items {
+			var name string
+			if err := json.Unmarshal(raw, &name); err != nil {
+				continue
+			}
+			seen[name] = struct{}{}
+		}
 	}
-	return out, rows.Err()
+	out := make([]Playlist, 0, len(seen))
+	for n := range seen {
+		out = append(out, Playlist{Name: n})
+	}
+	return out, nil
 }
 
-var ErrPlaylistNotFound = errors.New("playlist not found")
-
-func (s *Store) GetPlaylistByName(ctx context.Context, name string) (*Playlist, error) {
-	var p Playlist
-	err := s.pool.QueryRow(ctx,
-		`SELECT id, name, created_at FROM playlists WHERE name = $1`, name,
-	).Scan(&p.ID, &p.Name, &p.CreatedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrPlaylistNotFound
+// playlistExists is a convenience for endpoints that take a playlist
+// name in the URL — Cosmos has no first-class playlist entity, so we
+// approximate "this playlist exists" as "at least one show is in it."
+// Special-case the default "nelson" so an empty cluster still lets
+// /api/playlists/nelson/next-round return an empty round instead of 404.
+func (s *Store) playlistExists(ctx context.Context, name string) (bool, error) {
+	if name == "nelson" {
+		return true, nil
 	}
+	pager := s.shows.NewQueryItemsPager(
+		"SELECT VALUE COUNT(1) FROM c WHERE c.playlist = @pl",
+		azcosmos.NewPartitionKeyString(name),
+		&azcosmos.QueryOptions{
+			QueryParameters: []azcosmos.QueryParameter{{Name: "@pl", Value: name}},
+		},
+	)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, raw := range page.Items {
+			var n int
+			if err := json.Unmarshal(raw, &n); err != nil {
+				continue
+			}
+			if n > 0 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// GetPlaylistByName resolves a playlist by name. Today playlists are
+// just identifiers tagged onto show docs, so this is a thin wrapper
+// around playlistExists.
+func (s *Store) GetPlaylistByName(ctx context.Context, name string) (*Playlist, error) {
+	ok, err := s.playlistExists(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	return &p, nil
+	if !ok {
+		return nil, ErrPlaylistNotFound
+	}
+	return &Playlist{Name: name}, nil
 }
 
 // ─── shows ─────────────────────────────────────────────────────────
 
-func (s *Store) ListActiveShows(ctx context.Context, playlistID int64) ([]Show, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT id, playlist_id, name, root_path, date_added, removed_at
-		FROM shows
-		WHERE playlist_id = $1 AND removed_at IS NULL
-		ORDER BY id`, playlistID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+func (s *Store) ListActiveShows(ctx context.Context, playlist string) ([]Show, error) {
+	pager := s.shows.NewQueryItemsPager(
+		"SELECT * FROM c WHERE c.playlist = @pl AND (NOT IS_DEFINED(c.removed_at) OR IS_NULL(c.removed_at)) ORDER BY c.name",
+		azcosmos.NewPartitionKeyString(playlist),
+		&azcosmos.QueryOptions{
+			QueryParameters: []azcosmos.QueryParameter{{Name: "@pl", Value: playlist}},
+		},
+	)
 	var out []Show
-	for rows.Next() {
-		var sh Show
-		if err := rows.Scan(&sh.ID, &sh.PlaylistID, &sh.Name, &sh.RootPath, &sh.DateAdded, &sh.RemovedAt); err != nil {
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, sh)
+		for _, raw := range page.Items {
+			var d showDoc
+			if err := json.Unmarshal(raw, &d); err != nil {
+				return nil, err
+			}
+			out = append(out, showFromDoc(d))
+		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-var ErrShowNotFound = errors.New("show not found")
-
-func (s *Store) GetShow(ctx context.Context, id int64) (*Show, error) {
-	var sh Show
-	err := s.pool.QueryRow(ctx, `
-		SELECT id, playlist_id, name, root_path, date_added, removed_at
-		FROM shows WHERE id = $1`, id,
-	).Scan(&sh.ID, &sh.PlaylistID, &sh.Name, &sh.RootPath, &sh.DateAdded, &sh.RemovedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrShowNotFound
+func showFromDoc(d showDoc) Show {
+	return Show{
+		ID:        d.ID,
+		Playlist:  d.Playlist,
+		Name:      d.Name,
+		RootPath:  d.RootPath,
+		DateAdded: d.DateAdded,
+		RemovedAt: d.RemovedAt,
 	}
+}
+
+// GetShow does a point read when the caller knows the partition key.
+// Used by Advance, which has the playlist in context.
+func (s *Store) GetShow(ctx context.Context, playlist, id string) (*Show, error) {
+	d, err := s.readShow(ctx, playlist, id)
 	if err != nil {
 		return nil, err
 	}
-	return &sh, nil
+	out := showFromDoc(*d)
+	return &out, nil
 }
 
-// CreateShow inserts a new show plus its initial episode queue in a single
-// transaction. `episodes` is the ordered list of relative paths; positions
-// start at 0 and increment in input order.
-func (s *Store) CreateShow(
-	ctx context.Context,
-	playlistID int64,
-	name, rootPath string,
-	dateAdded time.Time,
-	episodes []string,
-) (*Show, error) {
-	tx, err := s.pool.Begin(ctx)
+// FindShow does a cross-partition lookup by id alone. Used by the
+// /api/shows/:id endpoints — humans don't always have the playlist on
+// hand. With ~40 shows in this single-user instance, the cross-
+// partition cost is trivial.
+func (s *Store) FindShow(ctx context.Context, id string) (*Show, error) {
+	d, err := s.findShowDoc(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx) // safe to call after Commit, becomes no-op
-
-	var sh Show
-	err = tx.QueryRow(ctx, `
-		INSERT INTO shows (playlist_id, name, root_path, date_added)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, playlist_id, name, root_path, date_added, removed_at`,
-		playlistID, name, rootPath, dateAdded,
-	).Scan(&sh.ID, &sh.PlaylistID, &sh.Name, &sh.RootPath, &sh.DateAdded, &sh.RemovedAt)
-	if err != nil {
-		return nil, fmt.Errorf("insert show: %w", err)
-	}
-
-	if err := insertEpisodes(ctx, tx, sh.ID, 0, episodes); err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
-	}
-	return &sh, nil
+	out := showFromDoc(*d)
+	return &out, nil
 }
 
-// AppendEpisodes adds episodes to an existing show's queue, continuing the
-// position sequence after the show's current MAX(position). Duplicate
-// relative_paths are silently skipped (UNIQUE constraint isn't on
-// relative_path because the legacy data has none, but in practice the
-// client filters dupes before calling — see cmd/shows-client/add).
-func (s *Store) AppendEpisodes(ctx context.Context, showID int64, episodes []string) (int, error) {
+func (s *Store) findShowDoc(ctx context.Context, id string) (*showDoc, error) {
+	pager := s.shows.NewQueryItemsPager(
+		"SELECT * FROM c WHERE c.id = @id",
+		azcosmos.NewPartitionKey(),
+		&azcosmos.QueryOptions{
+			QueryParameters: []azcosmos.QueryParameter{{Name: "@id", Value: id}},
+		},
+	)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, raw := range page.Items {
+			var d showDoc
+			if err := json.Unmarshal(raw, &d); err != nil {
+				return nil, err
+			}
+			return &d, nil
+		}
+	}
+	return nil, ErrShowNotFound
+}
+
+// AppendEpisodesByID is the cross-partition variant for the /api/shows/:id/episodes
+// endpoint that doesn't take a playlist context. Internally it looks
+// the show up, then delegates to the same write path.
+func (s *Store) AppendEpisodesByID(ctx context.Context, showID string, episodes []string) (int, error) {
 	if len(episodes) == 0 {
 		return 0, nil
 	}
-	tx, err := s.pool.Begin(ctx)
+	d, err := s.findShowDoc(ctx, showID)
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
+	return s.AppendEpisodes(ctx, d.Playlist, d.ID, episodes)
+}
 
-	var maxPos *int
-	err = tx.QueryRow(ctx,
-		`SELECT MAX(position) FROM episodes WHERE show_id = $1`, showID,
-	).Scan(&maxPos)
+func (s *Store) readShow(ctx context.Context, playlist, id string) (*showDoc, error) {
+	resp, err := s.shows.ReadItem(ctx, azcosmos.NewPartitionKeyString(playlist), id, nil)
+	if err != nil {
+		if isCosmosNotFound(err) {
+			return nil, ErrShowNotFound
+		}
+		return nil, err
+	}
+	var d showDoc
+	if err := json.Unmarshal(resp.Value, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+// CreateShow writes a new show doc with its initial episode queue.
+// Positions start at 0 and increment in input order. IDs are
+// server-generated UUIDs.
+func (s *Store) CreateShow(
+	ctx context.Context,
+	playlist, name, rootPath string,
+	dateAdded time.Time,
+	episodes []string,
+) (*Show, error) {
+	d := showDoc{
+		ID:        uuid.NewString(),
+		Playlist:  playlist,
+		Name:      name,
+		RootPath:  rootPath,
+		DateAdded: dateAdded.UTC(),
+		CreatedAt: time.Now().UTC(),
+		Episodes:  make([]episodeDoc, len(episodes)),
+	}
+	for i, rel := range episodes {
+		d.Episodes[i] = episodeDoc{
+			ID:           uuid.NewString(),
+			RelativePath: rel,
+			Position:     i,
+		}
+	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.shows.CreateItem(ctx, azcosmos.NewPartitionKeyString(playlist), raw, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create show: %w", err)
+	}
+	out := showFromDoc(d)
+	return &out, nil
+}
+
+// AppendEpisodes adds episodes to an existing show's queue. Positions
+// continue from the show's current max(position) + 1.
+func (s *Store) AppendEpisodes(ctx context.Context, playlist, showID string, episodes []string) (int, error) {
+	if len(episodes) == 0 {
+		return 0, nil
+	}
+	d, err := s.readShow(ctx, playlist, showID)
 	if err != nil {
 		return 0, err
 	}
 	start := 0
-	if maxPos != nil {
-		start = *maxPos + 1
+	for _, ep := range d.Episodes {
+		if ep.Position >= start {
+			start = ep.Position + 1
+		}
 	}
-
-	if err := insertEpisodes(ctx, tx, showID, start, episodes); err != nil {
-		return 0, err
+	for i, rel := range episodes {
+		d.Episodes = append(d.Episodes, episodeDoc{
+			ID:           uuid.NewString(),
+			RelativePath: rel,
+			Position:     start + i,
+		})
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := s.writeShow(ctx, d); err != nil {
 		return 0, err
 	}
 	return len(episodes), nil
 }
 
-func insertEpisodes(ctx context.Context, tx pgx.Tx, showID int64, startPos int, episodes []string) error {
-	if len(episodes) == 0 {
-		return nil
+func (s *Store) writeShow(ctx context.Context, d *showDoc) error {
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return err
 	}
-	// Multi-row INSERT — one round trip for the whole queue.
-	var b strings.Builder
-	b.WriteString(`INSERT INTO episodes (show_id, relative_path, position) VALUES `)
-	args := make([]any, 0, len(episodes)*3)
-	for i, ep := range episodes {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		off := i * 3
-		fmt.Fprintf(&b, "($%d, $%d, $%d)", off+1, off+2, off+3)
-		args = append(args, showID, ep, startPos+i)
-	}
-	if _, err := tx.Exec(ctx, b.String(), args...); err != nil {
-		return fmt.Errorf("insert episodes: %w", err)
-	}
-	return nil
+	_, err = s.shows.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(d.Playlist), d.ID, raw, nil)
+	return err
 }
 
 // ─── rounds ────────────────────────────────────────────────────────
 
-// NextEpisodes returns one row per active show in the playlist, each
-// pointing at the show's first unwatched episode. Returns an empty slice
-// if no shows are active (e.g., all queues drained).
-func (s *Store) NextEpisodes(ctx context.Context, playlistID int64) ([]NextEpisode, error) {
-	// DISTINCT ON gives us one row per show — the unwatched episode with
-	// the lowest position. ORDER BY show, position lets DISTINCT ON pick
-	// the right episode deterministically.
-	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT ON (s.id)
-			s.id,
-			s.name,
-			e.id,
-			s.root_path,
-			e.relative_path
-		FROM shows s
-		JOIN episodes e ON e.show_id = s.id
-		WHERE s.playlist_id = $1
-		  AND s.removed_at IS NULL
-		  AND e.watched_at IS NULL
-		ORDER BY s.id, e.position`, playlistID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// NextEpisodes returns one entry per active show: the show's first
+// unwatched episode (lowest position with watched_at unset). Empty
+// result if every show in the playlist has been drained.
+func (s *Store) NextEpisodes(ctx context.Context, playlist string) ([]NextEpisode, error) {
+	pager := s.shows.NewQueryItemsPager(
+		"SELECT * FROM c WHERE c.playlist = @pl AND (NOT IS_DEFINED(c.removed_at) OR IS_NULL(c.removed_at))",
+		azcosmos.NewPartitionKeyString(playlist),
+		&azcosmos.QueryOptions{
+			QueryParameters: []azcosmos.QueryParameter{{Name: "@pl", Value: playlist}},
+		},
+	)
 	var out []NextEpisode
-	for rows.Next() {
-		var n NextEpisode
-		if err := rows.Scan(&n.ShowID, &n.ShowName, &n.EpisodeID, &n.RootPath, &n.RelativePath); err != nil {
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, n)
+		for _, raw := range page.Items {
+			var d showDoc
+			if err := json.Unmarshal(raw, &d); err != nil {
+				return nil, err
+			}
+			ep := firstUnwatched(d.Episodes)
+			if ep == nil {
+				// All episodes watched but show not yet tombstoned —
+				// could happen if a previous advance race left the
+				// removed_at unset. Skip; the next advance call will
+				// tombstone correctly.
+				continue
+			}
+			out = append(out, NextEpisode{
+				ShowID:       d.ID,
+				ShowName:     d.Name,
+				Playlist:     d.Playlist,
+				EpisodeID:    ep.ID,
+				RootPath:     d.RootPath,
+				RelativePath: ep.RelativePath,
+			})
+		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-// Advance marks the given episode IDs as watched, appends to watch_history,
-// and tombstones any show whose queue is now empty.
+func firstUnwatched(eps []episodeDoc) *episodeDoc {
+	var best *episodeDoc
+	for i := range eps {
+		if eps[i].WatchedAt != nil {
+			continue
+		}
+		if best == nil || eps[i].Position < best.Position {
+			best = &eps[i]
+		}
+	}
+	return best
+}
+
+// Advance marks the given (show_id, episode_id) pairs as watched,
+// appends to watch_history, and tombstones any show whose queue is
+// now empty.
 //
-// The episode IDs must all be valid "first unwatched" episodes — the API
-// computes them from NextEpisodes immediately before calling Advance. We
-// don't re-validate here; the caller's freshly-computed list is the
-// authority. Passing stale IDs would just no-op (the UPDATE finds nothing
-// to update for already-watched rows).
-func (s *Store) Advance(ctx context.Context, episodeIDs []int64) (*AdvanceResult, error) {
-	if len(episodeIDs) == 0 {
+// Implementation: per-show read-modify-write loop. With ~40 active
+// shows and 1 advance/day, the per-call cost is dominated by network
+// round-trips, not Cosmos RU. No optimistic concurrency control —
+// single-user, single-process, no concurrent advances expected.
+func (s *Store) Advance(ctx context.Context, playlist string, entries []AdvanceEntry) (*AdvanceResult, error) {
+	if len(entries) == 0 {
 		return &AdvanceResult{}, nil
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return nil, err
+	// Group by show_id so we read each show doc once even if a future
+	// version of the API ever advances multiple episodes per show in
+	// the same call. Today rounds are one-episode-per-show.
+	byShow := map[string][]string{}
+	for _, e := range entries {
+		byShow[e.ShowID] = append(byShow[e.ShowID], e.EpisodeID)
 	}
-	defer tx.Rollback(ctx)
 
 	now := time.Now().UTC()
+	result := &AdvanceResult{}
 
-	// Mark watched.
-	tag, err := tx.Exec(ctx,
-		`UPDATE episodes SET watched_at = $1 WHERE id = ANY($2::bigint[]) AND watched_at IS NULL`,
-		now, episodeIDs,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("update episodes: %w", err)
-	}
-	advanced := int(tag.RowsAffected())
-
-	// Record history.
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO watch_history (episode_id, played_at)
-		SELECT e.id, $1 FROM episodes e WHERE e.id = ANY($2::bigint[])`,
-		now, episodeIDs,
-	); err != nil {
-		return nil, fmt.Errorf("insert history: %w", err)
-	}
-
-	// Tombstone any show whose queue is now empty. The subquery finds
-	// shows touched by this advance that no longer have any unwatched
-	// episodes. Returning gives us the IDs to surface in the response.
-	rows, err := tx.Query(ctx, `
-		UPDATE shows
-		SET removed_at = $1
-		WHERE removed_at IS NULL
-		  AND id IN (
-		      SELECT DISTINCT show_id FROM episodes WHERE id = ANY($2::bigint[])
-		  )
-		  AND NOT EXISTS (
-		      SELECT 1 FROM episodes
-		      WHERE show_id = shows.id AND watched_at IS NULL
-		  )
-		RETURNING id`, now, episodeIDs)
-	if err != nil {
-		return nil, fmt.Errorf("close shows: %w", err)
-	}
-	var removed []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, err
+	for showID, episodeIDs := range byShow {
+		d, err := s.readShow(ctx, playlist, showID)
+		if err != nil {
+			if errors.Is(err, ErrShowNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("advance: read %s: %w", showID, err)
 		}
-		removed = append(removed, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, err
+		var historyToWrite []historyDoc
+		advancedHere := 0
+		for _, epID := range episodeIDs {
+			for i := range d.Episodes {
+				if d.Episodes[i].ID != epID {
+					continue
+				}
+				if d.Episodes[i].WatchedAt != nil {
+					break
+				}
+				d.Episodes[i].WatchedAt = &now
+				advancedHere++
+				historyToWrite = append(historyToWrite, historyDoc{
+					ID:           uuid.NewString(),
+					ShowID:       d.ID,
+					EpisodeID:    d.Episodes[i].ID,
+					RelativePath: d.Episodes[i].RelativePath,
+					PlayedAt:     now,
+				})
+				break
+			}
+		}
+		if advancedHere == 0 {
+			continue
+		}
+
+		if allWatched(d.Episodes) {
+			d.RemovedAt = &now
+			result.RemovedShowIDs = append(result.RemovedShowIDs, d.ID)
+		}
+
+		if err := s.writeShow(ctx, d); err != nil {
+			return nil, fmt.Errorf("advance: write %s: %w", showID, err)
+		}
+		for _, h := range historyToWrite {
+			raw, err := json.Marshal(h)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := s.history.CreateItem(ctx, azcosmos.NewPartitionKeyString(h.ShowID), raw, nil); err != nil {
+				return nil, fmt.Errorf("advance: write history: %w", err)
+			}
+		}
+		result.AdvancedCount += advancedHere
 	}
-	return &AdvanceResult{AdvancedCount: advanced, RemovedShowIDs: removed}, nil
+	return result, nil
 }
 
-func (s *Store) ShowHistory(ctx context.Context, showID int64) ([]HistoryEvent, error) {
-	rows, err := s.pool.Query(ctx, `
-		SELECT e.id, e.relative_path, h.played_at
-		FROM watch_history h
-		JOIN episodes e ON e.id = h.episode_id
-		WHERE e.show_id = $1
-		ORDER BY h.played_at`, showID)
-	if err != nil {
-		return nil, err
+func allWatched(eps []episodeDoc) bool {
+	for _, e := range eps {
+		if e.WatchedAt == nil {
+			return false
+		}
 	}
-	defer rows.Close()
+	return true
+}
+
+// ShowHistory returns the per-show play log ordered by played_at.
+func (s *Store) ShowHistory(ctx context.Context, showID string) ([]HistoryEvent, error) {
+	pager := s.history.NewQueryItemsPager(
+		"SELECT * FROM c WHERE c.show_id = @s ORDER BY c.played_at",
+		azcosmos.NewPartitionKeyString(showID),
+		&azcosmos.QueryOptions{
+			QueryParameters: []azcosmos.QueryParameter{{Name: "@s", Value: showID}},
+		},
+	)
 	var out []HistoryEvent
-	for rows.Next() {
-		var ev HistoryEvent
-		if err := rows.Scan(&ev.EpisodeID, &ev.RelativePath, &ev.PlayedAt); err != nil {
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, ev)
+		for _, raw := range page.Items {
+			var d historyDoc
+			if err := json.Unmarshal(raw, &d); err != nil {
+				return nil, err
+			}
+			out = append(out, HistoryEvent{
+				EpisodeID:    d.EpisodeID,
+				RelativePath: d.RelativePath,
+				PlayedAt:     d.PlayedAt,
+			})
+		}
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+// ─── helpers ───────────────────────────────────────────────────────
+
+// isCosmosNotFound returns true if err is a 404 from the Cosmos SDK.
+// The SDK wraps the HTTP status on *azcore.ResponseError; check it
+// explicitly rather than relying on string matching.
+func isCosmosNotFound(err error) bool {
+	var rerr *azcore.ResponseError
+	if errors.As(err, &rerr) {
+		return rerr.StatusCode == 404
+	}
+	return strings.Contains(err.Error(), "404")
 }

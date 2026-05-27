@@ -63,10 +63,10 @@ func TestJoinPath(t *testing.T) {
 
 func TestSort_Deterministic(t *testing.T) {
 	in := []Candidate{
-		{EpisodeID: 1, ShowID: 10, RootPath: `D:\A`, RelativePath: `a.mkv`},
-		{EpisodeID: 2, ShowID: 20, RootPath: `D:\B`, RelativePath: `b.mkv`},
-		{EpisodeID: 3, ShowID: 30, RootPath: `D:\C`, RelativePath: `c.mkv`},
-		{EpisodeID: 4, ShowID: 40, RootPath: `D:\D`, RelativePath: `d.mkv`},
+		{EpisodeID: "e1", ShowID: "s1", RootPath: `D:\A`, RelativePath: `a.mkv`},
+		{EpisodeID: "e2", ShowID: "s2", RootPath: `D:\B`, RelativePath: `b.mkv`},
+		{EpisodeID: "e3", ShowID: "s3", RootPath: `D:\C`, RelativePath: `c.mkv`},
+		{EpisodeID: "e4", ShowID: "s4", RootPath: `D:\D`, RelativePath: `d.mkv`},
 	}
 	first := Sort(in)
 	second := Sort(in)
@@ -75,7 +75,7 @@ func TestSort_Deterministic(t *testing.T) {
 	}
 	for i := range first {
 		if first[i].EpisodeID != second[i].EpisodeID {
-			t.Fatalf("non-deterministic at idx %d: %d vs %d", i, first[i].EpisodeID, second[i].EpisodeID)
+			t.Fatalf("non-deterministic at idx %d: %s vs %s", i, first[i].EpisodeID, second[i].EpisodeID)
 		}
 	}
 	for i := 1; i < len(first); i++ {
@@ -87,17 +87,18 @@ func TestSort_Deterministic(t *testing.T) {
 }
 
 func TestSort_TieBreakOnEpisodeID(t *testing.T) {
-	// Force a tie by reusing the same path.
+	// Force a tie by reusing the same path. Tie-break is lexical on the
+	// string EpisodeID, so "a" < "b" < "c".
 	in := []Candidate{
-		{EpisodeID: 5, ShowID: 1, RootPath: `D:\X`, RelativePath: `same.mkv`},
-		{EpisodeID: 2, ShowID: 2, RootPath: `D:\X`, RelativePath: `same.mkv`},
-		{EpisodeID: 9, ShowID: 3, RootPath: `D:\X`, RelativePath: `same.mkv`},
+		{EpisodeID: "c", ShowID: "s1", RootPath: `D:\X`, RelativePath: `same.mkv`},
+		{EpisodeID: "a", ShowID: "s2", RootPath: `D:\X`, RelativePath: `same.mkv`},
+		{EpisodeID: "b", ShowID: "s3", RootPath: `D:\X`, RelativePath: `same.mkv`},
 	}
 	got := Sort(in)
-	wantIDs := []int64{2, 5, 9}
+	wantIDs := []string{"a", "b", "c"}
 	for i, w := range wantIDs {
 		if got[i].EpisodeID != w {
-			t.Fatalf("idx %d: got EpisodeID=%d, want %d", i, got[i].EpisodeID, w)
+			t.Fatalf("idx %d: got EpisodeID=%q, want %q", i, got[i].EpisodeID, w)
 		}
 	}
 }

@@ -152,11 +152,11 @@ func runPlay(ctx context.Context, args []string) error {
 			return err
 		}
 
-		ids := make([]int64, len(round))
+		entries := make([]advanceEntry, len(round))
 		for i, r := range round {
-			ids[i] = r.EpisodeID
+			entries[i] = advanceEntry{ShowID: r.ShowID, EpisodeID: r.EpisodeID}
 		}
-		adv, err := api.advance(ctx, *playlist, ids)
+		adv, err := api.advance(ctx, *playlist, entries)
 		if err != nil {
 			return fmt.Errorf("advance: %w", err)
 		}
@@ -288,9 +288,9 @@ func (a *apiClient) do(ctx context.Context, method, path string, body any, out a
 }
 
 type roundEntry struct {
-	ShowID       int64  `json:"show_id"`
+	ShowID       string `json:"show_id"`
 	ShowName     string `json:"show_name"`
-	EpisodeID    int64  `json:"episode_id"`
+	EpisodeID    string `json:"episode_id"`
 	AbsolutePath string `json:"absolute_path"`
 	OrderValue   uint32 `json:"order_value"`
 }
@@ -307,22 +307,27 @@ func (a *apiClient) nextRound(ctx context.Context, playlist string) ([]roundEntr
 	return resp.Round, nil
 }
 
+type advanceEntry struct {
+	ShowID    string `json:"show_id"`
+	EpisodeID string `json:"episode_id"`
+}
+
 type advanceResponse struct {
 	AdvancedCount int           `json:"advanced_count"`
 	RemovedShows  []removedShow `json:"removed_shows"`
 }
 
 type removedShow struct {
-	ID           int64     `json:"id"`
+	ID           string    `json:"id"`
 	Name         string    `json:"name"`
 	DateAdded    time.Time `json:"date_added"`
 	LastPlayedAt time.Time `json:"last_played_at"`
 }
 
-func (a *apiClient) advance(ctx context.Context, playlist string, ids []int64) (advanceResponse, error) {
+func (a *apiClient) advance(ctx context.Context, playlist string, entries []advanceEntry) (advanceResponse, error) {
 	var resp advanceResponse
 	err := a.do(ctx, http.MethodPost, "/api/playlists/"+playlist+"/advance",
-		map[string]any{"episode_ids": ids}, &resp)
+		map[string]any{"entries": entries}, &resp)
 	return resp, err
 }
 

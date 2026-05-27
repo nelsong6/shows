@@ -200,7 +200,7 @@ type migrateRequest struct {
 
 type migrateResult struct {
 	Name  string `json:"name"`
-	ID    int64  `json:"id,omitempty"`
+	ID    string `json:"id,omitempty"`
 	Error string `json:"error,omitempty"`
 }
 
@@ -240,7 +240,7 @@ func reportResults(res *migrateResponse) {
 			continue
 		}
 		ok++
-		fmt.Fprintf(os.Stderr, "  [ok]   %-30s  id=%d\n", truncate(r.Name, 30), r.ID)
+		fmt.Fprintf(os.Stderr, "  [ok]   %-30s  id=%s\n", truncate(r.Name, 30), r.ID)
 	}
 	fmt.Fprintf(os.Stderr, "\n%d imported, %d failed\n", ok, len(res.Results)-ok)
 }

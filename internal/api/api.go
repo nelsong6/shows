@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -36,13 +35,11 @@ func (s *Server) Router() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(30 * time.Second))
 
-	// Probes — unauthenticated.
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
 	r.Get("/readyz", s.handleReady)
 
-	// Authenticated surface.
 	r.Route("/api", func(r chi.Router) {
 		r.Use(auth.Middleware(s.Verifier))
 
@@ -76,15 +73,6 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func parseInt64Param(r *http.Request, key string) (int64, error) {
-	raw := chi.URLParam(r, key)
-	id, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %q", key, raw)
-	}
-	return id, nil
-}
-
 func (s *Server) requirePlaylist(w http.ResponseWriter, r *http.Request) *store.Playlist {
 	name := chi.URLParam(r, "name")
 	p, err := s.Store.GetPlaylistByName(r.Context(), name)
@@ -102,7 +90,7 @@ func (s *Server) requirePlaylist(w http.ResponseWriter, r *http.Request) *store.
 // ─── probes ────────────────────────────────────────────────────────
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	if err := s.Store.Pool().Ping(r.Context()); err != nil {
+	if err := s.Store.Ping(r.Context()); err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "db unreachable")
 		return
 	}
@@ -125,7 +113,7 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 	if p == nil {
 		return
 	}
-	shows, err := s.Store.ListActiveShows(r.Context(), p.ID)
+	shows, err := s.Store.ListActiveShows(r.Context(), p.Name)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -136,13 +124,14 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// RoundEntry is one episode in a next-round response, including the
-// absolute path the client feeds to mpv and the deterministic order_value
-// so the client (or a future debug UI) can verify the ordering.
+// RoundEntry is one episode in a next-round response. show_id is the
+// partition key of the show doc; the client echoes both ids back on
+// advance so the API can do point operations without a cross-partition
+// scan.
 type RoundEntry struct {
-	ShowID       int64  `json:"show_id"`
+	ShowID       string `json:"show_id"`
 	ShowName     string `json:"show_name"`
-	EpisodeID    int64  `json:"episode_id"`
+	EpisodeID    string `json:"episode_id"`
 	AbsolutePath string `json:"absolute_path"`
 	OrderValue   uint32 `json:"order_value"`
 }
@@ -152,7 +141,7 @@ func (s *Server) handleNextRound(w http.ResponseWriter, r *http.Request) {
 	if p == nil {
 		return
 	}
-	next, err := s.Store.NextEpisodes(r.Context(), p.ID)
+	next, err := s.Store.NextEpisodes(r.Context(), p.Name)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -174,7 +163,7 @@ func (s *Server) handleNextRound(w http.ResponseWriter, r *http.Request) {
 	ordered := ordering.Sort(cands)
 
 	// Map back ShowName from the store rows (Candidate doesn't carry it).
-	nameByEpisode := make(map[int64]string, len(next))
+	nameByEpisode := make(map[string]string, len(next))
 	for _, n := range next {
 		nameByEpisode[n.EpisodeID] = n.ShowName
 	}
@@ -193,14 +182,14 @@ func (s *Server) handleNextRound(w http.ResponseWriter, r *http.Request) {
 }
 
 type advanceRequest struct {
-	EpisodeIDs []int64 `json:"episode_ids"`
+	Entries []store.AdvanceEntry `json:"entries"`
 }
 
 // RemovedShow is the per-show payload on /advance when a show's queue
 // emptied. Lets the client render the "this show took N days to watch"
 // reveal without a follow-up request.
 type RemovedShow struct {
-	ID           int64     `json:"id"`
+	ID           string    `json:"id"`
 	Name         string    `json:"name"`
 	DateAdded    time.Time `json:"date_added"`
 	LastPlayedAt time.Time `json:"last_played_at"`
@@ -216,12 +205,12 @@ func (s *Server) handleAdvance(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if len(req.EpisodeIDs) == 0 {
-		writeErr(w, http.StatusBadRequest, "episode_ids is required")
+	if len(req.Entries) == 0 {
+		writeErr(w, http.StatusBadRequest, "entries is required")
 		return
 	}
 
-	result, err := s.Store.Advance(r.Context(), req.EpisodeIDs)
+	result, err := s.Store.Advance(r.Context(), p.Name, req.Entries)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -231,10 +220,8 @@ func (s *Server) handleAdvance(w http.ResponseWriter, r *http.Request) {
 	// reveal. One row per show that just got tombstoned.
 	removed := make([]RemovedShow, 0, len(result.RemovedShowIDs))
 	for _, id := range result.RemovedShowIDs {
-		sh, err := s.Store.GetShow(r.Context(), id)
+		sh, err := s.Store.GetShow(r.Context(), p.Name, id)
 		if err != nil {
-			// The show was just updated in the same tx as advance; a
-			// not-found here would be a real bug. Surface and move on.
 			continue
 		}
 		history, err := s.Store.ShowHistory(r.Context(), id)
@@ -279,16 +266,7 @@ func (s *Server) handleCreateShow(w http.ResponseWriter, r *http.Request) {
 	if req.DateAdded.IsZero() {
 		req.DateAdded = time.Now().UTC()
 	}
-	p, err := s.Store.GetPlaylistByName(r.Context(), req.Playlist)
-	if errors.Is(err, store.ErrPlaylistNotFound) {
-		writeErr(w, http.StatusNotFound, "playlist not found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	sh, err := s.Store.CreateShow(r.Context(), p.ID, req.Name, req.RootPath, req.DateAdded, req.Episodes)
+	sh, err := s.Store.CreateShow(r.Context(), req.Playlist, req.Name, req.RootPath, req.DateAdded, req.Episodes)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -297,12 +275,12 @@ func (s *Server) handleCreateShow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetShow(w http.ResponseWriter, r *http.Request) {
-	id, err := parseInt64Param(r, "id")
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
-	sh, err := s.Store.GetShow(r.Context(), id)
+	sh, err := s.Store.FindShow(r.Context(), id)
 	if errors.Is(err, store.ErrShowNotFound) {
 		writeErr(w, http.StatusNotFound, "show not found")
 		return
@@ -319,9 +297,9 @@ type appendEpisodesRequest struct {
 }
 
 func (s *Server) handleAppendEpisodes(w http.ResponseWriter, r *http.Request) {
-	id, err := parseInt64Param(r, "id")
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	var req appendEpisodesRequest
@@ -333,7 +311,11 @@ func (s *Server) handleAppendEpisodes(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "episodes is required")
 		return
 	}
-	n, err := s.Store.AppendEpisodes(r.Context(), id, req.Episodes)
+	n, err := s.Store.AppendEpisodesByID(r.Context(), id, req.Episodes)
+	if errors.Is(err, store.ErrShowNotFound) {
+		writeErr(w, http.StatusNotFound, "show not found")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -342,9 +324,9 @@ func (s *Server) handleAppendEpisodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleShowHistory(w http.ResponseWriter, r *http.Request) {
-	id, err := parseInt64Param(r, "id")
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id is required")
 		return
 	}
 	hist, err := s.Store.ShowHistory(r.Context(), id)
@@ -358,13 +340,13 @@ func (s *Server) handleShowHistory(w http.ResponseWriter, r *http.Request) {
 // ─── migrate ───────────────────────────────────────────────────────
 
 type migrateRequest struct {
-	Playlist string            `json:"playlist"`
-	Shows    []createShowRequest `json:"shows"`
+	Playlist string                `json:"playlist"`
+	Shows    []createShowRequest   `json:"shows"`
 }
 
 // handleMigrateFromJSON is the bulk-import endpoint cmd/shows-migrate
-// posts to. Each show is created in its own transaction; partial success
-// is possible (failed shows are reported in the response).
+// posts to. Each show is created in its own write; partial success is
+// possible (failed shows are reported in the response).
 func (s *Server) handleMigrateFromJSON(w http.ResponseWriter, r *http.Request) {
 	var req migrateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -375,19 +357,10 @@ func (s *Server) handleMigrateFromJSON(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "playlist and shows are required")
 		return
 	}
-	p, err := s.Store.GetPlaylistByName(r.Context(), req.Playlist)
-	if errors.Is(err, store.ErrPlaylistNotFound) {
-		writeErr(w, http.StatusNotFound, "playlist not found")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 
 	type result struct {
 		Name  string `json:"name"`
-		ID    int64  `json:"id,omitempty"`
+		ID    string `json:"id,omitempty"`
 		Error string `json:"error,omitempty"`
 	}
 	out := make([]result, 0, len(req.Shows))
@@ -396,7 +369,7 @@ func (s *Server) handleMigrateFromJSON(w http.ResponseWriter, r *http.Request) {
 		if da.IsZero() {
 			da = time.Now().UTC()
 		}
-		created, err := s.Store.CreateShow(r.Context(), p.ID, sh.Name, sh.RootPath, da, sh.Episodes)
+		created, err := s.Store.CreateShow(r.Context(), req.Playlist, sh.Name, sh.RootPath, da, sh.Episodes)
 		if err != nil {
 			out = append(out, result{Name: sh.Name, Error: err.Error()})
 			continue
@@ -405,3 +378,6 @@ func (s *Server) handleMigrateFromJSON(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": out})
 }
+
+// silence imports when only used via store types
+var _ = fmt.Sprintf

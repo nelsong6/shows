@@ -19,6 +19,10 @@ spec:
     metadata:
       labels:
         app: shows
+        # azwi keys on this pod label to project the workload-identity
+        # token volume. Without it, the SA annotation on its own does
+        # nothing.
+        azure.workload.identity/use: "true"
     spec:
       serviceAccountName: shows
       containers:
@@ -31,14 +35,13 @@ spec:
           env:
             - name: PORT
               value: "8080"
-            # CNPG-managed: `shows-db-app` Secret is created automatically
-            # by the operator from cluster.yaml. The `uri` key is a libpq
-            # connection string the pgx driver understands directly.
-            - name: DATABASE_URL
-              valueFrom:
-                secretKeyRef:
-                  name: shows-db-app
-                  key: uri
+            # Cosmos client config. DefaultAzureCredential will pick up
+            # the projected SA token and exchange it for a data-plane
+            # token scoped to dbs/shows (see tofu/db.tf).
+            - name: COSMOS_ENDPOINT
+              value: {{ .Values.cosmos.endpoint | quote }}
+            - name: COSMOS_DATABASE
+              value: {{ .Values.cosmos.database | quote }}
             - name: AUTH_ROMAINE_LIFE_ISSUER
               value: {{ .Values.auth.issuer | quote }}
             - name: AUTH_ROMAINE_LIFE_JWKS_URL
