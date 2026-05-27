@@ -1,11 +1,14 @@
 name: Build Desktop
 
-# Build shows-desktop on every change under desktop/ and publish the resulting
-# shows.exe + libmpv-2.dll as a workflow artifact you can pull straight off the
-# run page — no local toolchain dance.
+# Cross-compiles shows-desktop for Windows from a Linux runner, the same
+# shape as build-and-deploy.yaml — `ubuntu-latest`, native package tools,
+# no third-party actions for the toolchain (egor-tensin/setup-mingw is
+# broken on mingw 15.x; we apt-install mingw-w64 directly instead).
 #
-# Local dev still uses desktop/scripts/build.ps1 directly; this workflow just
-# invokes that same script under a Windows runner with libmpv cached.
+# Output: shows.exe + libmpv-2.dll as a workflow artifact you can pull
+# off the run page — no local Wails/mingw/libmpv setup needed.
+#
+# Local dev still uses desktop/scripts/build.ps1 on Windows directly.
 
 on:
   push:
@@ -18,16 +21,62 @@ on:
       - desktop/**
       - .github/workflows/build-desktop.yaml
   workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref or commit SHA to build. Leave blank to build the dispatch revision."
+        required: false
+        type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: build-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    name: Build shows-desktop
-    runs-on: windows-latest
+    name: Cross-compile shows-desktop for Windows
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve requested ref
+        env:
+          INPUT_REF: ${{ inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin '+refs/heads/*:refs/remotes/origin/*'
+
+          target_ref="${INPUT_REF:-$GITHUB_SHA}"
+          if full_sha="$(git rev-parse --verify "${target_ref}^{commit}" 2>/dev/null)"; then
+            :
+          elif git show-ref --verify --quiet "refs/remotes/origin/${target_ref}"; then
+            full_sha="$(git rev-parse "refs/remotes/origin/${target_ref}^{commit}")"
+          elif git show-ref --verify --quiet "refs/tags/${target_ref}"; then
+            full_sha="$(git rev-parse "refs/tags/${target_ref}^{commit}")"
+          else
+            echo "::error::Unable to resolve git_ref '${target_ref}' to a commit."
+            exit 1
+          fi
+
+          git checkout --detach "$full_sha"
+          echo "resolved ${target_ref} -> ${full_sha}"
+
+      # Cross-compile toolchain. mingw-w64 provides x86_64-w64-mingw32-gcc
+      # (used by cgo for the libmpv Go binding); p7zip-full unpacks the
+      # libmpv .7z bundle. Pinned to whatever Ubuntu ships — these are
+      # stable enough that floating with the runner image is fine.
+      - name: Install cross-compile toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mingw-w64 \
+            p7zip-full
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -42,45 +91,57 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/frontend/package-lock.json
 
-      # Wails CLI generates the TS bindings + drives `go build` with the right
-      # embed flags. Pinned to v2 — same line the desktop module imports.
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
-      # libmpv's Go binding is cgo. Local dev uses scoop's mingw; in CI we use
-      # setup-mingw so we don't depend on the runner image happening to ship a
-      # specific gcc. The outputs.gcc value is the full path to gcc.exe; we
-      # take dirname for SHOWS_MINGW_BIN.
-      - name: Setup MinGW (cgo toolchain for libmpv bindings)
-        id: mingw
-        uses: egor-tensin/setup-mingw@v2
-        with:
-          platform: x64
-
-      # libmpv is ~80MB to download and unpack — cache it across runs keyed
-      # on the version + git hash hard-coded in setup-libmpv.ps1. Bump the
-      # key when that script bumps libmpv.
+      # libmpv-dev for Windows ships as a .7z on SourceForge. Same URL +
+      # version pin as desktop/scripts/setup-libmpv.ps1 — bump both at once.
+      # Cached across runs so the ~80MB download doesn't re-occur on every
+      # build; the cache key embeds the version+hash for safe invalidation.
       - name: Cache libmpv runtime
         id: libmpv-cache
         uses: actions/cache@v4
         with:
           path: desktop/third_party/libmpv
-          key: libmpv-20250420-3600c71
+          key: libmpv-windows-20250420-3600c71
 
       - name: Fetch libmpv (cold cache only)
         if: steps.libmpv-cache.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: desktop/scripts/setup-libmpv.ps1
-
-      # build.ps1 already honors SHOWS_SKIP_LIBMPV_SETUP and SHOWS_MINGW_BIN
-      # for exactly this use case. We set both and let the script do the rest.
-      - name: Build
-        shell: pwsh
-        env:
-          SHOWS_SKIP_LIBMPV_SETUP: '1'
         run: |
-          $env:SHOWS_MINGW_BIN = Split-Path -Parent '${{ steps.mingw.outputs.gcc }}'
-          desktop/scripts/build.ps1
+          set -euo pipefail
+          version=20250420
+          hash=3600c71
+          file="mpv-dev-x86_64-${version}-git-${hash}.7z"
+          url="https://master.dl.sourceforge.net/project/mpv-player-windows/libmpv/${file}?viasf=1"
+          mkdir -p desktop/third_party/libmpv
+          curl -fSL -o /tmp/libmpv.7z "$url"
+          7z x /tmp/libmpv.7z -odesktop/third_party/libmpv -y
+          rm /tmp/libmpv.7z
+          test -f desktop/third_party/libmpv/libmpv-2.dll
+
+      # `wails build -platform windows/amd64` calls go build with the
+      # GOOS=windows GOARCH=amd64 env set. cgo additionally needs CC pointed
+      # at mingw's gcc and CGO_*FLAGS pointed at libmpv. The frontend's TS
+      # bindings under desktop/frontend/wailsjs/ are committed, so
+      # `-skipbindings` keeps wails from trying to run the Windows binary
+      # on Linux to re-introspect them.
+      - name: Build (cross-compile)
+        working-directory: desktop
+        env:
+          CGO_ENABLED: '1'
+          CC: x86_64-w64-mingw32-gcc
+          CXX: x86_64-w64-mingw32-g++
+        run: |
+          set -euo pipefail
+          libmpv="$(pwd)/third_party/libmpv"
+          export CGO_CFLAGS="-I${libmpv}/include"
+          export CGO_LDFLAGS="-L${libmpv} -lmpv"
+          wails build -platform windows/amd64 -skipbindings -clean
+          test -f build/bin/shows.exe
+
+      - name: Bundle libmpv-2.dll alongside shows.exe
+        working-directory: desktop
+        run: cp third_party/libmpv/libmpv-2.dll build/bin/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
