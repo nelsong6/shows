@@ -5,3 +5,7 @@
 export function GetStatus() {
   return window['go']['main']['App']['GetStatus']();
 }
+
+export function ListShows() {
+  return window['go']['main']['App']['ListShows']();
+}

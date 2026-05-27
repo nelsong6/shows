@@ -38,10 +38,9 @@ type App struct {
 
 	mu     sync.Mutex
 	player *player.Player
+	client *apiclient.Client
 	cancel context.CancelFunc
 
-	// status mirrors the runner state so the frontend can render
-	// something useful before/during/after a round.
 	statusMu sync.RWMutex
 	status   Status
 }
@@ -49,16 +48,17 @@ type App struct {
 // Status is the snapshot the frontend polls (or subscribes to via
 // Wails events) to render itself.
 type Status struct {
-	Phase        string                 `json:"phase"` // initializing|auth|fetching|playing|drained|error
-	Message      string                 `json:"message"`
-	Round        []apiclient.RoundEntry `json:"round,omitempty"`
-	LastAdvance  *apiclient.AdvanceResult `json:"last_advance,omitempty"`
+	Phase       string                   `json:"phase"` // initializing|auth|fetching|playing|drained|error
+	Message     string                   `json:"message"`
+	Playlist    string                   `json:"playlist"`
+	Round       []apiclient.RoundEntry   `json:"round,omitempty"`
+	LastAdvance *apiclient.AdvanceResult `json:"last_advance,omitempty"`
 }
 
 func NewApp() *App {
 	return &App{
 		logger: slog.New(slog.NewJSONHandler(os.Stderr, nil)),
-		status: Status{Phase: "initializing", Message: "starting up"},
+		status: Status{Phase: "initializing", Message: "starting up", Playlist: defaultPlaylist},
 	}
 }
 
@@ -133,6 +133,10 @@ func (a *App) runForever(ctx context.Context) {
 	}
 
 	client := apiclient.New("", tok.Token)
+	a.mu.Lock()
+	a.client = client
+	a.mu.Unlock()
+
 	r := &playlist.Runner{
 		Client:   client,
 		Player:   a.player,
@@ -140,19 +144,22 @@ func (a *App) runForever(ctx context.Context) {
 		Logger:   a.logger,
 		OnRound: func(round []apiclient.RoundEntry) {
 			a.statusMu.Lock()
-			a.status = Status{Phase: "playing", Message: fmt.Sprintf("round of %d", len(round)), Round: round}
+			a.status.Phase = "playing"
+			a.status.Message = fmt.Sprintf("round of %d", len(round))
+			a.status.Round = round
+			snapshot := a.status
 			a.statusMu.Unlock()
-			wruntime.EventsEmit(a.ctx, "round", round)
+			wruntime.EventsEmit(a.ctx, "status", snapshot)
 		},
 		OnAdvance: func(res *apiclient.AdvanceResult) {
 			a.statusMu.Lock()
 			a.status.LastAdvance = res
+			snapshot := a.status
 			a.statusMu.Unlock()
-			wruntime.EventsEmit(a.ctx, "advance", res)
+			wruntime.EventsEmit(a.ctx, "status", snapshot)
 		},
 		OnDrained: func() {
 			a.setStatus("drained", "every show in this playlist is finished")
-			wruntime.EventsEmit(a.ctx, "drained", nil)
 		},
 	}
 
@@ -163,18 +170,34 @@ func (a *App) runForever(ctx context.Context) {
 	}
 }
 
-// GetStatus is bound for the frontend; returns the most recent
-// snapshot. Phase 3 replaces polling with Wails events.
+// ─── frontend bindings ──────────────────────────────────────────────
+
+// GetStatus returns the current state snapshot. Wails generates the
+// matching TS type at frontend/wailsjs/go/main/App.d.ts.
 func (a *App) GetStatus() Status {
 	a.statusMu.RLock()
 	defer a.statusMu.RUnlock()
 	return a.status
 }
 
+// ListShows returns the active shows in the configured playlist.
+// Errors propagate as JS Promise rejections; the frontend renders the
+// empty-state when len(shows) == 0.
+func (a *App) ListShows() ([]apiclient.Show, error) {
+	a.mu.Lock()
+	c := a.client
+	a.mu.Unlock()
+	if c == nil {
+		return nil, errors.New("not authenticated yet")
+	}
+	return c.ListActiveShows(a.ctx, defaultPlaylist)
+}
+
 func (a *App) setStatus(phase, message string) {
 	a.statusMu.Lock()
 	a.status.Phase = phase
 	a.status.Message = message
+	snapshot := a.status
 	a.statusMu.Unlock()
-	wruntime.EventsEmit(a.ctx, "status", a.status)
+	wruntime.EventsEmit(a.ctx, "status", snapshot)
 }

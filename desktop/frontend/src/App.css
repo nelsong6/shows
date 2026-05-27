@@ -1,59 +1,123 @@
-#app {
-    height: 100vh;
-    text-align: center;
+/* Phase 3 layout: sidebar of active shows on the left, a status panel
+   on the right with the current phase + round + last advance. mpv's
+   render surface covers everything once playback begins; the HTML
+   chrome is visible during auth, between rounds, and on drain.
+   Phase 4 layers chrome over mpv via the render API. */
+
+.layout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  height: 100vh;
 }
 
-#logo {
-    display: block;
-    width: 50%;
-    height: 50%;
-    margin: auto;
-    padding: 10% 0 0;
-    background-position: center;
-    background-repeat: no-repeat;
-    background-size: 100% 100%;
-    background-origin: content-box;
+.sidebar {
+  background: var(--bg-deep);
+  border-right: 1px solid var(--border);
+  padding: 16px 0;
+  overflow-y: auto;
 }
 
-.result {
-    height: 20px;
-    line-height: 20px;
-    margin: 1.5rem auto;
+.sidebar h2 {
+  margin: 0 16px 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
 }
 
-.input-box .btn {
-    width: 60px;
-    height: 30px;
-    line-height: 30px;
-    border-radius: 3px;
-    border: none;
-    margin: 0 0 0 20px;
-    padding: 0 8px;
-    cursor: pointer;
+.sidebar ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
-.input-box .btn:hover {
-    background-image: linear-gradient(to top, #cfd9df 0%, #e2ebf0 100%);
-    color: #333333;
+.sidebar li {
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--fg-secondary);
+  border-left: 2px solid transparent;
+  cursor: default;
 }
 
-.input-box .input {
-    border: none;
-    border-radius: 3px;
-    outline: none;
-    height: 30px;
-    line-height: 30px;
-    padding: 0 10px;
-    background-color: rgba(240, 240, 240, 1);
-    -webkit-font-smoothing: antialiased;
+.sidebar li.selected {
+  border-left-color: var(--state-success-fg);
+  background: var(--surface);
+  color: var(--fg);
 }
 
-.input-box .input:hover {
-    border: none;
-    background-color: rgba(255, 255, 255, 1);
+.sidebar .meta {
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-top: 2px;
 }
 
-.input-box .input:focus {
-    border: none;
-    background-color: rgba(255, 255, 255, 1);
+.main {
+  padding: 24px 32px;
+  overflow-y: auto;
+}
+
+.main .kpi {
+  display: flex;
+  gap: 24px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+
+.main .kpi .kpi-cell {
+  display: flex;
+  flex-direction: column;
+}
+
+.main .kpi .kpi-key {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+
+.main .kpi .kpi-val {
+  font-size: 20px;
+  color: var(--fg);
+}
+
+.section {
+  margin-bottom: 32px;
+}
+
+.section h3 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+}
+
+.section .filter-hint {
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin: 0 0 12px;
+}
+
+table.runs {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+table.runs th,
+table.runs td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+table.runs th {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+  font-weight: normal;
 }

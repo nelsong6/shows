@@ -101,6 +101,34 @@ func (c *Client) NextRound(ctx context.Context, playlist string) ([]RoundEntry, 
 	return resp.Round, nil
 }
 
+// Show is the canonical show shape the API returns. Mirrors the
+// `Show` type in cmd/shows-api/internal/store.
+type Show struct {
+	ID        string     `json:"id"`
+	Playlist  string     `json:"playlist"`
+	Name      string     `json:"name"`
+	RootPath  string     `json:"root_path"`
+	DateAdded time.Time  `json:"date_added"`
+	RemovedAt *time.Time `json:"removed_at,omitempty"`
+}
+
+type playlistResponse struct {
+	Playlist struct {
+		Name string `json:"name"`
+	} `json:"playlist"`
+	Shows []Show `json:"shows"`
+}
+
+// ListActiveShows returns the active (non-tombstoned) shows in the
+// given playlist. Used by the sidebar in shows-desktop.
+func (c *Client) ListActiveShows(ctx context.Context, playlist string) ([]Show, error) {
+	var resp playlistResponse
+	if err := c.do(ctx, http.MethodGet, "/api/playlists/"+playlist, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Shows, nil
+}
+
 // Advance reports a batch of just-played episodes. Server marks them
 // watched, tombstones any shows whose queue emptied, appends rows to
 // the watch_history container.

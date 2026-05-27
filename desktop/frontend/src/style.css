@@ -1,26 +1,122 @@
-html {
-    background-color: rgba(27, 38, 54, 1);
-    text-align: center;
-    color: white;
+@import "./design-tokens.css";
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
 }
 
-body {
-    margin: 0;
-    color: white;
-    font-family: "Nunito", -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto",
-    "Oxygen", "Ubuntu", "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue",
-    sans-serif;
+* {
+  box-sizing: border-box;
 }
 
-@font-face {
-    font-family: "Nunito";
-    font-style: normal;
-    font-weight: 400;
-    src: local(""),
-    url("assets/fonts/nunito-v16-latin-regular.woff2") format("woff2");
+/* Console-plate button vocabulary from glimmung/design-system. Chamfered
+   top-left corner, 2px state-color rail on the leading edge, mono
+   lowercase label. No box-shadows, no gradients. */
+button.gb {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  background: var(--surface);
+  color: var(--fg);
+  border: none;
+  font: inherit;
+  font-size: 13px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  clip-path: polygon(10px 0, 100% 0, 100% 100%, 0 100%, 0 10px);
 }
 
-#app {
-    height: 100vh;
-    text-align: center;
+button.gb::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--border);
+  clip-path: inherit;
+  pointer-events: none;
+}
+
+button.gb::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 0;
+  width: 2px;
+  background: var(--state-success-fg);
+}
+
+button.gb:hover {
+  background: var(--surface-hover);
+}
+
+button.gb:focus-visible {
+  outline: none;
+}
+
+button.gb:focus-visible::before {
+  border-color: var(--state-success-fg);
+}
+
+/* Pill / console-tag vocabulary. Mono lowercase, chamfered top-left,
+   2px leading rail in the state color. Never border-radius: 999px. */
+.pill {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 11px;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  background: var(--surface);
+  color: var(--fg-secondary);
+  clip-path: polygon(6px 0, 100% 0, 100% 100%, 0 100%, 0 6px);
+}
+
+.pill::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--border);
+  clip-path: inherit;
+  pointer-events: none;
+}
+
+.pill::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 0;
+  width: 2px;
+}
+
+.pill.free::after { background: var(--state-success-fg); }
+.pill.busy::after { background: var(--state-pending-fg); }
+.pill.drain::after { background: var(--state-danger-fg); }
+.pill.info::after { background: var(--state-info-fg); }
+
+/* Eyebrow label vocabulary. Uppercase tracking matches glimmung's
+   section heads. */
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+/* Empty state — dashed border, italic, lowercase. Used when a list
+   is logically empty (no shows, no history). */
+.empty {
+  border: 1px dashed var(--border);
+  padding: 24px;
+  font-style: italic;
+  color: var(--fg-dim);
+  text-align: center;
 }
