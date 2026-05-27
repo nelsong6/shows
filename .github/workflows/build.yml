@@ -1,0 +1,67 @@
+name: Build
+
+# Called by the release-and-dispatch-template AFTER it cuts a tag.
+# Cross-compiles the two Windows binaries and uploads them to the
+# already-existing release. The tag is passed by value — no race, no
+# duplicated tag logic.
+#
+# Both binaries are Windows-only:
+#   - shows-client uses Microsoft/go-winio for mpv's named-pipe IPC,
+#     which has no portable substitute
+#   - shows-migrate technically compiles cross-platform but the legacy
+#     data only exists on the user's Windows D:\
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build artifacts for (and upload to)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build shows-client (windows/amd64)
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: >
+          go build
+          -trimpath
+          -ldflags="-s -w"
+          -o shows-client.exe
+          ./cmd/shows-client
+
+      - name: Build shows-migrate (windows/amd64)
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: >
+          go build
+          -trimpath
+          -ldflags="-s -w"
+          -o shows-migrate.exe
+          ./cmd/shows-migrate
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ inputs.tag }} \
+            shows-client.exe shows-migrate.exe \
+            --clobber -R ${{ github.repository }}
