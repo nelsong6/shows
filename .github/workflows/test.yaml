@@ -27,12 +27,3 @@ jobs:
 
       - name: go test
         run: go test ./...
-
-      # Cross-compile the Windows client to catch any go-winio breakage
-      # before it lands. We don't publish artifacts here; cmd/shows-client
-      # is built locally by the user.
-      - name: build windows client
-        env:
-          GOOS: windows
-          GOARCH: amd64
-        run: go build ./cmd/shows-client
