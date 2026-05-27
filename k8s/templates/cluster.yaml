@@ -1,0 +1,59 @@
+# CloudNativePG Postgres cluster for the shows service. Operator is
+# installed cluster-wide via infra-bootstrap/k8s/cloudnative-pg/; here we
+# just declare a Cluster CR and it reconciles a Pod + PVC + auto-generated
+# Secrets (`shows-db-app`, `shows-db-ca`, etc.).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: shows-db
+  namespace: shows
+spec:
+  # Single instance is fine for personal-use playlist data. Bump to 2 if
+  # we ever want CNPG's automatic failover during node drains — auth went
+  # to 2 for that reason; shows can survive a 1-3 minute restart.
+  instances: 1
+  storage:
+    size: 2Gi
+    storageClass: shows-db-retain
+  # bootstrap.initdb.database becomes the default DB; owner becomes the
+  # role that owns it. The generated `shows-db-app` Secret has the
+  # matching connection URI ready for the app to consume.
+  bootstrap:
+    initdb:
+      database: shows
+      owner: shows
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  # Workload-identity annotations on the CNPG-managed ServiceAccount.
+  # azwi reads `azure.workload.identity/client-id` from the SA at pod
+  # creation and projects a federated token at
+  # /var/run/secrets/azure/tokens/azure-identity-token. CNPG's
+  # `inheritFromAzureAD: true` (below) then uses DefaultAzureCredential,
+  # which picks up the projected token and exchanges it for a Storage
+  # access token bound to the UAMI in tofu/workload-identity.tf.
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        azure.workload.identity/client-id: {{ .Values.backups.workloadIdentityClientId | quote }}
+  inheritedMetadata:
+    labels:
+      azure.workload.identity/use: "true"
+  # Continuous WAL archiving + base backup to Azure Blob. The
+  # ScheduledBackup CR (templates/scheduledbackup.yaml) drives the
+  # periodic base backups; CNPG streams WAL between backups so a
+  # restore can hit any point in time within the retention window.
+  backup:
+    barmanObjectStore:
+      destinationPath: "https://{{ .Values.backups.storageAccount }}.blob.core.windows.net/{{ .Values.backups.container }}/"
+      azureCredentials:
+        inheritFromAzureAD: true
+      wal:
+        compression: gzip
+      data:
+        compression: gzip
+    # 30 days of base backups + WAL.
+    retentionPolicy: "30d"

@@ -1,0 +1,22 @@
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.test
+
+# Local config
+.env
+.env.*
+!.env.example
+token.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/

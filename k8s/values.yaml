@@ -1,0 +1,31 @@
+# Bumped by .github/workflows/build-and-deploy.yaml on every push to main
+# via sed on this file. Everything else is wired through templates/.
+image:
+  repository: romainecr.azurecr.io/shows
+  # Quoted to force YAML string parsing. An all-numeric short SHA
+  # (e.g. 5651694) would otherwise be read as an int, round-tripped
+  # through Helm's float-backed value pipeline, and rendered as
+  # "5.651694e+06" — which is not a real ACR tag. Mirrors auth's
+  # values.yaml comment for the same reason.
+  tag: "REPLACE_ME"
+
+# auth.romaine.life integration. The Go verifier in internal/auth defaults
+# to these values; setting them here makes the runtime config explicit
+# instead of relying on the binary's defaults.
+auth:
+  issuer: "https://auth.romaine.life"
+  jwksUrl: "https://auth.romaine.life/api/auth/jwks"
+
+# CNPG backup destination. storageAccount + workloadIdentityClientId are
+# provisioned by tofu/backups.tf + tofu/workload-identity.tf; on first
+# tofu apply, copy the values of the matching `terraform output` keys into
+# these fields. container is fixed by tofu and matches.
+#
+# Empty storageAccount short-circuits the CNPG backup config to a
+# render-error (no destinationPath), which is the right failure mode while
+# tofu hasn't been applied yet — better than a silently-misconfigured
+# Cluster that thinks it's backing up but isn't.
+backups:
+  storageAccount: ""
+  container: "shows-db"
+  workloadIdentityClientId: ""

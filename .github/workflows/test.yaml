@@ -1,0 +1,38 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      # Cross-compile the Windows client to catch any go-winio breakage
+      # before it lands. We don't publish artifacts here; cmd/shows-client
+      # is built locally by the user.
+      - name: build windows client
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build ./cmd/shows-client

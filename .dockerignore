@@ -1,0 +1,15 @@
+.git
+.github
+.vscode
+.idea
+bin/
+dist/
+*.exe
+k8s/
+tofu/
+migrations/.goose-state
+.env
+.env.*
+token.json
+README.md
+CLAUDE.md

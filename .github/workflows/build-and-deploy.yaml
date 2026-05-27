@@ -1,0 +1,73 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - cmd/shows-api/**
+      - internal/**
+      - migrations/**
+      - go.mod
+      - go.sum
+      - Dockerfile
+      - .dockerignore
+      - k8s/**
+      - .github/workflows/build-and-deploy.yaml
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: write
+
+concurrency:
+  group: build-and-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    name: Build image, push, bump values tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.ARM_CLIENT_ID }}
+          tenant-id: ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: ACR login
+        run: az acr login --name romainecr
+
+      - name: Build and push image
+        run: |
+          TAG="${GITHUB_SHA::7}"
+          IMAGE="romainecr.azurecr.io/shows:${TAG}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "TAG=${TAG}" >> $GITHUB_ENV
+
+      - name: Bump image tag in k8s/values.yaml
+        run: |
+          # Quoted so YAML parses the tag as a string. An all-numeric
+          # short SHA (e.g. 5651694) is otherwise read as an int,
+          # round-trips through Helm's float-backed value pipeline, and
+          # lands as "5.651694e+06" in the rendered Deployment — a tag
+          # ACR doesn't have. Mirrors auth's build-and-deploy comment.
+          sed -i -E "s|^(  tag: ).*$|\1\"${{ env.TAG }}\"|" k8s/values.yaml
+
+      - name: Commit and push tag bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/values.yaml
+          if git diff --cached --quiet; then
+            echo "No values changes to commit"
+            exit 0
+          fi
+          git commit -m "chore: bump shows image to ${{ env.TAG }} [skip ci]"
+          git push
