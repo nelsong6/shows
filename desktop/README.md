@@ -1,54 +1,80 @@
 # shows-desktop
 
-The local desktop app — Wails v2 + React/TS frontend + libmpv-backed playback. Runs against [shows.romaine.life](https://shows.romaine.life) for round-robin scheduling, watch history, and library state.
+The local desktop app — Wails v2 + React/TS frontend + libmpv via cgo. Single window: mpv parents into the Wails host via `--wid`, so video plays inside the same window the React chrome lives in. Runs against [shows.romaine.life](https://shows.romaine.life) for round-robin scheduling, watch history, and library state.
 
 ## Build
 
 ```powershell
-scoop install mingw   # one-time, for cgo
-pwsh scripts/build.ps1
+scoop install mingw                                              # one-time, for cgo
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 ```
 
-`scripts/build.ps1` does the full pipeline: downloads `libmpv-2.dll` + headers via `scripts/setup-libmpv.ps1` (idempotent — skips if already present), wires CGO env vars to point at them, runs `wails build`, and copies the runtime DLL into `build/bin/` alongside the resulting `shows.exe`.
+`scripts/build.ps1` does the full pipeline: runs `scripts/setup-libmpv.ps1` (idempotent — downloads `libmpv-2.dll` + headers from shinchiro's SourceForge builds, skips if already present), wires `CGO_CFLAGS` / `CGO_LDFLAGS` to point at them, runs `wails build`, and copies the runtime DLL into `build/bin/` alongside the resulting `shows.exe`.
 
-Output: `build/bin/shows.exe` (~11 MB) and `build/bin/libmpv-2.dll` (~110 MB, codec engine). Both are needed at runtime; ship them together.
+Output: `build\bin\shows.exe` (~12 MB) and `build\bin\libmpv-2.dll` (~110 MB, codec engine). Both are needed at runtime; ship them together.
+
+## Run
+
+```powershell
+build\bin\shows.exe
+```
+
+First launch opens a browser tab at auth.romaine.life for approval; thereafter the token caches at `%APPDATA%\shows\token.json` and refreshes silently on 401. Closing the window terminates everything.
 
 ## Dev loop
 
 ```powershell
-$env:Path = "$env:USERPROFILE\scoop\apps\mingw\current\bin;$(Resolve-Path third_party/libmpv);$env:Path"
-$env:CGO_CFLAGS = "-I$(Resolve-Path third_party/libmpv)\include"
-$env:CGO_LDFLAGS = "-L$(Resolve-Path third_party/libmpv) -lmpv"
+$lib = (Resolve-Path third_party\libmpv).Path
+$env:Path        = "$env:USERPROFILE\scoop\apps\mingw\current\bin;$lib;$env:Path"
+$env:CGO_CFLAGS  = "-I$lib\include"
+$env:CGO_LDFLAGS = "-L$lib -lmpv"
 wails dev
 ```
 
-`wails dev` hot-reloads the frontend on save and rebuilds the Go side when its files change. libmpv changes are rare enough that re-invoking the env-var setup once per terminal session is fine.
+`wails dev` hot-reloads the frontend on save and rebuilds the Go side when its files change. libmpv setup is per-terminal — re-export the three env vars after a shell restart.
 
 ## Layout
 
 ```
 desktop/
-  app.go                 # Wails-bound App object; methods are exposed to the TS frontend
+  app.go                 # Wails App; methods auto-exposed to the TS frontend
   main.go                # wails.Run entry; window options
   internal/
-    player/              # libmpv wrapper (cgo via supersonic-app/go-mpv)
+    player/              # libmpv cgo wrapper (supersonic-app/go-mpv)
+    win32/               # HWND lookup so libmpv embeds into the Wails window
+    oauth/               # PKCE+loopback OAuth client for auth.romaine.life
+    apiclient/           # shows.romaine.life HTTP client with 401 refresh
+    playlist/            # round-robin runner: fetch → queue → wait → advance
   frontend/              # Vite + React + TS
-    src/App.tsx          # phase-1b smoke-test UI; replaced in phase 3
+    src/
+      App.tsx            # sidebar + status panel + KPI strip
+      App.css            # layout
+      design-tokens.css  # vendored from glimmung/design-system/colors_and_type.css
+      style.css          # base resets + console-plate button vocabulary
     wailsjs/             # auto-generated TS bindings for app.go methods
   scripts/
     setup-libmpv.ps1     # downloads + extracts libmpv-dev to third_party/libmpv
-    build.ps1            # full reproducible build (calls setup + wails)
-  third_party/           # gitignored — libmpv DLLs + headers live here per-machine
+    build.ps1            # full reproducible build
+  third_party/           # gitignored; libmpv DLLs + headers (per-machine)
   build/                 # gitignored output
 ```
 
-## Phase 1b status
+## Architecture notes
 
-What works:
-- Wails app launches, shows a phase-1b smoke-test UI
-- "play" button invokes libmpv with the typed path
-- mpv opens its own window and plays the file
+**Single window:** when the Wails host window is created, `internal/win32.WaitForWindow` locates its HWND by title `"shows"` and passes it to libmpv as the `wid` option (init-time only, set before `mpv.Initialize`). mpv then embeds its render surface as a child of that window — one taskbar entry, one alt-tab target.
 
-What's missing (Phase 1c):
-- mpv opens a separate window. Reparenting into the Wails window via `--wid` or the libmpv render API lands in Phase 1c
-- No event loop yet — once playback ends, the file just sits there. Phase 1c adds the `end-file` event subscription that the round-robin loop hangs off of.
+**During playback, mpv's child window covers the WebView2 chrome.** The React tree is visible at auth time, between rounds, and on drain. Layering chrome on top of the video via the libmpv render API into a `<canvas>` is a future phase; not a blocker for the durable-app shape.
+
+**Auth:** PKCE+loopback against `auth.romaine.life` — `internal/oauth` spins up `127.0.0.1:0`, requests a device code with `redirect_uri=http://localhost:<port>/callback` + `code_challenge=S256(verifier)`, opens the browser via `runtime.BrowserOpenURL`, catches the auth code on redirect, exchanges it for a JWT. No polling, no user-visible code-display dance.
+
+**Playback loop** (`internal/playlist/Runner.Run`):
+
+1. `GET /api/playlists/nelson/next-round` → ordered list of N episode absolute paths.
+2. Queue them all with `loadfile path replace` for the first, `loadfile path append-play` for the rest. mpv plays seamlessly between them.
+3. On each `EVENT_FILE_LOADED`, `show-text` the next show name as an OSD overlay for 4s — visible round position without alt-tabbing.
+4. Wait for N `EVENT_END_FILE` events.
+5. `POST /api/playlists/nelson/advance` with `entries=[{show_id, episode_id}, …]`.
+6. `playlist-clear` to bound mpv's internal playlist memory over multi-hour sessions.
+7. Loop.
+
+Retries-with-backoff on transient `/next-round` and `/advance` failures. 401s trigger a token refresh and one retry.

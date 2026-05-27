@@ -1,47 +1,73 @@
 # shows
 
-App repo on the romaine.life AKS cluster. Postgres-backed playlist API at `shows.romaine.life` plus a local Windows client that drives mpv.
+App repo on the romaine.life AKS cluster. Cosmos-backed playlist API at `shows.romaine.life` plus a Wails-based Windows desktop app that drives libmpv for round-robin playback.
+
+## Quality timeframe
+
+This repo follows the long-term, heavy-solution operating mode codified in `nelsong6/glimmung/docs/quality-timeframes.md`. Compatibility layers are prohibited per `nelsong6/tank-operator/docs/migration-policy.md` — `legacy`, `compatibility`, `fallback`, `temporary`, and `exception` are deletion targets, not design options.
+
+When extending a feature documented at `docs/feature-contracts/`, name the affected contract in the PR and explain how the implementation proves the invariants still hold.
 
 ## Layout
 
 ```
 cmd/
-  shows-api/        HTTP server, runs in AKS
-  shows-client/     local Windows binary; spawns mpv, plays episodes forever
-  shows-migrate/    one-shot import from the legacy play_show JSON files
+  shows-api/          HTTP server, runs in AKS
+  shows-migrate/      one-shot import from the legacy play_show JSON files
+                      (kept until the desktop absorbs in-app import)
 internal/
-  ordering/         deterministic-random round ordering (SHA-256 → uint32)
-  auth/             JWKS verifier + chi middleware for auth.romaine.life JWTs
-  device/           auth.romaine.life CLI device flow (used by client + migrate)
-  store/            pgx-based DB layer
-  api/              chi routes, handlers
-  mpv/              named-pipe JSON IPC controller (client only)
-migrations/         SQL migrations applied by shows-api on start (goose)
-k8s/                Helm chart (CNPG cluster, deployment, HTTPRoute, backups)
-tofu/               per-app Azure resources (resource group, backup storage, UAMI)
+  ordering/           deterministic-random round ordering (SHA-256 → uint32)
+  auth/               JWKS verifier + chi middleware for auth.romaine.life JWTs
+  device/             auth.romaine.life CLI device flow (used by shows-migrate)
+  store/              Cosmos SDK store layer (shows + watch_history containers)
+  api/                chi routes, handlers, Prometheus metrics
+desktop/
+  app.go              Wails-bound App struct; methods auto-exposed to TS frontend
+  main.go             wails.Run entry; window options
+  internal/
+    player/           libmpv cgo wrapper (supersonic-app/go-mpv)
+    win32/            HWND lookup so libmpv parents into the Wails window
+    oauth/            PKCE+loopback OAuth client against auth.romaine.life
+    apiclient/        shows.romaine.life HTTP client + 401 refresh hook
+    playlist/         round-robin runner (fetch → queue → wait → advance)
+  frontend/           Vite + React + TS using glimmung's design-system tokens
+  scripts/            setup-libmpv.ps1 + build.ps1
+  third_party/        gitignored; libmpv DLL + headers per-machine
+docs/
+  feature-contracts/  durable invariant docs (round-and-advance, …)
+k8s/                  Helm chart (Deployment, Service, HTTPRoute, XListenerSet,
+                      Certificate, PodMonitor) — ArgoCD-synced
+tofu/                 shows-rg, shows-identity UAMI, Cosmos DB + role assignment
 ```
 
 ## Bootstrap
 
-This repo is created by `infra-bootstrap`'s app module. Per-repo Azure identity, OIDC federated creds, ACR push, and tfstate access are provisioned there. Don't put those concerns here.
+This repo was created by `infra-bootstrap`'s app module. Per-repo Azure identity, OIDC federated creds, ACR push, and tfstate access are provisioned there. Per-runtime resources (Cosmos database, runtime UAMI) are in `tofu/` here.
 
-Per the fleet convention (see `infra-bootstrap/CLAUDE.md`):
+Per the fleet convention:
 
-- **`tofu/`** — applied on push to main by `.github/workflows/tofu.yaml`. Creates `shows-rg`, the CNPG backup storage account + container, and the UAMI that the `shows-db` ServiceAccount federates to.
+- **`tofu/`** — applied on push to main by `.github/workflows/tofu.yaml`. Creates `shows-rg`, the `shows-identity` UAMI federated to `system:serviceaccount:shows:shows`, the `shows` Cosmos SQL database, and the data-plane role assignment scoped to `dbs/shows`.
 - **`k8s/`** — Helm chart consumed by the ArgoCD `Application` defined in `infra-bootstrap/k8s/apps/shows.yaml`. ArgoCD auto-syncs on push.
-- **`build-and-deploy.yaml`** — builds `cmd/shows-api`, pushes to `romainecr.azurecr.io/shows:<sha>`, bumps `k8s/values.yaml`, commits. ArgoCD picks up the new tag.
+- **`.github/workflows/build-and-deploy.yaml`** — builds `cmd/shows-api`, pushes to `romainecr.azurecr.io/shows:<sha>`, bumps `k8s/values.yaml`, commits. ArgoCD picks up the new tag.
 
-The local client (`cmd/shows-client`) and the migrate tool (`cmd/shows-migrate`) are **not** deployed by CI. They run on the user's PC against `https://shows.romaine.life`.
+The desktop app (`desktop/`) and the migrate tool (`cmd/shows-migrate`) are **not** deployed by CI. They build locally per-machine; the desktop's build pipeline is `desktop/scripts/build.ps1`.
 
 ## Auth
 
 Every `/api/*` route requires an auth.romaine.life JWT with `role in {admin, user}`. Tokens are verified against the JWKS at `https://auth.romaine.life/api/auth/jwks` with required claims `["exp", "iat", "iss", "role"]` (mirrors `nelsong6/romaine-auth-py`).
 
-The local client uses the CLI device flow at `POST /api/cli/device` → browser approval → `POST /api/cli/token` (see `auth/src/server.ts:2461` and `auth/src/cli-device-flow.ts`). The token is cached at `%APPDATA%\shows\token.json`; on expiry the client re-runs the flow.
+The desktop app uses **PKCE + loopback** at `POST /api/cli/device` (with `redirect_uri=http://localhost:PORT/callback` + `code_challenge`) → browser approval → `POST /api/cli/token` with `grant_type=authorization_code`. The token caches at `%APPDATA%\shows\token.json`; on 401 the apiclient calls back to `oauth.EnsureToken` for an in-place refresh.
 
-## Postgres (CloudNativePG)
+`cmd/shows-migrate` is the one remaining caller of the legacy polling device flow (`internal/device`). Both go away when the desktop grows an in-app import flow.
 
-`k8s/templates/cluster.yaml` declares a 2-instance `shows-db` Cluster CR. The CNPG operator (installed cluster-wide via `infra-bootstrap/k8s/cloudnative-pg/`) reconciles the pods, generates the `shows-db-app` Secret, and continuously archives WAL + base backups to the Azure Storage container provisioned in `tofu/backups.tf`. Workload-identity flow mirrors the auth repo: UAMI in `tofu/workload-identity.tf` is federated to `system:serviceaccount:shows:shows-db`.
+## Cosmos store
+
+Two containers on `infra-cosmos-serverless` / `dbs/shows`:
+
+- **`shows`** — one doc per show, partitioned by `/playlist`. Episodes are embedded as a nested array; each `/advance` is a single point-write.
+- **`watch_history`** — append-only event log, partitioned by `/show_id`. Source of truth for the "took N days to watch" reveal.
+
+The runtime pod attaches to Cosmos via workload identity: `serviceaccount/shows:shows` ↔ `shows-identity` UAMI (federated cred in `tofu/identity.tf`) ↔ Cosmos data-plane `Built-in Data Contributor` role scoped to `dbs/shows` only.
 
 ## Ordering invariant
 
@@ -53,11 +79,11 @@ order_value := uint32(first 4 hex chars of hash, parsed as base 16)
 shows in round are sorted by order_value ascending
 ```
 
-This bit-for-bit reproduces the PowerShell `Get-FileHash -InputStream` + `SubString(0,4)` + `[uint32]` cast from the legacy `play_ordered_show.ps1`. The migrate tool relies on this — preserving the same ordering means a partially-watched playlist resumes in the same shuffle order it would have under the old scripts.
+Bit-for-bit reproduces `Get-FileHash -InputStream` + `SubString(0,4)` + `[uint32]` from the legacy `play_ordered_show.ps1`. Tests in `internal/ordering/ordering_test.go` lock the contract against three public SHA-256 fixtures. See [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md) for the six invariants the round + advance pair satisfies.
 
 ## Migration source data
 
-Legacy state lives in `D:\Downloads\Group-Nelson\nelson.json` and the per-show JSONs it points at. Schema:
+Legacy state at `D:\Downloads\Group-Nelson\nelson.json` + the per-show JSONs it points at:
 
 ```json
 {
@@ -67,4 +93,17 @@ Legacy state lives in `D:\Downloads\Group-Nelson\nelson.json` and the per-show J
 }
 ```
 
-Episode paths are relative to the parent directory of the per-show JSON file. `cmd/shows-migrate` joins them with that parent to produce the absolute path stored as `episodes.relative_path` and the show's `root_path`.
+Episode paths are relative to the parent directory of the per-show JSON. `cmd/shows-migrate` joins them with that parent to produce the absolute path stored as `episodes.relative_path` and the show's `root_path`. Run once on any machine that has the legacy `nelson.json` reachable; idempotent re-runs are not supported (would create duplicate show docs).
+
+## Observability
+
+`shows_*` Prometheus metrics exposed at `/metrics` (no auth) on the AKS pod, scraped by the kube-prometheus-stack via `k8s/templates/podmonitor.yaml`. Catalog in [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md). Grafana sees them in the `monitoring` namespace's dashboards.
+
+## Related
+
+- `nelsong6/auth` — JWT issuer; CLI device flow contract this repo's auth depends on
+- `nelsong6/romaine-auth-py` — canonical JWT verifier (this repo's `internal/auth` is the Go port)
+- `nelsong6/glimmung` — design system reference (`design-system/colors_and_type.css`) + quality-timeframes / migration-policy / feature-contract patterns
+- `nelsong6/tank-operator` — PodMonitor + observability pattern
+- `nelsong6/infra-bootstrap` — the cluster + per-app Azure identity provisioning
+- `nelsong6/play_show` — the deprecated PowerShell predecessor this repo replaces
