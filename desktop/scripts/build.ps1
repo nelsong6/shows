@@ -3,9 +3,9 @@
 # resulting .exe so it loads on a fresh machine without PATH fiddling.
 #
 # Idempotent. Re-runnable. Honors a few env vars for CI:
-#   $env:SHOWS_SKIP_LIBMPV_SETUP = '1' — assume third_party/libmpv/ is
+#   $env:SHOWS_SKIP_LIBMPV_SETUP = '1' - assume third_party/libmpv/ is
 #       already populated (CI restores it from cache).
-#   $env:SHOWS_MINGW_BIN = '<path>'  — override the mingw bin dir if
+#   $env:SHOWS_MINGW_BIN = '<path>'  - override the mingw bin dir if
 #       it's not at scoop's default location.
 #
 # Local dev: just run `pwsh scripts/build.ps1` from anywhere; absolute
@@ -26,7 +26,7 @@ if ($env:SHOWS_SKIP_LIBMPV_SETUP -ne '1') {
 
 $lib = Join-Path $root 'third_party\libmpv'
 if (-not (Test-Path "$lib\libmpv-2.dll")) {
-    throw "libmpv-2.dll missing at $lib — setup-libmpv.ps1 did not produce it"
+    throw "libmpv-2.dll missing at $lib - setup-libmpv.ps1 did not produce it"
 }
 
 # --- 2. cgo toolchain + flags ------------------------------------
@@ -36,7 +36,7 @@ $mingwBin = if ($env:SHOWS_MINGW_BIN) {
     "$env:USERPROFILE\scoop\apps\mingw\current\bin"
 }
 if (-not (Test-Path "$mingwBin\gcc.exe")) {
-    throw "MinGW gcc not found at $mingwBin\gcc.exe — install via `scoop install mingw` or set `$env:SHOWS_MINGW_BIN"
+    throw "MinGW gcc not found at $mingwBin\gcc.exe - install via `scoop install mingw` or set `$env:SHOWS_MINGW_BIN"
 }
 
 # libmpv on PATH for the bindings-generation step (wails runs the

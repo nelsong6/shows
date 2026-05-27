@@ -3,10 +3,18 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
+	"time"
 
 	"github.com/nelsong6/shows/desktop/internal/player"
+	"github.com/nelsong6/shows/desktop/internal/win32"
 )
+
+// windowTitle must match the Title field in main.go's wails.Run
+// options.App. win32.FindWindowByTitle uses it to locate the host
+// HWND so libmpv can parent its render surface into it.
+const windowTitle = "shows"
 
 // App is the Wails-bound application object. Its public methods are
 // auto-exposed to the TypeScript frontend at frontend/wailsjs/go/main/App.
@@ -21,10 +29,31 @@ func NewApp() *App {
 	return &App{}
 }
 
-// startup is called by Wails when the window is created. The context
-// is captured for later use with the runtime helpers.
+// startup is called by Wails when the window is created. We grab the
+// host HWND and hand it to libmpv so mpv embeds its render surface as
+// a child of the Wails window — single window, no rogue mpv popup.
+//
+// The window may not be enumerable for a tick after OnStartup fires,
+// so WaitForWindow polls briefly. If it never appears we log and
+// continue with parentHWND=0; mpv falls back to its own window, which
+// is the Phase 1b behavior.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+
+	hwnd, err := win32.WaitForWindow(windowTitle, 2*time.Second)
+	if err != nil {
+		log.Printf("startup: could not locate host window %q: %v (mpv will open its own window)", windowTitle, err)
+		hwnd = 0
+	}
+
+	p, err := player.New(hwnd)
+	if err != nil {
+		log.Printf("startup: player.New: %v", err)
+		return
+	}
+	a.mu.Lock()
+	a.player = p
+	a.mu.Unlock()
 }
 
 // shutdown is called by Wails when the user closes the window. Tear
@@ -38,25 +67,20 @@ func (a *App) shutdown(ctx context.Context) {
 	}
 }
 
-// PlayTestFile is the Phase 1b smoke-test entry point: lazily inits
-// libmpv on first call, then asks it to play the given path. Returns
-// the error string ("" on success) so the TypeScript caller can
-// surface it without ad-hoc Promise rejection handling.
+// PlayTestFile is the Phase 1b/1c smoke-test entry point: asks libmpv
+// to play the given path. Returns the error string ("" on success)
+// so the TypeScript caller can surface it without ad-hoc Promise
+// rejection handling.
 //
-// Replaced in Phase 1c by a real PlayEpisode method that takes a
+// Replaced in Phase 2 by a real PlayEpisode method that takes a
 // round entry from the shows API.
 func (a *App) PlayTestFile(path string) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.player == nil {
-		p, err := player.New()
-		if err != nil {
-			return fmt.Sprintf("player init: %v", err)
-		}
-		a.player = p
+		return "player not initialized (startup may have failed; check logs)"
 	}
-
 	if err := a.player.Play(a.ctx, path); err != nil {
 		return fmt.Sprintf("play: %v", err)
 	}

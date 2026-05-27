@@ -1,5 +1,5 @@
 # Downloads + extracts libmpv-dev for Windows into desktop/third_party/libmpv.
-# Idempotent — re-runs as a no-op if the DLL is already present.
+# Idempotent - re-runs as a no-op if the DLL is already present.
 #
 # Set as a Wails preBuild hook (wails.json) so `wails build` and `wails dev`
 # both pick up the libmpv runtime automatically. CI also calls this directly
@@ -21,7 +21,7 @@ $dst     = Join-Path $tp 'libmpv'
 $dll     = Join-Path $dst 'libmpv-2.dll'
 
 if (Test-Path $dll) {
-    Write-Host "libmpv already present at $dst — skipping download."
+    Write-Host "libmpv already present at $dst - skipping download."
     exit 0
 }
 
