@@ -1,0 +1,93 @@
+name: Build Desktop
+
+# Build shows-desktop on every change under desktop/ and publish the resulting
+# shows.exe + libmpv-2.dll as a workflow artifact you can pull straight off the
+# run page — no local toolchain dance.
+#
+# Local dev still uses desktop/scripts/build.ps1 directly; this workflow just
+# invokes that same script under a Windows runner with libmpv cached.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - desktop/**
+      - .github/workflows/build-desktop.yaml
+  pull_request:
+    paths:
+      - desktop/**
+      - .github/workflows/build-desktop.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build shows-desktop
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+
+      # Wails CLI generates the TS bindings + drives `go build` with the right
+      # embed flags. Pinned to v2 — same line the desktop module imports.
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      # libmpv's Go binding is cgo. Local dev uses scoop's mingw; in CI we use
+      # setup-mingw so we don't depend on the runner image happening to ship a
+      # specific gcc. The outputs.gcc value is the full path to gcc.exe; we
+      # take dirname for SHOWS_MINGW_BIN.
+      - name: Setup MinGW (cgo toolchain for libmpv bindings)
+        id: mingw
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+
+      # libmpv is ~80MB to download and unpack — cache it across runs keyed
+      # on the version + git hash hard-coded in setup-libmpv.ps1. Bump the
+      # key when that script bumps libmpv.
+      - name: Cache libmpv runtime
+        id: libmpv-cache
+        uses: actions/cache@v4
+        with:
+          path: desktop/third_party/libmpv
+          key: libmpv-20250420-3600c71
+
+      - name: Fetch libmpv (cold cache only)
+        if: steps.libmpv-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: desktop/scripts/setup-libmpv.ps1
+
+      # build.ps1 already honors SHOWS_SKIP_LIBMPV_SETUP and SHOWS_MINGW_BIN
+      # for exactly this use case. We set both and let the script do the rest.
+      - name: Build
+        shell: pwsh
+        env:
+          SHOWS_SKIP_LIBMPV_SETUP: '1'
+        run: |
+          $env:SHOWS_MINGW_BIN = Split-Path -Parent '${{ steps.mingw.outputs.gcc }}'
+          desktop/scripts/build.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shows-desktop-${{ github.sha }}
+          path: |
+            desktop/build/bin/shows.exe
+            desktop/build/bin/libmpv-2.dll
+          if-no-files-found: error
+          retention-days: 30
