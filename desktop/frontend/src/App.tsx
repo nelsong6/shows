@@ -1,38 +1,48 @@
-import { useState } from 'react';
-import { PlayTestFile } from '../wailsjs/go/main/App';
+import { useEffect, useState } from 'react';
+import { GetStatus } from '../wailsjs/go/main/App';
+import { EventsOn } from '../wailsjs/runtime/runtime';
 import './App.css';
 
-// Phase 1b smoke-test UI. A single input + button that asks the Go
-// backend to spawn libmpv on the given path. Replaced in Phase 3 by a
-// real library view that talks to shows.romaine.life.
-function App() {
-  const [path, setPath] = useState(
-    'D:\\Downloads\\Group-Nelson\\Dr. Katz, Professional Therapist\\Dr. Katz S06\\Dr.Katz.S06E11.Big.TV.avi',
-  );
-  const [status, setStatus] = useState<string>('idle');
+// Phase 2 status surface. mpv covers the Wails window once playback
+// starts; before that, this view shows the auth + fetch progression
+// so the user knows what's happening. Phase 3 replaces this with the
+// real library UI rendered as an overlay on top of the libmpv render
+// surface.
+type Status = {
+  phase: 'initializing' | 'auth' | 'fetching' | 'playing' | 'drained' | 'error';
+  message: string;
+};
 
-  async function play() {
-    setStatus('starting libmpv…');
-    const err = await PlayTestFile(path);
-    setStatus(err === '' ? 'playing' : `error: ${err}`);
-  }
+function App() {
+  const [status, setStatus] = useState<Status>({ phase: 'initializing', message: '' });
+
+  useEffect(() => {
+    GetStatus().then((s: any) => setStatus(s));
+    const unsub = EventsOn('status', (s: any) => setStatus(s));
+    return () => unsub();
+  }, []);
 
   return (
-    <div style={{ padding: 24, fontFamily: 'monospace', color: '#eee', background: '#0a0a0a', minHeight: '100vh' }}>
-      <h2 style={{ textTransform: 'uppercase', letterSpacing: '0.05em', color: '#888' }}>shows — phase 1b smoke test</h2>
-      <p style={{ color: '#888' }}>load a file via libmpv. mpv currently opens its own window; reparenting into this window is phase 1c.</p>
-      <input
-        value={path}
-        onChange={(e) => setPath(e.target.value)}
-        style={{ width: '100%', padding: 8, background: '#171717', color: '#eee', border: '1px solid #333', fontFamily: 'monospace' }}
-      />
-      <button
-        onClick={play}
-        style={{ marginTop: 12, padding: '8px 16px', background: '#171717', color: '#eee', border: '1px solid #4ade80', fontFamily: 'monospace', textTransform: 'lowercase', cursor: 'pointer' }}
-      >
-        play
-      </button>
-      <div style={{ marginTop: 24, color: '#888' }}>status: {status}</div>
+    <div
+      style={{
+        background: '#0a0a0a',
+        color: '#eee',
+        fontFamily: 'monospace',
+        minHeight: '100vh',
+        padding: 32,
+      }}
+    >
+      <h2 style={{ textTransform: 'uppercase', letterSpacing: '0.05em', color: '#888' }}>shows</h2>
+      <div style={{ marginTop: 24 }}>
+        <span style={{ color: '#666' }}>phase: </span>
+        <span style={{ color: '#4ade80' }}>{status.phase}</span>
+      </div>
+      <div style={{ marginTop: 8, color: '#aaa' }}>{status.message}</div>
+      {status.phase === 'auth' && (
+        <div style={{ marginTop: 24, color: '#888' }}>
+          a browser tab should have opened. approve there, then come back.
+        </div>
+      )}
     </div>
   );
 }
