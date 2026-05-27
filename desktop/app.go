@@ -133,6 +133,26 @@ func (a *App) runForever(ctx context.Context) {
 	}
 
 	client := apiclient.New("", tok.Token)
+	// Token refresh on 401: re-runs the device flow. If the cached
+	// token is still valid, EnsureToken short-circuits without
+	// prompting the user; if not, the browser opens for re-approval.
+	client.RefreshToken = func() (string, error) {
+		fresh, err := oauth.EnsureToken(ctx, oauth.Config{
+			Info: oauth.RequesterInfo{
+				WhereHappening: fmt.Sprintf("shows-desktop on %s (refresh)", host),
+				IntendedUse:    "play episodes via shows.romaine.life",
+				MiscIdentifier: "couch",
+			},
+			Opener: func(url string) error {
+				wruntime.BrowserOpenURL(a.ctx, url)
+				return nil
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		return fresh.Token, nil
+	}
 	a.mu.Lock()
 	a.client = client
 	a.mu.Unlock()

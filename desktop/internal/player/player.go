@@ -150,6 +150,19 @@ func (p *Player) PlaylistClear(ctx context.Context) error {
 	return p.m.Command([]string{"playlist-clear"})
 }
 
+// ShowText renders an OSD overlay for the given duration (mpv expects
+// milliseconds). Used by the runner to surface the now-playing show
+// name when each round entry starts. Non-fatal — OSD failures are
+// cosmetic.
+func (p *Player) ShowText(ctx context.Context, text string, durationMS int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.m == nil {
+		return errors.New("player: closed")
+	}
+	return p.m.Command([]string{"show-text", text, fmt.Sprintf("%d", durationMS)})
+}
+
 // Events returns the channel of mpv lifecycle events. Closed when the
 // player is Closed or mpv issues EventShutdown.
 func (p *Player) Events() <-chan Event { return p.events }

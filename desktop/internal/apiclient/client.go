@@ -25,6 +25,12 @@ type Client struct {
 	BaseURL string
 	Token   string
 	HTTP    *http.Client
+
+	// RefreshToken, when set, is invoked on a 401 response from the
+	// API. Should return a fresh JWT or an error. The retried request
+	// is sent once with the new token; persistent 401s surface to the
+	// caller as a normal HTTP error.
+	RefreshToken func() (string, error)
 }
 
 func New(baseURL, token string) *Client {
@@ -150,35 +156,65 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	if c.Token == "" {
 		return errors.New("apiclient: token not set")
 	}
-	var br io.Reader
+
+	var rawBody []byte
 	if body != nil {
-		raw, err := json.Marshal(body)
+		var err error
+		rawBody, err = json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		br = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, br)
+
+	resp, respBody, err := c.send(ctx, method, path, rawBody, c.Token)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+
+	// 401 → try a token refresh once. If the refresh fails or the
+	// retry still 401s, the error surfaces unchanged so the runner's
+	// backoff logic can deal with it.
+	if resp.StatusCode == http.StatusUnauthorized && c.RefreshToken != nil {
+		newTok, refreshErr := c.RefreshToken()
+		if refreshErr != nil {
+			return fmt.Errorf("apiclient: refresh after 401: %w", refreshErr)
+		}
+		c.Token = newTok
+		resp, respBody, err = c.send(ctx, method, path, rawBody, newTok)
+		if err != nil {
+			return err
+		}
+	}
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("apiclient: %s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+	if out != nil {
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return fmt.Errorf("apiclient: decode %s: %w (body=%s)", path, err, respBody)
+		}
+	}
+	return nil
+}
+
+func (c *Client) send(ctx context.Context, method, path string, body []byte, token string) (*http.Response, []byte, error) {
+	var br io.Reader
+	if body != nil {
+		br = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, br)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return fmt.Errorf("apiclient: %s %s: %d %s", method, path, resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-	if out != nil {
-		if err := json.Unmarshal(raw, out); err != nil {
-			return fmt.Errorf("apiclient: decode %s: %w (body=%s)", path, err, raw)
-		}
-	}
-	return nil
+	return resp, raw, nil
 }

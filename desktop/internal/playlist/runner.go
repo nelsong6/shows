@@ -77,7 +77,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.OnRound(round)
 		}
 
-		if err := r.waitRound(ctx, len(round)); err != nil {
+		if err := r.waitRound(ctx, round); err != nil {
 			return err
 		}
 
@@ -119,10 +119,17 @@ func (r *Runner) queueRound(ctx context.Context, round []apiclient.RoundEntry) e
 }
 
 // waitRound blocks until `n` EndFile events have been received from
-// libmpv. Drops any other event types — start-file, file-loaded,
-// playback-restart are diagnostic, not state-machine signals.
-func (r *Runner) waitRound(ctx context.Context, n int) error {
+// libmpv. While waiting, it watches for FileLoaded events too and
+// uses them to display the now-playing show name as an OSD overlay —
+// the user knows which show in the round-robin is currently playing
+// without having to alt-tab to the library sidebar.
+//
+// FileLoaded fires once per loaded entry in order, so a simple
+// counter into round[] gives us the right show name.
+func (r *Runner) waitRound(ctx context.Context, round []apiclient.RoundEntry) error {
 	ends := 0
+	fileIdx := 0
+	n := len(round)
 	for ends < n {
 		select {
 		case <-ctx.Done():
@@ -134,6 +141,13 @@ func (r *Runner) waitRound(ctx context.Context, n int) error {
 				return errors.New("mpv events channel closed")
 			}
 			switch ev {
+			case player.EventFileLoaded:
+				if fileIdx < n {
+					entry := round[fileIdx]
+					text := fmt.Sprintf("%s   (%d/%d)", entry.ShowName, fileIdx+1, n)
+					_ = r.Player.ShowText(ctx, text, 4000)
+					fileIdx++
+				}
 			case player.EventEndFile:
 				ends++
 			case player.EventShutdown:
