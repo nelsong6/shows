@@ -86,6 +86,44 @@ func TestSort_Deterministic(t *testing.T) {
 	}
 }
 
+// X1 (cross-playlist rounds): a cross-playlist round is identical to
+// sorting the union of every playlist's candidates, because Sort keys on
+// the absolute path alone — it never looks at playlist membership or input
+// order. Permuting the input stands in for different playlist groupings /
+// fetch orders of the same union; the sorted result must be identical.
+func TestSort_PermutationInvariant(t *testing.T) {
+	base := []Candidate{
+		{EpisodeID: "e1", ShowID: "s1", RootPath: `D:\A`, RelativePath: `a.mkv`},
+		{EpisodeID: "e2", ShowID: "s2", RootPath: `D:\B`, RelativePath: `b.mkv`},
+		{EpisodeID: "e3", ShowID: "s3", RootPath: `D:\C`, RelativePath: `c.mkv`},
+		{EpisodeID: "e4", ShowID: "s4", RootPath: `D:\D`, RelativePath: `d.mkv`},
+		{EpisodeID: "e5", ShowID: "s5", RootPath: `D:\E`, RelativePath: `e.mkv`},
+	}
+	want := Sort(base)
+
+	perms := [][]int{
+		{4, 3, 2, 1, 0},
+		{2, 0, 4, 1, 3},
+		{1, 2, 0, 4, 3},
+	}
+	for _, p := range perms {
+		shuffled := make([]Candidate, len(p))
+		for i, idx := range p {
+			shuffled[i] = base[idx]
+		}
+		got := Sort(shuffled)
+		if len(got) != len(want) {
+			t.Fatalf("perm %v: len %d, want %d", p, len(got), len(want))
+		}
+		for i := range want {
+			if got[i].EpisodeID != want[i].EpisodeID || got[i].OrderValue != want[i].OrderValue {
+				t.Fatalf("perm %v idx %d: got (%s,%#x), want (%s,%#x)",
+					p, i, got[i].EpisodeID, got[i].OrderValue, want[i].EpisodeID, want[i].OrderValue)
+			}
+		}
+	}
+}
+
 func TestSort_TieBreakOnEpisodeID(t *testing.T) {
 	// Force a tie by reusing the same path. Tie-break is lexical on the
 	// string EpisodeID, so "a" < "b" < "c".

@@ -47,6 +47,14 @@ Practical consequence: if the desktop client crashes after `/advance` succeeds s
 
 One episode per active show per round. This is structural, not a soft limit — the `NextEpisodes` query is `DISTINCT ON (s.id) ... ORDER BY s.id, e.position`. Two episodes from the same show in the same round would violate the round-robin meaning of the feature.
 
+### I7. Advance accepts any non-empty subset of the round (per-episode skip)
+
+`/advance` does not require the *entire* round. The client may post any non-empty subset of `(show_id, episode_id)` entries; each is marked watched independently, and `advanced_count` reflects only the newly-watched ones (per I3). Advancing a single entry is the **per-episode skip**: "I'm done with this one, move that show forward now" without waiting for the rest of the round.
+
+Mechanism: `Advance` groups entries by `show_id` and read-modify-writes each show doc once, so a one-entry call touches exactly one show. Because re-advancing an already-watched episode is a no-op (I3), the desktop's round-end advance (which re-sends the whole round) safely re-includes anything skipped earlier in the round.
+
+The skip marks the episode **watched** (it gets a `watch_history` row and the show offers its next-lowest-position unwatched episode next). To move past an episode *without* counting it watched, use defer (below).
+
 ## Failure modes
 
 - **Empty playlist (no active shows)**: `/next-round` returns `{"round": []}`. Clients treat this as "drained, stop trying."
@@ -54,13 +62,35 @@ One episode per active show per round. This is structural, not a soft limit — 
 - **Token expiry mid-round**: client re-runs the auth flow, gets a new token, retries. Server has no notion of "round in progress" — each request is independent.
 - **Server restart mid-round**: same. Server holds no state about an in-flight round; the next `/next-round` returns the same shuffle because I1 (modulo nothing being advanced in between).
 
+## Defer: swap a show's next-round pick
+
+`POST /api/playlists/:name/defer-show` with `{show_id, episode_id}` re-rolls **one** show's next-up episode without marking anything watched — "not this one right now, show me a different one." It moves the named episode to the back of that show's own queue (`position = max(position) + 1`); `watched_at` is untouched and **no `watch_history` row is written**.
+
+Invariants:
+
+- **D1. Defer changes only the named show.** Other shows' next-round picks are unaffected; round order (I1) is simply recomputed from the new positions.
+- **D2. Defer never marks watched.** The deferred episode stays unwatched; it resurfaces as the show's pick once all its earlier-position unwatched episodes are watched or deferred past it. A show is never tombstoned by a defer.
+- **D3. Defer targets an unwatched episode.** Deferring an already-watched or unknown episode is a `404` no-op (nothing is reordered). This keeps defer distinct from advance.
+
+Defer is the **without-counting-it-watched** counterpart to the per-episode skip in I7.
+
+## Cross-playlist rounds
+
+The per-playlist endpoints above stay the primary path; cross-playlist is purely additive for a client that wants to interleave several playlists.
+
+- `GET /api/rounds?playlists=a,b,c` returns one episode per active show **across all named playlists**, ordered by the same SHA-256-of-path key as I1 over the merged candidate set. Each entry carries its `playlist` so the client can route the advance back. Unknown or empty playlists contribute nothing; if every named playlist is drained the response is `{"round": []}`.
+- `POST /api/rounds/advance` with `{entries:[{playlist, show_id, episode_id}, …]}` groups entries by playlist and runs the same per-playlist `Advance` (atomic per show — I2; idempotent — I3) for each, summing `advanced_count` and concatenating `removed_shows`.
+
+Invariants:
+
+- **X1. Cross-playlist order is the single-playlist order over the union.** Hashing is per absolute path, so a cross-playlist round is identical to sorting the concatenation of each playlist's candidates — playlist membership never affects an episode's key.
+- **X2. Advance stays per-playlist-atomic.** A cross-playlist advance is N independent per-playlist advances; there is no cross-playlist transaction. A failure surfaces after some playlists may have advanced (re-issue is safe by I3).
+
 ## Out of scope (today)
 
-- Per-episode `/advance` (skip-this-episode-only without playing it). Today the entire round must advance together.
-- "Swap show next round" — re-rolling a single show's next-round position. Would require either weighted-shuffle parameters or a dedicated `/skip-show` endpoint.
-- Cross-playlist rounds (e.g. "play one episode from nelson, one from couple, alternating"). Each playlist is independent.
+- Weighted or biased shuffles (e.g. "show I haven't watched in longest first"). Order remains the pure deterministic hash.
 
-These appear on the roadmap because the desktop will eventually want hotkeys for them, but they're explicitly not part of this contract today. Adding any of them is a contract amendment — write a new section here first, then implement.
+Adding anything here is a contract amendment — write a new section above first, then implement.
 
 ## Metrics (see `internal/api/metrics.go`)
 
@@ -69,6 +99,7 @@ These appear on the roadmap because the desktop will eventually want hotkeys for
 | `shows_round_size` | histogram | Episodes per `/next-round` response. Bucket `0` == playlist drained. |
 | `shows_advanced_episodes_total` | counter | Sum of `advanced_count` across all `/advance` calls. |
 | `shows_removed_shows_total` | counter | Sum of `len(removed_shows)` across all `/advance` calls — how many shows finished. |
+| `shows_deferred_episodes_total` | counter | Episodes bumped to the back of their queue via `/defer-show` (D1–D3). |
 | `shows_request_duration_seconds` | histogram | Per `(method, path, status)`. |
 
 The PodMonitor at `k8s/templates/podmonitor.yaml` exposes these to the kube-prometheus-stack.

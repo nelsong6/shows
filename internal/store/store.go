@@ -512,6 +512,57 @@ func firstUnwatched(eps []episodeDoc) *episodeDoc {
 	return best
 }
 
+// NextEpisodesMulti concatenates NextEpisodes across several playlists for
+// a cross-playlist round (contract X1). Order is applied by the caller
+// (ordering.Sort over the union); membership never changes an episode's
+// key, so this is just a merge.
+func (s *Store) NextEpisodesMulti(ctx context.Context, playlists []string) ([]NextEpisode, error) {
+	var out []NextEpisode
+	for _, pl := range playlists {
+		eps, err := s.NextEpisodes(ctx, pl)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, eps...)
+	}
+	return out, nil
+}
+
+// deferEpisode moves the named unwatched episode to the back of the queue
+// (position = max+1) so the show offers a different next-up pick, without
+// marking it watched (contract D1–D3). Returns false — a no-op — if the
+// episode isn't present or is already watched.
+func deferEpisode(eps []episodeDoc, episodeID string) bool {
+	idx, maxPos := -1, 0
+	for i := range eps {
+		if eps[i].Position > maxPos {
+			maxPos = eps[i].Position
+		}
+		if eps[i].ID == episodeID {
+			idx = i
+		}
+	}
+	if idx < 0 || eps[idx].WatchedAt != nil {
+		return false
+	}
+	eps[idx].Position = maxPos + 1
+	return true
+}
+
+// DeferEpisode re-rolls one show's next-up pick by bumping the given
+// episode to the back of its queue, leaving watched_at untouched. Returns
+// ErrEpisodeNotFound if the episode is absent or already watched.
+func (s *Store) DeferEpisode(ctx context.Context, playlist, showID, episodeID string) error {
+	d, err := s.readShow(ctx, playlist, showID)
+	if err != nil {
+		return err
+	}
+	if !deferEpisode(d.Episodes, episodeID) {
+		return ErrEpisodeNotFound
+	}
+	return s.writeShow(ctx, d)
+}
+
 // Advance marks the given (show_id, episode_id) pairs as watched,
 // appends to watch_history, and tombstones any show whose queue is
 // now empty.
@@ -544,34 +595,11 @@ func (s *Store) Advance(ctx context.Context, playlist string, entries []AdvanceE
 			return nil, fmt.Errorf("advance: read %s: %w", showID, err)
 		}
 
-		var historyToWrite []historyDoc
-		advancedHere := 0
-		for _, epID := range episodeIDs {
-			for i := range d.Episodes {
-				if d.Episodes[i].ID != epID {
-					continue
-				}
-				if d.Episodes[i].WatchedAt != nil {
-					break
-				}
-				d.Episodes[i].WatchedAt = &now
-				advancedHere++
-				historyToWrite = append(historyToWrite, historyDoc{
-					ID:           uuid.NewString(),
-					ShowID:       d.ID,
-					EpisodeID:    d.Episodes[i].ID,
-					RelativePath: d.Episodes[i].RelativePath,
-					PlayedAt:     now,
-				})
-				break
-			}
-		}
+		historyToWrite, advancedHere, removed := applyAdvance(d, episodeIDs, now)
 		if advancedHere == 0 {
 			continue
 		}
-
-		if allWatched(d.Episodes) {
-			d.RemovedAt = &now
+		if removed {
 			result.RemovedShowIDs = append(result.RemovedShowIDs, d.ID)
 		}
 
@@ -590,6 +618,46 @@ func (s *Store) Advance(ctx context.Context, playlist string, entries []AdvanceE
 		result.AdvancedCount += advancedHere
 	}
 	return result, nil
+}
+
+// applyAdvance is the pure core of Advance — no Cosmos — so the round
+// invariants are unit-testable. It marks the named episodes watched on d
+// and returns the watch_history rows to append, the number newly watched,
+// and whether the show just drained (→ tombstone). d is mutated in place;
+// the caller persists d + the returned history together.
+//
+//   - I3 (idempotent): an episode already watched is skipped, so
+//     re-advancing it adds nothing and writes no history row.
+//   - I7 (per-episode skip): episodeIDs may be any subset of the round;
+//     only the named episodes are touched.
+//   - I5 (tombstone): removed is true iff this call drained the show's
+//     last unwatched episode, in which case d.RemovedAt is set.
+func applyAdvance(d *showDoc, episodeIDs []string, now time.Time) (history []historyDoc, advanced int, removed bool) {
+	for _, epID := range episodeIDs {
+		for i := range d.Episodes {
+			if d.Episodes[i].ID != epID {
+				continue
+			}
+			if d.Episodes[i].WatchedAt != nil {
+				break // I3: already watched — no-op.
+			}
+			d.Episodes[i].WatchedAt = &now
+			advanced++
+			history = append(history, historyDoc{
+				ID:           uuid.NewString(),
+				ShowID:       d.ID,
+				EpisodeID:    d.Episodes[i].ID,
+				RelativePath: d.Episodes[i].RelativePath,
+				PlayedAt:     now,
+			})
+			break
+		}
+	}
+	if advanced > 0 && allWatched(d.Episodes) {
+		d.RemovedAt = &now
+		removed = true
+	}
+	return history, advanced, removed
 }
 
 func allWatched(eps []episodeDoc) bool {

@@ -42,6 +42,11 @@ var (
 		Name: "shows_removed_shows_total",
 		Help: "Cumulative shows whose queues drained and got tombstoned via /advance.",
 	})
+
+	deferredEpisodesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "shows_deferred_episodes_total",
+		Help: "Cumulative episodes bumped to the back of their queue via /defer-show.",
+	})
 )
 
 // metricsMiddleware wraps every chi-routed request with a duration
