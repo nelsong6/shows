@@ -64,6 +64,13 @@ func (s *Server) Router() http.Handler {
 		r.Get("/rounds", s.handleCrossRound)
 		r.Post("/rounds/advance", s.handleCrossAdvance)
 
+		// Offline-first sync: the desktop is the engine, this is its durable
+		// origin. /library is the seed/reconcile pull; /sync is the push of
+		// locally-changed records (last-write-wins). These will supersede the
+		// round endpoints above once the offline client ships.
+		r.Get("/library", s.handleLibrary)
+		r.Post("/sync", s.handleSync)
+
 		r.Post("/shows", s.handleCreateShow)
 		r.Get("/shows/{id}", s.handleGetShow)
 		r.Post("/shows/{id}/episodes", s.handleAppendEpisodes)
@@ -411,6 +418,40 @@ func (s *Server) handleCrossAdvance(w http.ResponseWriter, r *http.Request) {
 		"advanced_count": advanced,
 		"removed_shows":  removed,
 	})
+}
+
+// ─── offline sync ──────────────────────────────────────────────────
+
+// handleLibrary is the client's seed/reconcile pull: all shows (incl. removed)
+// + embedded episodes for the named playlists, each carrying updated_at.
+func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
+	playlists := parsePlaylists(r.URL.Query().Get("playlists"))
+	if len(playlists) == 0 {
+		writeErr(w, http.StatusBadRequest, "playlists query param is required (comma-separated)")
+		return
+	}
+	shows, err := s.Store.FullLibrary(r.Context(), playlists)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"shows": shows})
+}
+
+// handleSync is the client's push: a batch of locally-changed shows/episodes/
+// history, applied last-write-wins by updated_at (idempotent on replay).
+func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	var req store.SyncRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := s.Store.SyncUpsert(r.Context(), req); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	syncedRecordsTotal.Add(float64(len(req.Shows) + len(req.Episodes) + len(req.History)))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ─── shows ─────────────────────────────────────────────────────────

@@ -104,6 +104,10 @@ type showDoc struct {
 	DateAdded  time.Time    `json:"date_added"`
 	RemovedAt  *time.Time   `json:"removed_at,omitempty"`
 	CreatedAt  time.Time    `json:"created_at"`
+	// UpdatedAt is the last-write-wins key for offline sync — the client owns
+	// it (sends it on /sync, reads it on /library). Zero for pre-sync docs,
+	// which correctly reads as "oldest".
+	UpdatedAt  time.Time    `json:"updated_at"`
 	Episodes   []episodeDoc `json:"episodes"`
 }
 
@@ -112,6 +116,8 @@ type episodeDoc struct {
 	RelativePath string     `json:"relative_path"`
 	Position     int        `json:"position"`
 	WatchedAt    *time.Time `json:"watched_at,omitempty"`
+	ResumePos    *float64   `json:"resume_pos,omitempty"` // seconds into the file
+	UpdatedAt    time.Time  `json:"updated_at"`           // LWW key (see showDoc)
 }
 
 type historyDoc struct {
@@ -167,6 +173,70 @@ type AdvanceEntry struct {
 type AdvanceResult struct {
 	AdvancedCount  int      `json:"advanced_count"`
 	RemovedShowIDs []string `json:"removed_show_ids"`
+}
+
+// ─── offline sync wire types ───────────────────────────────────────
+//
+// The desktop is the engine; the server is a durable origin it syncs with
+// git-style. GET /library returns LibraryShow (pull/seed); POST /sync takes a
+// SyncRequest of locally-changed records (push). Both carry updated_at so
+// reconciliation is last-write-wins.
+
+type LibraryEpisode struct {
+	ID           string     `json:"id"`
+	RelativePath string     `json:"relative_path"`
+	Position     int        `json:"position"`
+	WatchedAt    *time.Time `json:"watched_at"`
+	ResumePos    *float64   `json:"resume_pos"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type LibraryShow struct {
+	ID        string           `json:"id"`
+	Playlist  string           `json:"playlist"`
+	Name      string           `json:"name"`
+	RootPath  string           `json:"root_path"`
+	DateAdded time.Time        `json:"date_added"`
+	RemovedAt *time.Time       `json:"removed_at"`
+	UpdatedAt time.Time        `json:"updated_at"`
+	Episodes  []LibraryEpisode `json:"episodes"`
+}
+
+// SyncShow is a show-level change the client pushes. Episodes ride in
+// SyncRequest.Episodes (keyed by show_id) so a row-level change doesn't
+// re-send the whole show.
+type SyncShow struct {
+	ID        string     `json:"id"`
+	Playlist  string     `json:"playlist"`
+	Name      string     `json:"name"`
+	RootPath  string     `json:"root_path"`
+	DateAdded time.Time  `json:"date_added"`
+	RemovedAt *time.Time `json:"removed_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+type SyncEpisode struct {
+	ID           string     `json:"id"`
+	ShowID       string     `json:"show_id"` // routes to the embedding show doc
+	RelativePath string     `json:"relative_path"`
+	Position     int        `json:"position"`
+	WatchedAt    *time.Time `json:"watched_at"`
+	ResumePos    *float64   `json:"resume_pos"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+type SyncHistory struct {
+	ID           string    `json:"id"`
+	ShowID       string    `json:"show_id"`
+	EpisodeID    string    `json:"episode_id"`
+	RelativePath string    `json:"relative_path"`
+	PlayedAt     time.Time `json:"played_at"`
+}
+
+type SyncRequest struct {
+	Shows    []SyncShow    `json:"shows"`
+	Episodes []SyncEpisode `json:"episodes"`
+	History  []SyncHistory `json:"history"`
 }
 
 // ─── errors ────────────────────────────────────────────────────────
@@ -388,13 +458,15 @@ func (s *Store) CreateShow(
 	dateAdded time.Time,
 	episodes []string,
 ) (*Show, error) {
+	now := time.Now().UTC()
 	d := showDoc{
 		ID:        uuid.NewString(),
 		Playlist:  playlist,
 		Name:      name,
 		RootPath:  rootPath,
 		DateAdded: dateAdded.UTC(),
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: now,
+		UpdatedAt: now,
 		Episodes:  make([]episodeDoc, len(episodes)),
 	}
 	for i, rel := range episodes {
@@ -402,6 +474,7 @@ func (s *Store) CreateShow(
 			ID:           uuid.NewString(),
 			RelativePath: rel,
 			Position:     i,
+			UpdatedAt:    now,
 		}
 	}
 	raw, err := json.Marshal(d)
@@ -432,13 +505,16 @@ func (s *Store) AppendEpisodes(ctx context.Context, playlist, showID string, epi
 			start = ep.Position + 1
 		}
 	}
+	now := time.Now().UTC()
 	for i, rel := range episodes {
 		d.Episodes = append(d.Episodes, episodeDoc{
 			ID:           uuid.NewString(),
 			RelativePath: rel,
 			Position:     start + i,
+			UpdatedAt:    now,
 		})
 	}
+	d.UpdatedAt = now
 	if err := s.writeShow(ctx, d); err != nil {
 		return 0, err
 	}
@@ -452,6 +528,152 @@ func (s *Store) writeShow(ctx context.Context, d *showDoc) error {
 	}
 	_, err = s.shows.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(d.Playlist), d.ID, raw, nil)
 	return err
+}
+
+// ─── offline sync (library pull + record push) ─────────────────────
+
+// FullLibrary returns every show (including removed/tombstoned, so the client
+// learns of tombstones) in the named playlists, episodes embedded — the
+// client's seed/reconcile pull. Queried per-playlist (partition-scoped).
+func (s *Store) FullLibrary(ctx context.Context, playlists []string) ([]LibraryShow, error) {
+	out := make([]LibraryShow, 0)
+	for _, pl := range playlists {
+		pager := s.shows.NewQueryItemsPager(
+			"SELECT * FROM c WHERE c.playlist = @pl",
+			azcosmos.NewPartitionKeyString(pl),
+			&azcosmos.QueryOptions{QueryParameters: []azcosmos.QueryParameter{{Name: "@pl", Value: pl}}},
+		)
+		for pager.More() {
+			page, err := pager.NextPage(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for _, raw := range page.Items {
+				var d showDoc
+				if err := json.Unmarshal(raw, &d); err != nil {
+					return nil, err
+				}
+				out = append(out, libraryShowFromDoc(d))
+			}
+		}
+	}
+	return out, nil
+}
+
+func libraryShowFromDoc(d showDoc) LibraryShow {
+	eps := make([]LibraryEpisode, len(d.Episodes))
+	for i, e := range d.Episodes {
+		eps[i] = LibraryEpisode{
+			ID: e.ID, RelativePath: e.RelativePath, Position: e.Position,
+			WatchedAt: e.WatchedAt, ResumePos: e.ResumePos, UpdatedAt: e.UpdatedAt,
+		}
+	}
+	return LibraryShow{
+		ID: d.ID, Playlist: d.Playlist, Name: d.Name, RootPath: d.RootPath,
+		DateAdded: d.DateAdded, RemovedAt: d.RemovedAt, UpdatedAt: d.UpdatedAt, Episodes: eps,
+	}
+}
+
+// SyncUpsert applies a batch of client changes, last-write-wins by updated_at.
+// Show + episode changes are grouped by show and folded into one read-modify-
+// write per show doc (episodes are embedded). History rows are appended,
+// idempotently (duplicate ids ignored). A show change for an id that doesn't
+// exist yet creates it (a locally-created show synced up).
+func (s *Store) SyncUpsert(ctx context.Context, req SyncRequest) error {
+	showByID := map[string]SyncShow{}
+	for _, sh := range req.Shows {
+		showByID[sh.ID] = sh
+	}
+	epsByShow := map[string][]SyncEpisode{}
+	for _, e := range req.Episodes {
+		epsByShow[e.ShowID] = append(epsByShow[e.ShowID], e)
+	}
+	affected := map[string]struct{}{}
+	for id := range showByID {
+		affected[id] = struct{}{}
+	}
+	for id := range epsByShow {
+		affected[id] = struct{}{}
+	}
+
+	for id := range affected {
+		d, err := s.findShowDoc(ctx, id)
+		if errors.Is(err, ErrShowNotFound) {
+			sh, ok := showByID[id]
+			if !ok {
+				continue // episodes for an unknown show; its show record will arrive
+			}
+			nd := showDoc{
+				ID: sh.ID, Playlist: sh.Playlist, Name: sh.Name, RootPath: sh.RootPath,
+				DateAdded: sh.DateAdded, RemovedAt: sh.RemovedAt,
+				CreatedAt: sh.UpdatedAt, UpdatedAt: sh.UpdatedAt,
+			}
+			applyEpisodeSyncs(&nd, epsByShow[id])
+			raw, err := json.Marshal(nd)
+			if err != nil {
+				return err
+			}
+			if _, err := s.shows.CreateItem(ctx, azcosmos.NewPartitionKeyString(nd.Playlist), raw, nil); err != nil {
+				return fmt.Errorf("sync create %s: %w", id, err)
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if sh, ok := showByID[id]; ok && sh.UpdatedAt.After(d.UpdatedAt) {
+			d.Name, d.RootPath, d.Playlist = sh.Name, sh.RootPath, sh.Playlist
+			d.DateAdded, d.RemovedAt, d.UpdatedAt = sh.DateAdded, sh.RemovedAt, sh.UpdatedAt
+		}
+		applyEpisodeSyncs(d, epsByShow[id])
+		if err := s.writeShow(ctx, d); err != nil {
+			return fmt.Errorf("sync write %s: %w", id, err)
+		}
+	}
+
+	for _, h := range req.History {
+		hd := historyDoc{
+			ID: h.ID, ShowID: h.ShowID, EpisodeID: h.EpisodeID,
+			RelativePath: h.RelativePath, PlayedAt: h.PlayedAt,
+		}
+		raw, err := json.Marshal(hd)
+		if err != nil {
+			return err
+		}
+		_, err = s.history.CreateItem(ctx, azcosmos.NewPartitionKeyString(h.ShowID), raw, nil)
+		if err != nil && !isCosmosConflict(err) {
+			return fmt.Errorf("sync history %s: %w", h.ID, err)
+		}
+	}
+	return nil
+}
+
+// applyEpisodeSyncs folds episode changes into a show doc, last-write-wins per
+// episode; an unknown episode id is appended (a locally-added episode).
+func applyEpisodeSyncs(d *showDoc, eps []SyncEpisode) {
+	for _, se := range eps {
+		found := false
+		for i := range d.Episodes {
+			if d.Episodes[i].ID != se.ID {
+				continue
+			}
+			if se.UpdatedAt.After(d.Episodes[i].UpdatedAt) {
+				d.Episodes[i].RelativePath = se.RelativePath
+				d.Episodes[i].Position = se.Position
+				d.Episodes[i].WatchedAt = se.WatchedAt
+				d.Episodes[i].ResumePos = se.ResumePos
+				d.Episodes[i].UpdatedAt = se.UpdatedAt
+			}
+			found = true
+			break
+		}
+		if !found {
+			d.Episodes = append(d.Episodes, episodeDoc{
+				ID: se.ID, RelativePath: se.RelativePath, Position: se.Position,
+				WatchedAt: se.WatchedAt, ResumePos: se.ResumePos, UpdatedAt: se.UpdatedAt,
+			})
+		}
+	}
 }
 
 // ─── rounds ────────────────────────────────────────────────────────
@@ -710,4 +932,14 @@ func isCosmosNotFound(err error) bool {
 		return rerr.StatusCode == 404
 	}
 	return strings.Contains(err.Error(), "404")
+}
+
+// isCosmosConflict reports a 409 (item id already exists) — used to make
+// history inserts idempotent on sync replay.
+func isCosmosConflict(err error) bool {
+	var rerr *azcore.ResponseError
+	if errors.As(err, &rerr) {
+		return rerr.StatusCode == 409
+	}
+	return false
 }

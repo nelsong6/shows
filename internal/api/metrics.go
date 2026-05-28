@@ -47,6 +47,11 @@ var (
 		Name: "shows_deferred_episodes_total",
 		Help: "Cumulative episodes bumped to the back of their queue via /defer-show.",
 	})
+
+	syncedRecordsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "shows_synced_records_total",
+		Help: "Cumulative records (shows+episodes+history) accepted via /sync.",
+	})
 )
 
 // metricsMiddleware wraps every chi-routed request with a duration
