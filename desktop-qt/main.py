@@ -203,13 +203,26 @@ def main() -> int:
             runner.set_pos(i)
 
         player.set_on_pos(on_pos)
+        player.set_on_file_loaded(runner.on_file_loaded)  # restore resume on load
         server.set_command_handlers(skip=runner.skip, defer=runner.defer)
+        started["runner"] = runner
         threading.Thread(target=runner.run, name="runner", daemon=True).start()
+
+        # Periodically persist the current position locally so resume survives a
+        # crash, not just a clean close. Local SQLite write; pushed on sync/close.
+        def _resume_saver():
+            while not stop.wait(15.0):
+                runner.save_resume()
+
+        threading.Thread(target=_resume_saver, name="resume-saver", daemon=True).start()
 
     mpv_item.renderReady.connect(start_runner, Qt.ConnectionType.QueuedConnection)
 
     def _on_quit():
-        syncer.push()  # flush any queued local changes on the way out
+        runner = started.get("runner")
+        if runner is not None:
+            runner.save_resume()  # capture where we are before exit (resume point)
+        syncer.push()  # flush queued local changes (incl. that resume) on the way out
         stop.set()
 
     app.aboutToQuit.connect(_on_quit)

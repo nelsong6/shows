@@ -141,6 +141,26 @@ class Runner:
         self.syncer.push()
         self.player.skip()
 
+    # ── resume (local; resume_pos syncs to the server like any field) ─────
+    def on_file_loaded(self) -> None:
+        """A queued file just loaded — restore its saved resume position."""
+        cur = self._current()
+        if cur is None:
+            return
+        pos = self.replica.resume_pos(cur.episode_id)
+        if pos and pos > 1.0:  # ignore zero / the very start
+            self.player.seek_absolute(pos)
+
+    def save_resume(self) -> None:
+        """Persist the current episode's position to the replica (local; pushed
+        on the next sync). Called periodically and on window close."""
+        cur = self._current()
+        if cur is None:
+            return
+        pos = self.player.time_pos()
+        if pos is not None and pos > 1.0:
+            self.replica.set_resume(cur.episode_id, float(pos))
+
     # ── round build / advance (all local; sync is best-effort) ────────────
     def _fetch_round(self) -> list[RoundEntry]:
         shows = self.replica.active_shows(self.playlists)

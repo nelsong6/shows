@@ -42,9 +42,20 @@ class Player:
                 self._shutdown = True
                 self._cv.notify_all()
 
+        # Fires when a queued file finishes loading — the runner uses it to seek
+        # the now-playing episode to its saved resume position. Set after
+        # construction (the runner is built later).
+        self._on_file_loaded: Optional[Callable[[], None]] = None
+
+        @handle.event_callback("file-loaded")
+        def _on_loaded(_ev):
+            cb = self._on_file_loaded
+            if cb is not None:
+                cb()
+
         # Keep refs so python-mpv's weakref-based callback registry doesn't
         # drop them.
-        self._cbs = (_on_end, _on_shutdown)
+        self._cbs = (_on_end, _on_shutdown, _on_loaded)
 
         # Report the current playlist index (which queued entry is playing) so
         # the overlay can show "now playing / up next" and the runner knows
@@ -65,6 +76,24 @@ class Player:
         """(Re)point the playlist-pos callback. Used by main.py to fan position
         updates out to both the overlay status and the runner once both exist."""
         self._on_pos = fn
+
+    def set_on_file_loaded(self, fn: Callable[[], None]) -> None:
+        self._on_file_loaded = fn
+
+    def time_pos(self) -> Optional[float]:
+        """Current playback position in seconds, or None if not playing."""
+        try:
+            return self._m.time_pos
+        except Exception:
+            return None
+
+    def seek_absolute(self, seconds: float) -> None:
+        """Seek to an absolute position in seconds — used to restore a resume
+        point when an episode loads."""
+        try:
+            self._m.command("seek", seconds, "absolute")
+        except Exception:
+            pass
 
     # ── commands ──────────────────────────────────────────────────────
     def play(self, path: str, mode: str) -> None:

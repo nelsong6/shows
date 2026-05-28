@@ -13,6 +13,8 @@ class FakePlayer:
     def __init__(self):
         self.skips = 0
         self.on_wait = None  # hook to drive interactive controls mid-round
+        self.seeked = None   # last seek_absolute target
+        self._time = None    # what time_pos() returns
 
     def play(self, *a):
         pass
@@ -25,6 +27,12 @@ class FakePlayer:
 
     def skip(self):
         self.skips += 1
+
+    def time_pos(self):
+        return self._time
+
+    def seek_absolute(self, seconds):
+        self.seeked = seconds
 
     def wait_for_round(self, n, stop):
         if self.on_wait:
@@ -150,3 +158,27 @@ def test_cross_playlist_round_spans_playlists():
     runner = Runner(r, StubSyncer(), FakePlayer(), ["nelson", "couple"], threading.Event())
     rnd = runner._fetch_round()
     assert {e.show_id for e in rnd} == {"s1", "s2"}  # union across both playlists
+
+
+def test_save_resume_persists_position():
+    r = _replica([_show("s1", "nelson", ["a", "b"])])
+    p = FakePlayer()
+    p._time = 100.0
+    runner = Runner(r, StubSyncer(), p, ["nelson"], threading.Event())
+    runner._round = runner._fetch_round()
+    runner.set_pos(0)
+    cur = runner._current()
+    runner.save_resume()
+    assert r.resume_pos(cur.episode_id) == 100.0
+
+
+def test_on_file_loaded_seeks_to_resume():
+    r = _replica([_show("s1", "nelson", ["a", "b"])])
+    p = FakePlayer()
+    runner = Runner(r, StubSyncer(), p, ["nelson"], threading.Event())
+    runner._round = runner._fetch_round()
+    runner.set_pos(0)
+    cur = runner._current()
+    r.set_resume(cur.episode_id, 200.0)
+    runner.on_file_loaded()
+    assert p.seeked == 200.0
