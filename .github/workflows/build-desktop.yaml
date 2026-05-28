@@ -14,15 +14,22 @@ name: Build Desktop
 # Local Windows dev still uses desktop/scripts/build.ps1 directly.
 
 on:
+  # push:main keeps `paths:` so a doc-only main commit doesn't burn a build
+  # cycle and re-publish a release. The push will be a no-op when no desktop
+  # files changed; the most recent release stays current.
   push:
     branches: [main]
     paths:
       - desktop/**
       - .github/workflows/build-desktop.yaml
+  # pull_request intentionally has NO `paths:` filter. Branch protection on
+  # main wants this check as a required status; a paths-filtered workflow
+  # that doesn't trigger never reports a status, and the merge sits
+  # forever. We always run the job and short-circuit inside if the PR
+  # didn't touch anything desktop-relevant — see "Detect desktop changes"
+  # below. End result: every PR gets a "Cross-compile shows-desktop for
+  # Windows" status check, irrelevant PRs report success in <30s.
   pull_request:
-    paths:
-      - desktop/**
-      - .github/workflows/build-desktop.yaml
   workflow_dispatch:
     inputs:
       git_ref:
@@ -67,10 +74,34 @@ jobs:
           git checkout --detach "$full_sha"
           echo "resolved ${INPUT_REF} -> ${full_sha}"
 
+      # PR short-circuit. We always trigger the workflow on PRs (so the
+      # status check always reports), but if the PR didn't touch
+      # desktop/** or this workflow file there's no reason to spend ~5
+      # minutes on a cross-compile. The check still reports success; it
+      # just runs in seconds instead of minutes.
+      - name: Detect desktop changes
+        id: changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_REF"
+          base="$(git rev-parse "origin/$BASE_REF")"
+          changed="$(git diff --name-only "$base"...HEAD)"
+          echo "$changed"
+          if printf '%s\n' "$changed" | grep -qE '^(desktop/|\.github/workflows/build-desktop\.yaml$)'; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::No desktop/ or build-desktop.yaml changes — short-circuiting."
+          fi
+
       # Cross-compile toolchain. mingw-w64 provides x86_64-w64-mingw32-gcc
       # for cgo; p7zip-full unpacks the libmpv .7z bundle. Pinned to Ubuntu
       # defaults — these are stable enough to float.
       - name: Install cross-compile toolchain
+        if: steps.changes.outputs.skip != 'true'
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -79,12 +110,14 @@ jobs:
             p7zip-full
 
       - name: Setup Go
+        if: steps.changes.outputs.skip != 'true'
         uses: actions/setup-go@v5
         with:
           go-version-file: desktop/go.mod
           cache-dependency-path: desktop/go.sum
 
       - name: Setup Node
+        if: steps.changes.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -92,12 +125,14 @@ jobs:
           cache-dependency-path: desktop/frontend/package-lock.json
 
       - name: Install Wails CLI
+        if: steps.changes.outputs.skip != 'true'
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
       # Same libmpv .7z bundle as desktop/scripts/setup-libmpv.ps1.
       # Cached across runs keyed on the version+hash pin — bump both
       # together when libmpv bumps.
       - name: Cache libmpv runtime
+        if: steps.changes.outputs.skip != 'true'
         id: libmpv-cache
         uses: actions/cache@v4
         with:
@@ -105,7 +140,7 @@ jobs:
           key: libmpv-windows-20250420-3600c71
 
       - name: Fetch libmpv (cold cache only)
-        if: steps.libmpv-cache.outputs.cache-hit != 'true'
+        if: steps.changes.outputs.skip != 'true' && steps.libmpv-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           version=20250420
@@ -122,6 +157,7 @@ jobs:
       # committed, so `-skipbindings` keeps wails from trying to run the
       # Windows binary on Linux to regenerate them.
       - name: Build (cross-compile)
+        if: steps.changes.outputs.skip != 'true'
         working-directory: desktop
         env:
           CGO_ENABLED: '1'
@@ -136,6 +172,7 @@ jobs:
           test -f build/bin/shows.exe
 
       - name: Bundle libmpv-2.dll alongside shows.exe
+        if: steps.changes.outputs.skip != 'true'
         working-directory: desktop
         run: cp third_party/libmpv/libmpv-2.dll build/bin/
 
@@ -143,7 +180,7 @@ jobs:
       # page has a downloadable copy for debugging. Push-to-main builds rely
       # on the Release below for distribution.
       - name: Upload workflow artifact
-        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'push' || github.ref != 'refs/heads/main')
         uses: actions/upload-artifact@v4
         with:
           name: shows-desktop-${{ github.sha }}
