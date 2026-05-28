@@ -65,10 +65,18 @@ func NewApp() *App {
 }
 
 // initLogFile opens %APPDATA%\shows\shows.log for append and returns a
-// logger that tees writes to stderr + that file. Also sets it as the
+// logger that writes there + best-effort to stderr. Also sets it as the
 // package-default for callers that use slog directly. File handle lives
 // for the process lifetime — no rotation, but at one-JSON-line-per-event
 // this is a few MB per week of continuous playback.
+//
+// We use a tolerant multi-writer (not io.MultiWriter) because Wails ships
+// the GUI subsystem on Windows, which leaves os.Stderr attached to a dead
+// handle. io.MultiWriter short-circuits on the first writer's error, so
+// writing to (stderr, file) would error on stderr and never reach the
+// file. tolerantMultiWriter writes to every target and discards their
+// individual errors — the file is the source of truth; stderr is just
+// "nice to have" for wails-dev console launches.
 func initLogFile() (*slog.Logger, string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -83,10 +91,33 @@ func initLogFile() (*slog.Logger, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	w := io.MultiWriter(os.Stderr, f)
+	w := tolerantMultiWriter{f, os.Stderr}
 	logger := slog.New(slog.NewJSONHandler(w, nil))
 	slog.SetDefault(logger)
 	return logger, path, nil
+}
+
+// tolerantMultiWriter fans Writes out to every wrapped writer and never
+// surfaces an individual writer's error — the slog handler only sees
+// success if at least one write succeeded. Order matters: the first
+// writer is the "primary" (the file); secondary writers (stderr) being
+// dead is silently OK.
+type tolerantMultiWriter []io.Writer
+
+func (m tolerantMultiWriter) Write(p []byte) (int, error) {
+	var firstErr error
+	anySuccess := false
+	for _, w := range m {
+		if n, err := w.Write(p); err == nil && n == len(p) {
+			anySuccess = true
+		} else if firstErr == nil {
+			firstErr = err
+		}
+	}
+	if anySuccess {
+		return len(p), nil
+	}
+	return 0, firstErr
 }
 
 // startup is called by Wails when the window is created. We grab the
