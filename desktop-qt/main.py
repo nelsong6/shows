@@ -74,9 +74,18 @@ from shows import oauth  # noqa: E402
 from shows.apiclient import Client  # noqa: E402
 from shows.mpv_item import MpvItem  # noqa: E402
 from shows.player import Player  # noqa: E402
+from shows.replica import Replica  # noqa: E402
 from shows.roundlogic import parse_playlists  # noqa: E402
 from shows.runner import Runner  # noqa: E402
+from shows.sync import Syncer  # noqa: E402
 from shows.webserver import ControlServer  # noqa: E402
+
+
+def _replica_path() -> str:
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "shows")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "replica.db")
 
 # Playlists to round-robin over. One by default (the primary single-playlist
 # path); set SHOWS_PLAYLISTS=a,b,c to interleave several via cross-playlist
@@ -137,16 +146,17 @@ def main() -> int:
     tok = oauth.ensure_token(opener=_opener)
     client = Client(tok.token, refresh_token=lambda: oauth.ensure_token(opener=_opener).token)
 
-    def active_shows():
-        out = []
-        for pl in PLAYLISTS:
-            out.extend(client.list_active_shows(pl))
-        return out
+    # Offline-first: the local replica is the working copy the runner plays from;
+    # the Syncer reconciles it with the server (seed on runner start, push at
+    # smart moments). The overlay reads shows/history from the replica so the
+    # dashboard works offline too.
+    replica = Replica(_replica_path())
+    syncer = Syncer(replica, client, PLAYLISTS)
 
     server = ControlServer(
         dist_dir=DIST_DIR,
-        shows_provider=active_shows,
-        history_provider=client.show_history,
+        shows_provider=lambda: replica.overlay_shows(PLAYLISTS),
+        history_provider=replica.show_history,
     )
     port = server.start()
     server.push(playlist=", ".join(PLAYLISTS))
@@ -177,8 +187,9 @@ def main() -> int:
         started["v"] = True
         player = Player(mpv_item.mpv)
         server.set_player(player)
+        server.set_syncer(syncer)
         runner = Runner(
-            client, player, PLAYLISTS, stop,
+            replica, syncer, player, PLAYLISTS, stop,
             on_round=lambda r: server.push(phase="playing", message=f"round of {len(r)}", round=r, round_pos=0),
             on_advance=lambda res: server.push(last_advance=res),
             on_drained=lambda: server.push(phase="drained", message="every show finished", round=[]),
@@ -196,7 +207,12 @@ def main() -> int:
         threading.Thread(target=runner.run, name="runner", daemon=True).start()
 
     mpv_item.renderReady.connect(start_runner, Qt.ConnectionType.QueuedConnection)
-    app.aboutToQuit.connect(stop.set)
+
+    def _on_quit():
+        syncer.push()  # flush any queued local changes on the way out
+        stop.set()
+
+    app.aboutToQuit.connect(_on_quit)
     return app.exec()
 
 

@@ -166,3 +166,19 @@ class Client:
         success; 404 (already-watched/unknown episode) surfaces as APIError."""
         self._do("POST", f"/api/playlists/{playlist}/defer-show",
                  {"show_id": show_id, "episode_id": episode_id})
+
+    # ── offline sync (library pull + record push) ──────────────────────
+    def get_library(self, playlists: list[str]) -> list[dict]:
+        """Pull the full library (shows + embedded episodes, incl. removed) for
+        seeding/reconciling the local replica. Returns raw dicts for
+        Replica.merge_shows."""
+        q = ",".join(playlists)
+        data = self._do("GET", f"/api/library?playlists={quote(q)}").json()
+        return data.get("shows") or []
+
+    def post_sync(self, shows: list[dict], episodes: list[dict], history: list[dict]) -> None:
+        """Push locally-changed records; the server upserts last-write-wins.
+        Caller passes the replica's dirty rows (already shaped to the wire
+        contract). 204 on success."""
+        self._do("POST", "/api/sync",
+                 {"shows": shows, "episodes": episodes, "history": history})

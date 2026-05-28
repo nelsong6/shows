@@ -11,6 +11,7 @@ import {
   setVolume,
   setSub,
   setAudio,
+  syncNow,
   type Status,
   type Show,
   type HistoryEvent,
@@ -293,6 +294,18 @@ function ControlBar({
           {viewing ? 'hide list' : 'show list'}
         </button>
       )}
+      {status.sync && (
+        <span
+          className={`pill ${status.sync.online ? 'info' : 'drain'}`}
+          title={status.sync.online ? 'synced with server' : 'offline — changes queued locally'}
+        >
+          {status.sync.online ? 'online' : 'offline'}
+          {status.sync.pending > 0 ? ` ·${status.sync.pending}` : ''}
+        </span>
+      )}
+      <button className="gb" onClick={() => syncNow()} title="push queued changes + pull">
+        sync
+      </button>
       <span className="keys">space · n · d · j/l · ↑↓ · v · esc</span>
     </div>
   );

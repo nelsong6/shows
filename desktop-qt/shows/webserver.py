@@ -57,6 +57,7 @@ class ControlServer:
         self._player: Optional[Player] = None
         self._on_skip: Optional[Callable[[], None]] = None
         self._on_defer: Optional[Callable[[], None]] = None
+        self._syncer = None  # set after the runner is built; backs /sync-now + status
         self._httpd: Optional[http.server.HTTPServer] = None
         self.port = 0
         self._dist = dist_dir
@@ -78,6 +79,11 @@ class ControlServer:
         if defer is not None:
             self._on_defer = defer
 
+    def set_syncer(self, syncer) -> None:
+        """Wire the Syncer so /status reports online/pending and POST /sync-now
+        triggers a manual reconcile (the 'check connectivity' button)."""
+        self._syncer = syncer
+
     def set_shows_provider(self, fn: Callable[[], list]) -> None:
         self._shows_provider = fn
 
@@ -98,6 +104,9 @@ class ControlServer:
                 status["playback"] = self._player.playback_state()
             except Exception as e:  # noqa: BLE001 — keep /status serving
                 log.warning("playback_state failed: %s", e)
+        # Sync state for the offline indicator: online + unpushed-change count.
+        if self._syncer is not None:
+            status["sync"] = {"online": self._syncer.online, "pending": self._syncer.pending()}
         return json.dumps(status).encode("utf-8")
 
     def index_html(self) -> bytes:
@@ -170,6 +179,11 @@ class ControlServer:
                 p = srv._player
                 if self.path == "/pause" and p:
                     p.toggle_pause()
+                    self._send(204)
+                elif self.path == "/sync-now" and srv._syncer is not None:
+                    # Manual "check connectivity"/reconcile. Run off-thread so the
+                    # response is instant; the overlay sees the result via /status.
+                    threading.Thread(target=srv._syncer.sync, name="sync-now", daemon=True).start()
                     self._send(204)
                 elif self.path == "/skip" and srv._on_skip:
                     srv._on_skip()

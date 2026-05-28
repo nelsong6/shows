@@ -53,6 +53,13 @@ export type Playback = {
   aid: number | string | null;
 };
 
+// Offline-first sync state: are we reaching the server, and how many local
+// changes are queued to push (the git "ahead" count).
+export type SyncState = {
+  online: boolean;
+  pending: number;
+};
+
 export type Status = {
   phase: Phase;
   message: string;
@@ -62,6 +69,7 @@ export type Status = {
   round_pos?: number;
   last_advance?: AdvanceResult;
   playback?: Playback;
+  sync?: SyncState;
 };
 
 export type Show = {
@@ -129,6 +137,11 @@ export function setSub(sid: number | string): void {
 
 export function setAudio(aid: number | string): void {
   void fetch('/audio', {method: 'POST', body: JSON.stringify({aid})});
+}
+
+// Manual "check connectivity" / reconcile — push queued changes + pull.
+export function syncNow(): void {
+  void fetch('/sync-now', {method: 'POST'});
 }
 
 // Poll /status on an interval, invoking `onStatus` with each successful

@@ -1,19 +1,12 @@
-"""Runner orchestration tests with fake client + player — the skip/defer
-commands, position tracking, round-end defer-exclusion, and single-vs-cross
-advance routing. Imports the runner without libmpv (player.py guards its mpv
-import behind TYPE_CHECKING)."""
+"""Runner tests for the offline-first design: the runner drives a real
+in-memory replica via the engine, with a stub syncer + fake player."""
 
 import threading
 
-from shows.apiclient import AdvanceResult, APIError, RoundEntry
+from shows.replica import Replica
 from shows.runner import Runner
 
-
-def _entry(eid, sid="s", pl="nelson"):
-    return RoundEntry(
-        show_id=sid, show_name=sid, episode_id=eid,
-        absolute_path=f"D:\\{eid}.mkv", order_value=0, playlist=pl,
-    )
+T0 = "2026-01-01T00:00:00Z"
 
 
 class FakePlayer:
@@ -38,116 +31,122 @@ class FakePlayer:
             self.on_wait()
 
 
-class FakeClient:
-    def __init__(self, rounds):
-        self._rounds = list(rounds)   # one list per fetch; [] once exhausted
-        self.advances = []            # (playlist, [AdvanceEntry])
-        self.multi_advances = []      # ([RoundEntry])
-        self.defers = []              # (playlist, show_id, episode_id)
-        self.defer_error = False
+class StubSyncer:
+    def __init__(self):
+        self.seeds = 0
+        self.pushes = 0
+        self.online = True
 
-    def next_round(self, pl):
-        return self._rounds.pop(0) if self._rounds else []
+    def seed(self):
+        self.seeds += 1
+        return True
 
-    def next_round_multi(self, pls):
-        return self._rounds.pop(0) if self._rounds else []
+    def push(self):
+        self.pushes += 1
+        return True
 
-    def advance(self, pl, entries):
-        self.advances.append((pl, entries))
-        return AdvanceResult()
-
-    def advance_multi(self, entries):
-        self.multi_advances.append(entries)
-        return AdvanceResult()
-
-    def defer_show(self, pl, show, ep):
-        if self.defer_error:
-            raise APIError("boom")
-        self.defers.append((pl, show, ep))
+    def pending(self):
+        return 0
 
 
-def test_skip_advances_current_and_jumps():
-    c, p = FakeClient([]), FakePlayer()
-    r = Runner(c, p, ["nelson"], threading.Event())
-    r._round = [_entry("e0"), _entry("e1")]
-    r.set_pos(0)
+def _show(sid, playlist, eps):
+    return {
+        "id": sid, "playlist": playlist, "name": sid, "root_path": rf"D:\{sid}", "updated_at": T0,
+        "episodes": [
+            {"id": e, "relative_path": f"{e}.mkv", "position": i, "updated_at": T0}
+            for i, e in enumerate(eps)
+        ],
+    }
 
-    r.skip()
 
+def _replica(shows):
+    r = Replica(":memory:")
+    r.merge_shows(shows)
+    return r
+
+
+def _watched(r, episode_id):
+    for sid in ("s1", "s2"):
+        s = r.show(sid)
+        if not s:
+            continue
+        for e in s.episodes:
+            if e.id == episode_id:
+                return e.watched_at
+    return None
+
+
+def test_skip_advances_current_locally():
+    r = _replica([_show("s1", "nelson", ["a", "b"])])
+    p = FakePlayer()
+    runner = Runner(r, StubSyncer(), p, ["nelson"], threading.Event())
+    runner._round = runner._fetch_round()
+    runner.set_pos(0)
+    cur = runner._current()
+    runner.skip()
     assert p.skips == 1
-    assert len(c.advances) == 1
-    pl, entries = c.advances[0]
-    assert pl == "nelson"
-    assert [e.episode_id for e in entries] == ["e0"]
+    assert _watched(r, cur.episode_id) is not None
 
 
-def test_defer_calls_defer_show_excludes_and_jumps():
-    c, p = FakeClient([]), FakePlayer()
-    r = Runner(c, p, ["nelson"], threading.Event())
-    r._round = [_entry("e0"), _entry("e1")]
-    r.set_pos(1)
-
-    r.defer()
-
-    assert c.defers == [("nelson", "s", "e1")]
-    assert "e1" in r._deferred
+def test_defer_bumps_without_watching_and_excludes():
+    r = _replica([_show("s1", "nelson", ["a", "b"])])
+    p = FakePlayer()
+    runner = Runner(r, StubSyncer(), p, ["nelson"], threading.Event())
+    runner._round = runner._fetch_round()
+    runner.set_pos(0)
+    cur = runner._current()
+    runner.defer()
+    ep = next(e for e in r.show("s1").episodes if e.id == cur.episode_id)
+    assert ep.watched_at is None and ep.position == 2  # bumped to max+1, not watched
+    assert cur.episode_id in runner._deferred
     assert p.skips == 1
 
 
-def test_defer_failure_leaves_unchanged_and_keeps_playing():
-    c, p = FakeClient([]), FakePlayer()
-    c.defer_error = True
-    r = Runner(c, p, ["nelson"], threading.Event())
-    r._round = [_entry("e0")]
-    r.set_pos(0)
-
-    r.defer()
-
-    assert r._deferred == set()
-    assert p.skips == 0          # didn't jump past it — defer didn't take
-    assert c.advances == []      # and definitely didn't mark it watched
+def test_no_round_is_safe():
+    r = _replica([_show("s1", "nelson", ["a"])])
+    p = FakePlayer()
+    runner = Runner(r, StubSyncer(), p, ["nelson"], threading.Event())
+    runner.defer()  # no round in progress -> no-op
+    runner.skip()   # skip still nudges the player
+    assert p.skips == 1
+    assert r.show("s1").episodes[0].watched_at is None
 
 
-def test_skip_or_defer_with_no_round_is_safe():
-    c, p = FakeClient([]), FakePlayer()
-    r = Runner(c, p, ["nelson"], threading.Event())
-    # No round in progress (_round is None).
-    r.defer()
-    r.skip()
-    assert c.defers == []
-    assert c.advances == []
-    assert p.skips == 1          # skip still nudges the player locally
+def test_drained_calls_on_drained():
+    r = Replica(":memory:")  # empty library
+    stop = threading.Event()
+    seen = {"drained": False}
+    runner = Runner(
+        r, StubSyncer(), FakePlayer(), ["nelson"], stop,
+        on_drained=lambda: (seen.update(drained=True), stop.set()),
+    )
+    runner._loop()
+    assert seen["drained"]
 
 
 def test_round_end_advance_excludes_deferred():
-    c = FakeClient([[_entry("e0"), _entry("e1")]])  # one round, then drained
+    r = _replica([_show("s1", "nelson", ["a", "b"]), _show("s2", "nelson", ["c"])])
     p = FakePlayer()
     stop = threading.Event()
-    r = Runner(c, p, ["nelson"], stop, on_drained=stop.set)
+    runner = Runner(r, StubSyncer(), p, ["nelson"], stop, on_advance=lambda res: stop.set())
+    cap = {}
 
-    # Mid-round, the user defers the current entry (pos 0 == e0).
     def during_wait():
-        r.set_pos(0)
-        r.defer()
+        runner.set_pos(0)
+        cap["deferred"] = runner._current().episode_id
+        cap["round"] = [e.episode_id for e in runner._round]
+        runner.defer()
 
     p.on_wait = during_wait
-    r._loop()
+    runner._loop()
 
-    assert c.defers == [("nelson", "s", "e0")]
-    assert len(c.advances) == 1
-    _, entries = c.advances[0]
-    assert [e.episode_id for e in entries] == ["e1"]  # e0 was deferred, not advanced
+    assert _watched(r, cap["deferred"]) is None  # deferred stays unwatched
+    for e in [x for x in cap["round"] if x != cap["deferred"]]:
+        assert _watched(r, e) is not None  # the rest of the round advanced
 
 
-def test_cross_playlist_round_uses_advance_multi():
-    rnd = [_entry("e0", pl="nelson"), _entry("e1", pl="couple")]
-    c = FakeClient([rnd])
-    p = FakePlayer()
-    stop = threading.Event()
-    r = Runner(c, p, ["nelson", "couple"], stop, on_drained=stop.set)
-
-    r._loop()
-
-    assert len(c.multi_advances) == 1
-    assert [e.episode_id for e in c.multi_advances[0]] == ["e0", "e1"]
-    assert c.advances == []  # routed through the cross-playlist endpoint, not single
+def test_cross_playlist_round_spans_playlists():
+    r = _replica([_show("s1", "nelson", ["a"]), _show("s2", "couple", ["b"])])
+    runner = Runner(r, StubSyncer(), FakePlayer(), ["nelson", "couple"], threading.Event())
+    rnd = runner._fetch_round()
+    assert {e.show_id for e in rnd} == {"s1", "s2"}  # union across both playlists

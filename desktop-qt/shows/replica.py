@@ -137,6 +137,46 @@ class Replica:
             ).fetchone()
             return r["resume_pos"] if r else None
 
+    def reveal(self, show_id: str) -> dict:
+        """The 'just finished' payload for a tombstoned show — name, date added,
+        and last play time (from watch_history) — for the overlay reveal."""
+        with self._lock:
+            s = self._db.execute(
+                "SELECT name, date_added FROM shows WHERE id=?", (show_id,)
+            ).fetchone()
+            h = self._db.execute(
+                "SELECT MAX(played_at) AS last FROM watch_history WHERE show_id=?", (show_id,)
+            ).fetchone()
+            return {
+                "id": show_id,
+                "name": s["name"] if s else "",
+                "date_added": (s["date_added"] if s else None) or "",
+                "last_played_at": (h["last"] if h and h["last"] else None) or "",
+            }
+
+    def overlay_shows(self, playlists: list[str]) -> list[dict]:
+        """Active shows for the dashboard sidebar (no episodes), as plain dicts —
+        offline-capable replacement for the old GET /api/playlists call."""
+        return [
+            {
+                "id": s.id, "playlist": s.playlist, "name": s.name,
+                "root_path": s.root_path, "date_added": s.date_added or "",
+                "removed_at": s.removed_at,
+            }
+            for s in self.active_shows(playlists)  # acquires the lock itself
+        ]
+
+    def show_history(self, show_id: str) -> list[dict]:
+        """Watch-history rows for a show, oldest first — backs the overlay's
+        per-show history view from the local replica."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT episode_id, relative_path, played_at FROM watch_history"
+                " WHERE show_id=? ORDER BY played_at",
+                (show_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     # ── mutations (local-first: mark dirty + bump updated_at) ───────────
     def advance(self, entries: list[tuple[str, str]], now: Optional[str] = None) -> tuple[int, list[str]]:
         """Mark (show_id, episode_id) pairs watched via the engine; persist
