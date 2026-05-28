@@ -27,27 +27,6 @@ var (
 		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
 	}, []string{"method", "path", "status"})
 
-	roundResponseSize = promauto.NewHistogram(prometheus.HistogramOpts{
-		Name:    "shows_round_size",
-		Help:    "Number of episodes returned in a /next-round response. 0 == playlist drained.",
-		Buckets: []float64{0, 1, 5, 10, 20, 40, 80},
-	})
-
-	advancedEpisodesTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "shows_advanced_episodes_total",
-		Help: "Cumulative episodes marked watched via /advance.",
-	})
-
-	removedShowsTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "shows_removed_shows_total",
-		Help: "Cumulative shows whose queues drained and got tombstoned via /advance.",
-	})
-
-	deferredEpisodesTotal = promauto.NewCounter(prometheus.CounterOpts{
-		Name: "shows_deferred_episodes_total",
-		Help: "Cumulative episodes bumped to the back of their queue via /defer-show.",
-	})
-
 	syncedRecordsTotal = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "shows_synced_records_total",
 		Help: "Cumulative records (shows+episodes+history) accepted via /sync.",

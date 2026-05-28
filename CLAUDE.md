@@ -10,28 +10,36 @@ When extending a feature documented at `docs/feature-contracts/`, name the affec
 
 ## Layout
 
+Offline-first: the **desktop is the engine** (round selection / advance / defer /
+resume run locally against a SQLite replica) and the **server is a durable
+origin** it syncs with git-style (`GET /library` pull, `POST /sync` push,
+last-write-wins). The server-side round engine + the legacy import tooling have
+been removed; the round-and-advance contract now governs the desktop.
+
 ```
 cmd/
-  shows-api/          HTTP server, runs in AKS
-  shows-migrate/      one-shot import from the legacy play_show JSON files
-                      (kept until the desktop absorbs in-app import)
+  shows-api/          HTTP server, runs in AKS (dumb store: /library + /sync)
 internal/
-  ordering/           deterministic-random round ordering (SHA-256 → uint32)
   auth/               JWKS verifier + chi middleware for auth.romaine.life JWTs
-  device/             auth.romaine.life CLI device flow (used by shows-migrate)
-  store/              Cosmos SDK store layer (shows + watch_history containers)
+  store/              Cosmos SDK store layer (shows + watch_history; library/sync)
   api/                chi routes, handlers, Prometheus metrics
 desktop-qt/           PySide6 + libmpv client (mpv video composited under a
-                      transparent React overlay in one Qt window)
+                      transparent React overlay in one Qt window) — the engine
   main.py             entry: OpenGL/WebEngine setup, QML window, runner wiring
   shows/
     mpv_item.py       mpv render API → QQuickFramebufferObject (Qt composites)
-    webserver.py      control server: serves the overlay + /status /shows /pause /skip /defer
+    webserver.py      control server: serves the overlay + /status /pause /skip
+                      /defer /seek /volume /sub /audio /sync-now /library/* /stats
     oauth.py          user-login flow against auth.romaine.life (PKCE + loopback)
-    apiclient.py      shows.romaine.life HTTP client + 401 refresh hook
-    runner.py         round-robin runner (fetch → queue → wait → skip/defer → advance)
-    roundlogic.py     pure round helpers (advance-set minus deferred, playlist parse)
-    player.py         python-mpv handle wrapper
+    apiclient.py      shows.romaine.life client (get_library / post_sync + 401 refresh)
+    replica.py        local SQLite working copy (seed, mutate, dirty-track, LWW)
+    engine.py         the round/advance/defer engine over the replica
+    sync.py           git-style sync: seed/push/connectivity (no polling)
+    scan.py           scan a show's folder for episode files
+    ordering.py       SHA-256 path ordering, bit-identical to the old Go server
+    runner.py         round-robin runner (replica round → queue → wait → advance + push)
+    roundlogic.py     pure helpers (advance-set minus deferred, playlist parse)
+    player.py         python-mpv handle wrapper (seek/volume/tracks/resume)
   frontend/           Vite + React + TS overlay (glimmung design-system tokens)
   shows-qt.spec       PyInstaller onedir build (bundles libmpv + the overlay)
 docs/
@@ -51,7 +59,7 @@ Per the fleet convention:
 - **`k8s/`** — Helm chart consumed by the ArgoCD `Application` defined in `infra-bootstrap/k8s/apps/shows.yaml`. ArgoCD auto-syncs on push.
 - **`.github/workflows/build-and-deploy.yaml`** — builds `cmd/shows-api`, pushes to `romainecr.azurecr.io/shows:<sha>`, bumps `k8s/values.yaml`, commits. ArgoCD picks up the new tag.
 
-The desktop app (`desktop-qt/`) and the migrate tool (`cmd/shows-migrate`) are **not** deployed to AKS. `.github/workflows/build-desktop.yaml` packages the desktop app with PyInstaller on a Windows runner and publishes it as a GitHub Release; the migrate tool builds locally per-machine.
+The desktop app (`desktop-qt/`) is **not** deployed to AKS. `.github/workflows/build-desktop.yaml` packages it with PyInstaller on a Windows runner and publishes it as a GitHub Release.
 
 ## Auth
 
@@ -59,7 +67,7 @@ Every `/api/*` route requires an auth.romaine.life JWT with `role in {admin, use
 
 The desktop app uses the **user-login** path at `GET /api/auth/cli/user-login` (PKCE + loopback `redirect_uri`). If the user has no `.romaine.life` session cookie, auth.romaine.life bounces them through Microsoft/Google and returns; the server then redirects to the loopback with a one-time `?code=...`. The desktop POSTs `{grant_type: authorization_code, code, code_verifier, redirect_uri}` to `/api/auth/cli/user-token` and receives the user's own JWT (`role=user|admin`, no `purpose` claim — same shape the browser session would yield). The JWT never travels through the browser. Token caches at `%APPDATA%\shows\token.json`; on 401 the apiclient calls back into the oauth module's `ensure_token` for an in-place refresh.
 
-`cmd/shows-migrate` still uses the **bot-token** CLI flow (`internal/device` → `/api/cli/device` + `/api/cli/token`) because it's an unattended import script, not a user-facing app. Both go away when the desktop grows an in-app import flow.
+Library import is now in-app: the desktop scans a folder (`shows/scan.py`) and creates the show locally, which syncs up via `/sync`. The old `cmd/shows-migrate` bulk-import tool and its bot-token CLI flow (`internal/device`) have been removed.
 
 ## Cosmos store
 
@@ -72,7 +80,7 @@ The runtime pod attaches to Cosmos via workload identity: `serviceaccount/shows:
 
 ## Ordering invariant
 
-The deterministic-random round order is computed by `internal/ordering`:
+The deterministic-random round order is now computed **on the desktop** by `desktop-qt/shows/ordering.py` (the server no longer computes rounds):
 
 ```
 hash := SHA-256(UTF-8 bytes of: root_path + "\" + relative_path)
@@ -80,7 +88,7 @@ order_value := uint32(first 4 hex chars of hash, parsed as base 16)
 shows in round are sorted by order_value ascending
 ```
 
-Bit-for-bit reproduces `Get-FileHash -InputStream` + `SubString(0,4)` + `[uint32]` from the legacy `play_ordered_show.ps1`. Tests in `internal/ordering/ordering_test.go` lock the contract against three public SHA-256 fixtures. See [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md) for the six invariants the round + advance pair satisfies.
+Bit-for-bit reproduces `Get-FileHash -InputStream` + `SubString(0,4)` + `[uint32]` from the legacy `play_ordered_show.ps1`. Locked by `desktop-qt/tests/test_engine.py` (round selection/advance/defer) + `ordering`'s own tests. See [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md) for the invariants the round + advance pair satisfies — the contract the desktop engine now implements.
 
 ## Migration source data
 
@@ -94,7 +102,7 @@ Legacy state at `D:\Downloads\Group-Nelson\nelson.json` + the per-show JSONs it 
 }
 ```
 
-Episode paths are relative to the parent directory of the per-show JSON. `cmd/shows-migrate` joins them with that parent to produce the absolute path stored as `episodes.relative_path` and the show's `root_path`. Run once on any machine that has the legacy `nelson.json` reachable; idempotent re-runs are not supported (would create duplicate show docs).
+Episode paths were relative to the parent directory of the per-show JSON, joined with that parent to produce the absolute path stored as `episodes.relative_path` and the show's `root_path`. This one-time legacy import is done (the `cmd/shows-migrate` tool has been removed); new shows are now added in-app by scanning a folder (`desktop-qt/shows/scan.py`), which derives `relative_path` the same way (backslash-joined, to match the ordering hash).
 
 ## Observability
 
