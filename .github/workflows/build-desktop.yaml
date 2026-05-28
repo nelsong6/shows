@@ -1,0 +1,175 @@
+name: Build Desktop
+
+# Cross-compiles shows-desktop for Windows on a Linux runner. On push to
+# main, publishes shows.exe + libmpv-2.dll as a GitHub Release tagged with
+# the short SHA, plus updates the `latest` release. On PRs and dispatch,
+# validates the build without publishing.
+#
+# Why Releases, not ACR: shows-desktop is a single Windows binary the user
+# runs locally — there's no k8s/ACR consumer in the loop. A GitHub Release
+# is browser-downloadable, has no Docker/ACR install dependency, and is
+# durable. The earlier Docker-image-in-ACR approach forced the user to run
+# `docker pull && docker cp` just to extract one .exe.
+#
+# Local Windows dev still uses desktop/scripts/build.ps1 directly.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - desktop/**
+      - .github/workflows/build-desktop.yaml
+  pull_request:
+    paths:
+      - desktop/**
+      - .github/workflows/build-desktop.yaml
+  workflow_dispatch:
+    inputs:
+      git_ref:
+        description: "Git ref or commit SHA to build. Leave blank to build the dispatch revision."
+        required: false
+        type: string
+
+permissions:
+  contents: write   # gh release create + upload assets
+
+concurrency:
+  group: build-desktop-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.git_ref || '' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Cross-compile shows-desktop for Windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve requested ref
+        if: github.event_name == 'workflow_dispatch' && inputs.git_ref != ''
+        env:
+          INPUT_REF: ${{ inputs.git_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if full_sha="$(git rev-parse --verify "${INPUT_REF}^{commit}" 2>/dev/null)"; then
+            :
+          elif git show-ref --verify --quiet "refs/remotes/origin/${INPUT_REF}"; then
+            full_sha="$(git rev-parse "refs/remotes/origin/${INPUT_REF}^{commit}")"
+          elif git show-ref --verify --quiet "refs/tags/${INPUT_REF}"; then
+            full_sha="$(git rev-parse "refs/tags/${INPUT_REF}^{commit}")"
+          else
+            echo "::error::Unable to resolve git_ref '${INPUT_REF}' to a commit."
+            exit 1
+          fi
+          git checkout --detach "$full_sha"
+          echo "resolved ${INPUT_REF} -> ${full_sha}"
+
+      # Cross-compile toolchain. mingw-w64 provides x86_64-w64-mingw32-gcc
+      # for cgo; p7zip-full unpacks the libmpv .7z bundle. Pinned to Ubuntu
+      # defaults — these are stable enough to float.
+      - name: Install cross-compile toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mingw-w64 \
+            p7zip-full
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: desktop/go.mod
+          cache-dependency-path: desktop/go.sum
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: desktop/frontend/package-lock.json
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      # Same libmpv .7z bundle as desktop/scripts/setup-libmpv.ps1.
+      # Cached across runs keyed on the version+hash pin — bump both
+      # together when libmpv bumps.
+      - name: Cache libmpv runtime
+        id: libmpv-cache
+        uses: actions/cache@v4
+        with:
+          path: desktop/third_party/libmpv
+          key: libmpv-windows-20250420-3600c71
+
+      - name: Fetch libmpv (cold cache only)
+        if: steps.libmpv-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          version=20250420
+          hash=3600c71
+          file="mpv-dev-x86_64-${version}-git-${hash}.7z"
+          url="https://master.dl.sourceforge.net/project/mpv-player-windows/libmpv/${file}?viasf=1"
+          mkdir -p desktop/third_party/libmpv
+          curl -fSL -o /tmp/libmpv.7z "$url"
+          7z x /tmp/libmpv.7z -odesktop/third_party/libmpv -y
+          rm /tmp/libmpv.7z
+          test -f desktop/third_party/libmpv/libmpv-2.dll
+
+      # The frontend's TS bindings under desktop/frontend/wailsjs/ are
+      # committed, so `-skipbindings` keeps wails from trying to run the
+      # Windows binary on Linux to regenerate them.
+      - name: Build (cross-compile)
+        working-directory: desktop
+        env:
+          CGO_ENABLED: '1'
+          CC: x86_64-w64-mingw32-gcc
+          CXX: x86_64-w64-mingw32-g++
+        run: |
+          set -euo pipefail
+          libmpv="$(pwd)/third_party/libmpv"
+          export CGO_CFLAGS="-I${libmpv}/include"
+          export CGO_LDFLAGS="-L${libmpv} -lmpv"
+          wails build -platform windows/amd64 -skipbindings -clean
+          test -f build/bin/shows.exe
+
+      - name: Bundle libmpv-2.dll alongside shows.exe
+        working-directory: desktop
+        run: cp third_party/libmpv/libmpv-2.dll build/bin/
+
+      # PR + dispatch builds: also upload as a workflow artifact so the run
+      # page has a downloadable copy for debugging. Push-to-main builds rely
+      # on the Release below for distribution.
+      - name: Upload workflow artifact
+        if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shows-desktop-${{ github.sha }}
+          path: |
+            desktop/build/bin/shows.exe
+            desktop/build/bin/libmpv-2.dll
+          if-no-files-found: error
+          retention-days: 30
+
+      # Push-to-main: publish a GitHub Release. Tagged with the short SHA
+      # so each main commit gets a permanent download URL; marked `--latest`
+      # so the Releases page always shows the freshest build at the top.
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha_short="${GITHUB_SHA:0:7}"
+          tag="desktop-${sha_short}"
+          title="shows-desktop @ ${sha_short}"
+          notes="Cross-compiled from ${GITHUB_SHA}.\n\nDownload \`shows.exe\` and \`libmpv-2.dll\` and put them in the same directory."
+          gh release create "$tag" \
+            desktop/build/bin/shows.exe \
+            desktop/build/bin/libmpv-2.dll \
+            --title "$title" \
+            --notes "$notes" \
+            --target main \
+            --latest
