@@ -74,17 +74,30 @@ func run() error {
 		return nil
 	}
 
-	host, _ := os.Hostname()
-	tok, err := device.EnsureToken(ctx, *authURL, device.RequesterInfo{
-		WhereHappening: fmt.Sprintf("shows-migrate on %s", host),
-		IntendedUse:    "import legacy play_show JSON state",
-		MiscIdentifier: "almanac",
-	})
-	if err != nil {
-		return fmt.Errorf("auth: %w", err)
+	// SHOWS_TOKEN lets a caller inject an already-minted JWT (e.g. the
+	// user token the desktop app caches at %APPDATA%\shows\token.json)
+	// and skip the bot-token device flow. The migrate endpoint accepts
+	// any role in {admin, user}, so a human's own token works — no
+	// browser approval, no separate bot identity. Falls back to the
+	// device flow when unset.
+	var token string
+	if t := strings.TrimSpace(os.Getenv("SHOWS_TOKEN")); t != "" {
+		fmt.Fprintln(os.Stderr, "using SHOWS_TOKEN from environment (skipping device flow)")
+		token = t
+	} else {
+		host, _ := os.Hostname()
+		tok, err := device.EnsureToken(ctx, *authURL, device.RequesterInfo{
+			WhereHappening: fmt.Sprintf("shows-migrate on %s", host),
+			IntendedUse:    "import legacy play_show JSON state",
+			MiscIdentifier: "almanac",
+		})
+		if err != nil {
+			return fmt.Errorf("auth: %w", err)
+		}
+		token = tok.Token
 	}
 
-	res, err := postMigrate(ctx, *apiURL, tok.Token, *playlistName, shows)
+	res, err := postMigrate(ctx, *apiURL, token, *playlistName, shows)
 	if err != nil {
 		return err
 	}
