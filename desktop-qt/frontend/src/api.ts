@@ -105,6 +105,31 @@ export async function listHistory(showId: string): Promise<HistoryEvent[]> {
   return r.json();
 }
 
+export type ShowProgress = {
+  name: string;
+  playlist: string;
+  watched: number;
+  total: number;
+  removed: boolean;
+};
+
+export type Stats = {
+  total_shows: number;
+  active_shows: number;
+  finished_shows: number;
+  episodes_total: number;
+  episodes_watched: number;
+  per_show: ShowProgress[];
+  recent: {show: string; relative_path: string; played_at: string}[];
+  by_day: Record<string, number>;
+};
+
+export async function getStats(): Promise<Stats> {
+  const r = await fetch('/stats');
+  if (!r.ok) throw new Error(`/stats ${r.status}`);
+  return r.json();
+}
+
 export function pause(): void {
   void fetch('/pause', {method: 'POST'});
 }

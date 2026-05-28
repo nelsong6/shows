@@ -261,6 +261,89 @@ table.runs th {
   color: var(--fg-dim);
 }
 
+/* Stats panel: watch heatmap, per-show progress, recent activity. */
+.stat-h {
+  margin: 14px 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+}
+.heatmap {
+  display: grid;
+  grid-template-columns: repeat(14, 1fr);
+  gap: 3px;
+  margin: 8px 0;
+  max-width: 320px;
+}
+.hm-cell {
+  aspect-ratio: 1;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.hm-cell[data-l='1'] { background: color-mix(in srgb, var(--state-busy-fg) 30%, transparent); }
+.hm-cell[data-l='2'] { background: color-mix(in srgb, var(--state-busy-fg) 55%, transparent); }
+.hm-cell[data-l='3'] { background: color-mix(in srgb, var(--state-busy-fg) 80%, transparent); }
+.hm-cell[data-l='4'] { background: var(--state-busy-fg); }
+ul.progress,
+ul.recent {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+ul.progress li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+.p-name {
+  min-width: 120px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.p-bar {
+  flex: 1;
+  height: 6px;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.p-fill {
+  display: block;
+  height: 100%;
+  background: var(--state-busy-fg);
+}
+.p-num {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 48px;
+  text-align: right;
+}
+ul.recent li {
+  display: flex;
+  gap: 10px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+.rc-show {
+  min-width: 110px;
+  color: var(--fg);
+}
+.rc-ep {
+  flex: 1;
+  color: var(--fg-dim);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rc-when {
+  color: var(--fg-dim);
+}
+
 /* Sidebar rows are clickable (select a show -> its watch history). */
 .sidebar li {
   cursor: pointer;

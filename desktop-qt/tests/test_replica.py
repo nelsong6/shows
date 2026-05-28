@@ -127,3 +127,18 @@ def test_episode_paths_and_update_show():
     assert r.update_show(sid, name="Y", playlist="couple") is True
     s = r.show(sid)
     assert s.name == "Y" and s.playlist == "couple"
+
+
+def test_stats_counts_progress_and_finished():
+    r = Replica(":memory:")
+    a = r.create_show("nelson", "A", r"D:\A", ["a1.mkv", "a2.mkv"])
+    b = r.create_show("nelson", "B", r"D:\B", ["b1.mkv"])
+    r.advance([(a, r.show(a).episodes[0].id), (b, r.show(b).episodes[0].id)])  # b drains -> finished
+    s = r.stats(["nelson"])
+    assert s["total_shows"] == 2
+    assert s["episodes_total"] == 3 and s["episodes_watched"] == 2
+    assert s["finished_shows"] == 1
+    assert len(s["recent"]) == 2
+    by_name = {p["name"]: p for p in s["per_show"]}
+    assert by_name["A"]["watched"] == 1 and by_name["A"]["total"] == 2
+    assert by_name["B"]["removed"] is True

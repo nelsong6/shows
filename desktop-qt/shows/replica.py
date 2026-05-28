@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from . import engine
@@ -176,6 +176,72 @@ class Replica:
                 (show_id,),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def stats(self, playlists: list[str]) -> dict:
+        """Library + watch stats for the dashboard, computed from the replica
+        (works offline): totals, per-show progress, recent activity, and a
+        per-day watch count for a heatmap."""
+        if not playlists:
+            return {}
+        marks = ",".join("?" * len(playlists))
+        with self._lock:
+            shows = self._db.execute(
+                f"SELECT id, name, playlist, removed_at FROM shows WHERE playlist IN ({marks})",
+                playlists,
+            ).fetchall()
+            name_by = {s["id"]: s["name"] for s in shows}
+            per, ep_total, ep_watched, finished = [], 0, 0, 0
+            for s in shows:
+                c = self._db.execute(
+                    "SELECT COUNT(*) total, SUM(CASE WHEN watched_at IS NOT NULL THEN 1 ELSE 0 END) w"
+                    " FROM episodes WHERE show_id=?",
+                    (s["id"],),
+                ).fetchone()
+                total, w = c["total"], c["w"] or 0
+                ep_total += total
+                ep_watched += w
+                if s["removed_at"]:
+                    finished += 1
+                per.append({
+                    "name": s["name"], "playlist": s["playlist"],
+                    "watched": w, "total": total, "removed": bool(s["removed_at"]),
+                })
+            # Recent + heatmap come from episodes' watched_at (pulled from the
+            # server in /library), so they reflect the FULL history — not just
+            # this client's local watch_history rows.
+            recent = [
+                {"show": name_by.get(r["show_id"], "?"),
+                 "relative_path": r["relative_path"], "played_at": r["watched_at"]}
+                for r in self._db.execute(
+                    "SELECT e.show_id, e.relative_path, e.watched_at FROM episodes e"
+                    " JOIN shows s ON e.show_id = s.id"
+                    f" WHERE e.watched_at IS NOT NULL AND s.playlist IN ({marks})"
+                    " ORDER BY e.watched_at DESC LIMIT 25",
+                    playlists,
+                )
+            ]
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=140)).isoformat()
+            by_day = {
+                r["d"]: r["c"]
+                for r in self._db.execute(
+                    "SELECT substr(e.watched_at,1,10) d, COUNT(*) c FROM episodes e"
+                    " JOIN shows s ON e.show_id = s.id"
+                    f" WHERE e.watched_at IS NOT NULL AND s.playlist IN ({marks})"
+                    " AND e.watched_at >= ? GROUP BY d",
+                    playlists + [cutoff],
+                )
+            }
+        per.sort(key=lambda x: -(x["watched"] / x["total"] if x["total"] else 0))
+        return {
+            "total_shows": len(shows),
+            "active_shows": sum(1 for s in shows if not s["removed_at"]),
+            "finished_shows": finished,
+            "episodes_total": ep_total,
+            "episodes_watched": ep_watched,
+            "per_show": per,
+            "recent": recent,
+            "by_day": by_day,
+        }
 
     # ── mutations (local-first: mark dirty + bump updated_at) ───────────
     def advance(self, entries: list[tuple[str, str]], now: Optional[str] = None) -> tuple[int, list[str]]:

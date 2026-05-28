@@ -46,6 +46,7 @@ class ControlServer:
         dist_dir: str,
         shows_provider: Optional[Callable[[], list]] = None,
         history_provider: Optional[Callable[[str], list]] = None,
+        stats_provider: Optional[Callable[[], dict]] = None,
     ):
         if not dist_dir or not os.path.isdir(dist_dir):
             raise FileNotFoundError(
@@ -65,6 +66,7 @@ class ControlServer:
         self._dist = dist_dir
         self._shows_provider = shows_provider
         self._history_provider = history_provider
+        self._stats_provider = stats_provider
 
     def set_player(self, player: Player) -> None:
         self._player = player
@@ -162,6 +164,8 @@ class ControlServer:
                     self._send(200, srv._status_json(), "application/json")
                 elif self.path == "/shows":
                     self._send(200, srv._shows_json(), "application/json")
+                elif self.path == "/stats":
+                    self._send(200, srv._stats_json(), "application/json")
                 elif self.path.startswith("/history"):
                     q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     self._send(200, srv._history_json(q.get("show", [""])[0]), "application/json")
@@ -283,6 +287,15 @@ class ControlServer:
             log.warning("shows provider failed: %s", e)
             return b"[]"
         return json.dumps([_jsonable(s) for s in shows]).encode("utf-8")
+
+    def _stats_json(self) -> bytes:
+        if self._stats_provider is None:
+            return b"{}"
+        try:
+            return json.dumps(self._stats_provider()).encode("utf-8")
+        except Exception as e:  # noqa: BLE001 — surface as empty, log it
+            log.warning("stats provider failed: %s", e)
+            return b"{}"
 
     def _history_json(self, show_id: str) -> bytes:
         if self._history_provider is None or not show_id:

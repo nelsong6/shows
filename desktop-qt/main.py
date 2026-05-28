@@ -157,6 +157,7 @@ def main() -> int:
         dist_dir=DIST_DIR,
         shows_provider=lambda: replica.overlay_shows(PLAYLISTS),
         history_provider=replica.show_history,
+        stats_provider=lambda: replica.stats(PLAYLISTS),
     )
     server.set_library(replica)  # backs the /library/* management endpoints
     port = server.start()

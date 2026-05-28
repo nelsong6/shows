@@ -3,6 +3,7 @@ import {
   subscribeStatus,
   listShows,
   listHistory,
+  getStats,
   pause,
   skip,
   defer,
@@ -19,6 +20,7 @@ import {
   type Show,
   type HistoryEvent,
   type Playback,
+  type Stats,
 } from './api';
 import './App.css';
 
@@ -57,8 +59,19 @@ function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEvent[]>([]);
   const [showDashboard, setShowDashboard] = useState(false);
+  const [stats, setStats] = useState<Stats | null>(null);
 
   useEffect(() => subscribeStatus(setStatus), []);
+
+  // Library/watch stats for the dashboard — refresh on phase change and after
+  // each advance (the watched counts move).
+  useEffect(() => {
+    if (status.phase === 'playing' || status.phase === 'drained' || status.phase === 'fetching') {
+      getStats()
+        .then(setStats)
+        .catch(() => {});
+    }
+  }, [status.phase, status.last_advance?.advanced_count]);
 
   // Latest playback, mirrored to a ref so the (mount-once) key handler can read
   // current volume for relative +/- without re-binding every poll.
@@ -279,6 +292,7 @@ function App() {
                     </table>
                   </div>
                 )}
+                <StatsPanel stats={stats} />
               </>
             )}
           </main>
@@ -552,6 +566,82 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
         </button>
       </div>
       {msg && <div className="add-msg">{msg}</div>}
+    </div>
+  );
+}
+
+function Heatmap({ byDay }: { byDay: Record<string, number> }) {
+  const today = new Date();
+  const cells = [];
+  for (let i = 97; i >= 0; i--) {
+    const d = new Date(today);
+    d.setDate(today.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const c = byDay[key] || 0;
+    const level = c === 0 ? 0 : c < 2 ? 1 : c < 4 ? 2 : c < 7 ? 3 : 4;
+    cells.push(<span key={key} className="hm-cell" data-l={level} title={`${key}: ${c} watched`} />);
+  }
+  return <div className="heatmap">{cells}</div>;
+}
+
+// Library + watch stats: totals, a watch heatmap, per-show progress, recent.
+function StatsPanel({ stats }: { stats: Stats | null }) {
+  if (!stats || !stats.total_shows) return null;
+  const pct = stats.episodes_total
+    ? Math.round((stats.episodes_watched / stats.episodes_total) * 100)
+    : 0;
+  const active = stats.per_show.filter((s) => !s.removed).slice(0, 14);
+  return (
+    <div className="section">
+      <h3>stats</h3>
+      <div className="kpi">
+        <div className="kpi-cell">
+          <div className="kpi-key">episodes watched</div>
+          <div className="kpi-val">
+            {stats.episodes_watched} / {stats.episodes_total} ({pct}%)
+          </div>
+        </div>
+        <div className="kpi-cell">
+          <div className="kpi-key">shows finished</div>
+          <div className="kpi-val">{stats.finished_shows}</div>
+        </div>
+        <div className="kpi-cell">
+          <div className="kpi-key">active shows</div>
+          <div className="kpi-val">{stats.active_shows}</div>
+        </div>
+      </div>
+      <Heatmap byDay={stats.by_day} />
+      <h4 className="stat-h">progress</h4>
+      <ul className="progress">
+        {active.map((s) => (
+          <li key={s.name}>
+            <span className="p-name">{s.name}</span>
+            <span className="p-bar">
+              <span
+                className="p-fill"
+                style={{ width: `${s.total ? (s.watched / s.total) * 100 : 0}%` }}
+              />
+            </span>
+            <span className="p-num">
+              {s.watched}/{s.total}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {stats.recent.length > 0 && (
+        <>
+          <h4 className="stat-h">recent</h4>
+          <ul className="recent">
+            {stats.recent.slice(0, 10).map((r, i) => (
+              <li key={i}>
+                <span className="rc-show">{r.show}</span>
+                <span className="rc-ep">{shortPath(r.relative_path)}</span>
+                <span className="rc-when">{relTime(r.played_at)}</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   );
 }
