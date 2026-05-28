@@ -680,6 +680,45 @@ func (s *Store) ShowHistory(ctx context.Context, showID string) ([]HistoryEvent,
 	return out, nil
 }
 
+// DeleteShowHistory removes every watch_history row for a show (partition key =
+// show_id) and returns how many were deleted. The show doc and its episodes are
+// untouched. This is an admin maintenance operation — correcting a play log that
+// was polluted out of band (e.g. by a bad import); normal flows only ever append
+// to watch_history via SyncUpsert.
+func (s *Store) DeleteShowHistory(ctx context.Context, showID string) (int, error) {
+	pk := azcosmos.NewPartitionKeyString(showID)
+	pager := s.history.NewQueryItemsPager(
+		"SELECT c.id FROM c WHERE c.show_id = @s",
+		pk,
+		&azcosmos.QueryOptions{
+			QueryParameters: []azcosmos.QueryParameter{{Name: "@s", Value: showID}},
+		},
+	)
+	deleted := 0
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return deleted, err
+		}
+		for _, raw := range page.Items {
+			var d struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(raw, &d); err != nil {
+				return deleted, err
+			}
+			if _, err := s.history.DeleteItem(ctx, pk, d.ID, nil); err != nil {
+				if isCosmosNotFound(err) {
+					continue // already gone — idempotent
+				}
+				return deleted, err
+			}
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 // ─── helpers ───────────────────────────────────────────────────────
 
 // isCosmosNotFound returns true if err is a 404 from the Cosmos SDK.

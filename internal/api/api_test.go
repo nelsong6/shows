@@ -1,8 +1,12 @@
 package api
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"github.com/nelsong6/shows/internal/auth"
 )
 
 func TestParsePlaylists(t *testing.T) {
@@ -25,5 +29,22 @@ func TestParsePlaylists(t *testing.T) {
 				t.Fatalf("parsePlaylists(%q) = %#v, want %#v", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// DeleteShowHistory is admin-only: a missing or non-admin caller is refused
+// before the store is ever touched (so a nil Store is fine here).
+func TestDeleteShowHistoryRequiresAdmin(t *testing.T) {
+	s := &Server{}
+	for _, role := range []string{"", "user", "service"} {
+		req := httptest.NewRequest(http.MethodDelete, "/api/shows/x/history", nil)
+		if role != "" {
+			req = req.WithContext(auth.WithCaller(req.Context(), &auth.Caller{Role: role}))
+		}
+		rr := httptest.NewRecorder()
+		s.handleDeleteShowHistory(rr, req)
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("role=%q: got %d, want 403", role, rr.Code)
+		}
 	}
 }

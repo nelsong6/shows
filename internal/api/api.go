@@ -67,6 +67,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/shows/{id}", s.handleGetShow)
 		r.Post("/shows/{id}/episodes", s.handleAppendEpisodes)
 		r.Get("/shows/{id}/history", s.handleShowHistory)
+		r.Delete("/shows/{id}/history", s.handleDeleteShowHistory)
 	})
 
 	return r
@@ -271,4 +272,25 @@ func (s *Server) handleShowHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"history": hist})
+}
+
+// handleDeleteShowHistory purges a show's watch_history. Admin-only — it's a
+// destructive maintenance op (correcting an out-of-band-polluted play log),
+// distinct from the append-only sync flow.
+func (s *Server) handleDeleteShowHistory(w http.ResponseWriter, r *http.Request) {
+	if c := auth.CallerFromContext(r.Context()); c == nil || !c.IsAdmin() {
+		writeErr(w, http.StatusForbidden, "admin role required")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	n, err := s.Store.DeleteShowHistory(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": n})
 }
