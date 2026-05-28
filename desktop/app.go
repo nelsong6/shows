@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -62,12 +64,54 @@ func NewApp() *App {
 	}
 }
 
+// initLogFile opens %APPDATA%\shows\shows.log for append and returns a
+// logger that tees writes to stderr + that file. Also sets it as the
+// package-default for callers that use slog directly. File handle lives
+// for the process lifetime — no rotation, but at one-JSON-line-per-event
+// this is a few MB per week of continuous playback.
+func initLogFile() (*slog.Logger, string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return nil, "", err
+	}
+	cfgDir := filepath.Join(dir, "shows")
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		return nil, "", err
+	}
+	path := filepath.Join(cfgDir, "shows.log")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, "", err
+	}
+	w := io.MultiWriter(os.Stderr, f)
+	logger := slog.New(slog.NewJSONHandler(w, nil))
+	slog.SetDefault(logger)
+	return logger, path, nil
+}
+
 // startup is called by Wails when the window is created. We grab the
 // host HWND, hand it to libmpv (so mpv embeds its render surface as a
 // child of the Wails window), then spawn the runner goroutine that
 // authenticates and drives the round-robin loop forever.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
+
+	// Tee the logger to a file under the per-user config dir alongside
+	// token.json. mpv covers the WebView2 surface during playback so
+	// the React status panel isn't visible — log persistence is the
+	// only way to reconstruct "what went wrong" after the fact, and
+	// the startDebugServer endpoint below is the only way to inspect
+	// "what's going on right now" without staring at the window.
+	if logger, logPath, err := initLogFile(); err != nil {
+		a.logger.Warn("log file init failed; logging only to stderr", "err", err)
+	} else {
+		a.logger = logger
+		a.logger.Info("logging to file", "path", logPath)
+	}
+
+	if err := a.startDebugServer(ctx); err != nil {
+		a.logger.Warn("debug server failed to start", "err", err)
+	}
 
 	hwnd, err := win32.WaitForWindow(windowTitle, 2*time.Second)
 	if err != nil {
