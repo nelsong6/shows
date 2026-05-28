@@ -59,6 +59,7 @@ class ControlServer:
         self._player: Optional[Player] = None
         self._on_skip: Optional[Callable[[], None]] = None
         self._on_defer: Optional[Callable[[], None]] = None
+        self._on_fullscreen: Optional[Callable[[], None]] = None
         self._syncer = None  # set after the runner is built; backs /sync-now + status
         self._replica = None  # set for /library/* management endpoints
         self._httpd: Optional[http.server.HTTPServer] = None
@@ -75,13 +76,17 @@ class ControlServer:
         self,
         skip: Optional[Callable[[], None]] = None,
         defer: Optional[Callable[[], None]] = None,
+        fullscreen: Optional[Callable[[], None]] = None,
     ) -> None:
-        """Wire POST /skip and POST /defer to the runner. Set after the runner
-        exists (it's built once mpv's render context is ready)."""
+        """Wire POST /skip, /defer, and /fullscreen. Set after the runner exists
+        (it's built once mpv's render context is ready). `fullscreen` toggles the
+        Qt window; it must marshal onto the Qt thread itself (see main.py)."""
         if skip is not None:
             self._on_skip = skip
         if defer is not None:
             self._on_defer = defer
+        if fullscreen is not None:
+            self._on_fullscreen = fullscreen
 
     def set_syncer(self, syncer) -> None:
         """Wire the Syncer so /status reports online/pending and POST /sync-now
@@ -201,6 +206,9 @@ class ControlServer:
                     self._send(204)
                 elif self.path == "/defer" and srv._on_defer:
                     srv._on_defer()
+                    self._send(204)
+                elif self.path == "/fullscreen" and srv._on_fullscreen:
+                    srv._on_fullscreen()
                     self._send(204)
                 elif self.path == "/seek" and p:
                     b = self._json_body()

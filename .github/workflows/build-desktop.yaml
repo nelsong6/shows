@@ -108,6 +108,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r desktop-qt/requirements.txt pyinstaller
 
+      # Stamp the short SHA into the bundle so the app can tell whether it's the
+      # latest release (read by shows/update.py). Absent in source checkouts, so
+      # dev runs report "version unknown" and skip the update check.
+      - name: Stamp build SHA into the bundle
+        if: steps.changes.outputs.skip != 'true'
+        shell: bash
+        run: echo "SHA = \"${GITHUB_SHA:0:7}\"" > desktop-qt/shows/_build.py
+
       - name: Package (PyInstaller)
         if: steps.changes.outputs.skip != 'true'
         working-directory: desktop-qt

@@ -7,6 +7,7 @@ import {
   pause,
   skip,
   defer,
+  toggleFullscreen,
   seekPercent,
   seekRelative,
   setVolume,
@@ -21,6 +22,7 @@ import {
   type HistoryEvent,
   type Playback,
   type Stats,
+  type UpdateInfo,
 } from './api';
 import './App.css';
 
@@ -60,6 +62,7 @@ function App() {
   const [history, setHistory] = useState<HistoryEvent[]>([]);
   const [showDashboard, setShowDashboard] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
 
   useEffect(() => subscribeStatus(setStatus), []);
 
@@ -96,6 +99,9 @@ function App() {
           break;
         case 'd':
           defer();
+          break;
+        case 'f':
+          toggleFullscreen();
           break;
         case 'j':
           seekRelative(-10);
@@ -170,6 +176,12 @@ function App() {
 
   return (
     <div className="overlay-root">
+      {status.update?.available && status.update.latest !== updateDismissed && (
+        <UpdateBanner
+          info={status.update}
+          onDismiss={() => setUpdateDismissed(status.update!.latest)}
+        />
+      )}
       <ControlBar
         status={status}
         pos={pos}
@@ -302,6 +314,39 @@ function App() {
   );
 }
 
+// A dismissible banner shown when the launch update-check finds a newer release.
+function UpdateBanner({ info, onDismiss }: { info: UpdateInfo; onDismiss: () => void }) {
+  return (
+    <div
+      className="updatebar"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '6px 12px',
+        background: 'rgba(18,18,18,0.94)',
+        borderBottom: '1px solid var(--border, #333)',
+        fontSize: 13,
+        color: 'var(--fg-secondary, #ccc)',
+      }}
+    >
+      <span className="pill info">update</span>
+      <span style={{ flex: 1 }}>
+        A newer build is available — <strong>{info.latest}</strong>
+        {info.current ? ` (you're on ${info.current})` : ''}.
+      </span>
+      {info.url && (
+        <a className="gb" href={info.url} target="_blank" rel="noreferrer">
+          releases ↗
+        </a>
+      )}
+      <button className="gb" onClick={onDismiss} title="dismiss">
+        ✕
+      </button>
+    </div>
+  );
+}
+
 // Always-on control bar at the top — the only chrome over live video when
 // the dashboard is hidden. Top-anchored + semi-opaque so it composites
 // reliably over the mpv layer.
@@ -335,6 +380,9 @@ function ControlBar({
       <button className="gb" onClick={() => defer()} title="d — different episode next round">
         defer
       </button>
+      <button className="gb" onClick={() => toggleFullscreen()} title="f — toggle fullscreen">
+        fullscreen
+      </button>
       {playing && (
         <button className="gb" onClick={onToggleView} title="v / tab">
           {viewing ? 'hide list' : 'show list'}
@@ -352,7 +400,7 @@ function ControlBar({
       <button className="gb" onClick={() => syncNow()} title="push queued changes + pull">
         sync
       </button>
-      <span className="keys">space · n · d · j/l · ↑↓ · v · esc</span>
+      <span className="keys">space · n · d · f · j/l · ↑↓ · v · esc</span>
     </div>
   );
 }

@@ -60,8 +60,8 @@ _cef = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
 if "--disable-gpu" not in _cef:
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (_cef + " --disable-gpu").strip()
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QGuiApplication, QDesktopServices
+from PySide6.QtCore import QObject, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QWindow
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
 from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 from PySide6.QtWebEngineQuick import QtWebEngineQuick
@@ -70,7 +70,7 @@ QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.OpenGL)
 QtWebEngineQuick.initialize()
 QGuiApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
-from shows import oauth  # noqa: E402
+from shows import oauth, update  # noqa: E402
 from shows.apiclient import Client  # noqa: E402
 from shows.mpv_item import MpvItem  # noqa: E402
 from shows.player import Player  # noqa: E402
@@ -165,6 +165,16 @@ def main() -> int:
     overlay_url = f"http://127.0.0.1:{port}/"
     logging.info("control server on %s", overlay_url)
 
+    # One-shot, best-effort "is a newer build out?" check — pushes an `update`
+    # banner into /status if so. Off-thread so it never delays startup; a dev
+    # run (no embedded SHA) or being offline simply yields no banner.
+    def _check_update():
+        info = update.check()
+        if info:
+            logging.info("update available: %s (running %s)", info["latest"], info["current"])
+            server.push(update={"available": True, **info})
+    threading.Thread(target=_check_update, name="update-check", daemon=True).start()
+
     qmlRegisterType(MpvItem, "shows", 1, 0, "MpvItem")
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty("overlayHtml", server.index_html().decode("utf-8"))
@@ -179,6 +189,21 @@ def main() -> int:
     if mpv_item is None:
         print("MpvItem not found", file=sys.stderr)
         return 1
+
+    # Fullscreen toggle. The overlay POSTs /fullscreen on the control-server
+    # thread; a queued signal marshals the window flip onto the Qt thread.
+    class _UiBridge(QObject):
+        toggle_fullscreen = Signal()
+
+    ui = _UiBridge()
+
+    def _toggle_fullscreen():
+        if root.visibility() == QWindow.Visibility.FullScreen:
+            root.showNormal()
+        else:
+            root.showFullScreen()
+
+    ui.toggle_fullscreen.connect(_toggle_fullscreen, Qt.ConnectionType.QueuedConnection)
 
     stop = threading.Event()
     started = {"v": False}
@@ -207,7 +232,7 @@ def main() -> int:
         player.set_on_pos(on_pos)
         player.set_on_file_loaded(runner.on_file_loaded)  # restore resume on load
         player.set_on_natural_end(runner.on_natural_end)  # per-episode advance on EOF
-        server.set_command_handlers(skip=runner.skip, defer=runner.defer)
+        server.set_command_handlers(skip=runner.skip, defer=runner.defer, fullscreen=ui.toggle_fullscreen.emit)
         started["runner"] = runner
         threading.Thread(target=runner.run, name="runner", daemon=True).start()
 

@@ -60,6 +60,14 @@ export type SyncState = {
   pending: number;
 };
 
+// Set by the launch update-check when this build is behind the latest release.
+export type UpdateInfo = {
+  available: boolean;
+  latest: string;
+  current: string;
+  url: string;
+};
+
 export type Status = {
   phase: Phase;
   message: string;
@@ -70,6 +78,7 @@ export type Status = {
   last_advance?: AdvanceResult;
   playback?: Playback;
   sync?: SyncState;
+  update?: UpdateInfo;
 };
 
 export type Show = {
@@ -142,6 +151,11 @@ export function skip(): void {
 // (server contract D1-D3). The runner jumps to the next entry too.
 export function defer(): void {
   void fetch('/defer', {method: 'POST'});
+}
+
+// Toggle the Qt window between windowed and fullscreen.
+export function toggleFullscreen(): void {
+  void fetch('/fullscreen', {method: 'POST'});
 }
 
 export function seekPercent(percent: number): void {
