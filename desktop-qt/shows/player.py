@@ -10,6 +10,7 @@ under a condition variable that the runner thread blocks on.
 from __future__ import annotations
 
 import threading
+from typing import Callable, Optional
 
 import mpv
 
@@ -19,7 +20,7 @@ class PlayerShutdown(Exception):
 
 
 class Player:
-    def __init__(self, handle: mpv.MPV):
+    def __init__(self, handle: mpv.MPV, on_pos: Optional[Callable[[int], None]] = None):
         self._m = handle
         self._cv = threading.Condition()
         self._end_files = 0
@@ -40,6 +41,17 @@ class Player:
         # Keep refs so python-mpv's weakref-based callback registry doesn't
         # drop them.
         self._cbs = (_on_end, _on_shutdown)
+
+        # Report the current playlist index (which queued entry is playing)
+        # so the overlay can show an accurate "now playing / up next". Fires
+        # on mpv's thread; on_pos must be thread-safe.
+        self._on_pos = on_pos
+        if on_pos is not None:
+            def _pos_handler(_name, value):
+                if value is not None:
+                    on_pos(int(value))
+            handle.observe_property("playlist-pos", _pos_handler)
+            self._pos_handler = _pos_handler  # keep ref alive
 
     # ── commands ──────────────────────────────────────────────────────
     def play(self, path: str, mode: str) -> None:

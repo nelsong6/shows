@@ -153,3 +153,70 @@ table.runs th {
   color: var(--fg-dim);
   font-weight: normal;
 }
+
+/* Keyboard-shortcut hint in the control bar. */
+.controlbar .keys {
+  font-size: 11px;
+  color: var(--fg-dim);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+/* Sidebar rows are clickable (select a show -> its watch history). */
+.sidebar li {
+  cursor: pointer;
+}
+
+/* Dashboard toggled on OVER live video: dim the backdrop so the video still
+   reads behind the panels (vs. the opaque between-rounds dashboard). */
+.layout.over-video {
+  background: color-mix(in srgb, var(--bg-deep) 68%, transparent);
+}
+.layout.over-video .sidebar {
+  background: color-mix(in srgb, var(--bg-deep) 80%, transparent);
+}
+
+/* Flat now-playing / up-next queue. Play order; current marked, earlier
+   done (dimmed), later are what's next. */
+ul.queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+ul.queue li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 10px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+ul.queue li .q-mark {
+  width: 14px;
+  text-align: center;
+  color: var(--fg-dim);
+}
+ul.queue li .q-show {
+  min-width: 120px;
+  color: var(--fg);
+}
+ul.queue li .q-ep {
+  flex: 1;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+ul.queue li.now {
+  background: color-mix(in srgb, var(--state-busy-bg) 40%, transparent);
+}
+ul.queue li.now .q-mark,
+ul.queue li.now .q-show {
+  color: var(--state-busy-fg);
+}
+ul.queue li.done {
+  opacity: 0.5;
+}
+ul.queue li.next .q-mark {
+  color: transparent;
+}

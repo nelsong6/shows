@@ -47,6 +47,13 @@ class RemovedShow:
 
 
 @dataclass
+class HistoryEvent:
+    episode_id: str
+    relative_path: str
+    played_at: str
+
+
+@dataclass
 class AdvanceResult:
     advanced_count: int = 0
     removed_shows: list[RemovedShow] = field(default_factory=list)
@@ -103,6 +110,10 @@ class Client:
     def list_active_shows(self, playlist: str) -> list[Show]:
         data = self._do("GET", f"/api/playlists/{playlist}").json()
         return [_only(Show, s) for s in (data.get("shows") or [])]
+
+    def show_history(self, show_id: str) -> list[HistoryEvent]:
+        data = self._do("GET", f"/api/shows/{show_id}/history").json()
+        return [_only(HistoryEvent, e) for e in (data.get("history") or [])]
 
     def advance(self, playlist: str, entries: list[AdvanceEntry]) -> AdvanceResult:
         if not entries:

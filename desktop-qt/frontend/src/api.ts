@@ -1,6 +1,7 @@
 // Data layer. The desktop client's control server exposes a same-origin HTTP
-// surface — GET /status, GET /shows, POST /pause, POST /skip — and serves this
-// page, so all of these are relative to its origin.
+// surface — GET /status, GET /shows, GET /history?show=<id>, POST /pause,
+// POST /skip — and serves this page, so all of these are relative to its
+// origin.
 
 export type RoundEntry = {
   show_id: string;
@@ -35,6 +36,8 @@ export type Status = {
   message: string;
   playlist: string;
   round?: RoundEntry[];
+  // Index into `round` of the entry currently playing (mpv playlist-pos).
+  round_pos?: number;
   last_advance?: AdvanceResult;
 };
 
@@ -47,6 +50,12 @@ export type Show = {
   removed_at?: string;
 };
 
+export type HistoryEvent = {
+  episode_id: string;
+  relative_path: string;
+  played_at: string;
+};
+
 export async function getStatus(): Promise<Status> {
   const r = await fetch('/status');
   if (!r.ok) throw new Error(`/status ${r.status}`);
@@ -56,6 +65,12 @@ export async function getStatus(): Promise<Status> {
 export async function listShows(): Promise<Show[]> {
   const r = await fetch('/shows');
   if (!r.ok) throw new Error(`/shows ${r.status}`);
+  return r.json();
+}
+
+export async function listHistory(showId: string): Promise<HistoryEvent[]> {
+  const r = await fetch(`/history?show=${encodeURIComponent(showId)}`);
+  if (!r.ok) throw new Error(`/history ${r.status}`);
   return r.json();
 }
 

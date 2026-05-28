@@ -94,11 +94,14 @@ Window {
     WebEngineView {
         anchors.fill: parent
         backgroundColor: "transparent"
+        // focus so the overlay's window keydown handler (pause/skip/toggle)
+        // receives keys rather than them going to the (focusless) mpv item.
+        focus: true
         // loadHtml (not url:) so the overlay composites fully over the live
         // mpv GL layer — a url:-loaded page only composites its top band
         // over actively-rendering video. baseUrl is the control server so
         // the page's fetch('/status') etc. are same-origin.
-        Component.onCompleted: loadHtml(overlayHtml, overlayBase)
+        Component.onCompleted: { loadHtml(overlayHtml, overlayBase); forceActiveFocus(); }
     }
 }
 """
@@ -122,6 +125,7 @@ def main() -> int:
     server = ControlServer(
         dist_dir=DIST_DIR,
         shows_provider=lambda: client.list_active_shows(PLAYLIST),
+        history_provider=client.show_history,
     )
     port = server.start()
     overlay_url = f"http://127.0.0.1:{port}/"
@@ -149,11 +153,11 @@ def main() -> int:
         if started["v"]:
             return
         started["v"] = True
-        player = Player(mpv_item.mpv)
+        player = Player(mpv_item.mpv, on_pos=lambda i: server.push(round_pos=i))
         server.set_player(player)
         runner = Runner(
             client, player, PLAYLIST, stop,
-            on_round=lambda r: server.push(phase="playing", message=f"round of {len(r)}", round=r),
+            on_round=lambda r: server.push(phase="playing", message=f"round of {len(r)}", round=r, round_pos=0),
             on_advance=lambda res: server.push(last_advance=res),
             on_drained=lambda: server.push(phase="drained", message="every show finished", round=[]),
             on_error=lambda e: server.push(phase="error", message=e),

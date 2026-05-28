@@ -14,6 +14,7 @@ import logging
 import mimetypes
 import os
 import threading
+import urllib.parse
 from typing import Callable, Optional
 
 from .player import Player
@@ -34,33 +35,40 @@ class ControlServer:
 
     `dist_dir` is the built overlay (frontend/dist) and is required — there
     is no placeholder fallback; build the frontend first. `shows_provider`
-    backs GET /shows; it's called on the HTTP handler thread, so it must be
-    thread-safe (the apiclient is).
+    backs GET /shows and `history_provider` backs GET /history?show=<id>;
+    both are called on the HTTP handler thread, so they must be thread-safe
+    (the apiclient is).
     """
 
     def __init__(
         self,
         dist_dir: str,
         shows_provider: Optional[Callable[[], list]] = None,
+        history_provider: Optional[Callable[[str], list]] = None,
     ):
         if not dist_dir or not os.path.isdir(dist_dir):
             raise FileNotFoundError(
                 f"overlay bundle not found at {dist_dir!r}; build it with "
                 "`npm run build` in frontend/"
             )
-        self._status = {"phase": "initializing", "message": "starting up", "playlist": "nelson", "round": []}
+        self._status = {"phase": "initializing", "message": "starting up",
+                        "playlist": "nelson", "round": [], "round_pos": 0}
         self._lock = threading.Lock()
         self._player: Optional[Player] = None
         self._httpd: Optional[http.server.HTTPServer] = None
         self.port = 0
         self._dist = dist_dir
         self._shows_provider = shows_provider
+        self._history_provider = history_provider
 
     def set_player(self, player: Player) -> None:
         self._player = player
 
     def set_shows_provider(self, fn: Callable[[], list]) -> None:
         self._shows_provider = fn
+
+    def set_history_provider(self, fn: Callable[[str], list]) -> None:
+        self._history_provider = fn
 
     def push(self, **kw) -> None:
         with self._lock:
@@ -116,6 +124,9 @@ class ControlServer:
                     self._send(200, srv._status_json(), "application/json")
                 elif self.path == "/shows":
                     self._send(200, srv._shows_json(), "application/json")
+                elif self.path.startswith("/history"):
+                    q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    self._send(200, srv._history_json(q.get("show", [""])[0]), "application/json")
                 elif self.path == "/health":
                     self._send(200, b"ok")
                 else:
@@ -149,3 +160,13 @@ class ControlServer:
             log.warning("shows provider failed: %s", e)
             return b"[]"
         return json.dumps([_jsonable(s) for s in shows]).encode("utf-8")
+
+    def _history_json(self, show_id: str) -> bytes:
+        if self._history_provider is None or not show_id:
+            return b"[]"
+        try:
+            events = self._history_provider(show_id)
+        except Exception as e:  # noqa: BLE001 — surface as empty, log it
+            log.warning("history provider failed: %s", e)
+            return b"[]"
+        return json.dumps([_jsonable(ev) for ev in events]).encode("utf-8")
