@@ -49,12 +49,25 @@ const (
 
 	loginEndpoint = "/api/auth/cli/user-login"
 	tokenEndpoint = "/api/auth/cli/user-token"
+
+	// cacheVersion identifies the auth-flow generation that minted a
+	// cached token. Bump it whenever the desktop switches auth flows so
+	// that LoadCachedToken refuses tokens from a previous generation and
+	// the next launch re-auths through the new flow — without that, an
+	// unexpired bot-token from the old /api/cli/token flow would happily
+	// satisfy EnsureToken's expiry check on a binary that's since been
+	// rebuilt against /api/auth/cli/user-token.
+	//
+	// v1 = user-login JWTs from /api/auth/cli/user-token (current).
+	cacheVersion = 1
 )
 
 // Token is the cached user JWT. Persisted to disk between launches at
 // %APPDATA%\shows\token.json so the user only sees the browser once and
-// then again ~daily when the JWT expires.
+// then again ~daily when the JWT expires. The Version field gates cross-
+// generation reuse — see cacheVersion above.
 type Token struct {
+	Version   int    `json:"version"`
 	Token     string `json:"token"`
 	ExpiresAt int64  `json:"expires_at"`
 }
@@ -225,7 +238,7 @@ func exchangeCode(ctx context.Context, baseURL, code, verifier, redirectURI stri
 		return nil, fmt.Errorf("oauth: token parse: %w (body=%s)", err, raw)
 	}
 	if tr.Token != "" {
-		return &Token{Token: tr.Token, ExpiresAt: tr.ExpiresAt}, nil
+		return &Token{Version: cacheVersion, Token: tr.Token, ExpiresAt: tr.ExpiresAt}, nil
 	}
 	if tr.Error != "" {
 		desc := ""
@@ -262,7 +275,21 @@ func LoadCachedToken() (*Token, error) {
 	}
 	var t Token
 	if err := json.Unmarshal(raw, &t); err != nil {
-		return nil, fmt.Errorf("oauth: decode cached: %w", err)
+		// A corrupt cache file shouldn't make the app un-launchable —
+		// treat it the same as no cache, force a fresh sign-in. The
+		// next SaveToken overwrites it cleanly.
+		return nil, nil
+	}
+	// Cross-generation guard: a token minted by an older auth flow
+	// (e.g. the previous /api/cli/token bot-token path) is structurally
+	// indistinguishable from a current-flow token at the JSON level —
+	// both have {token, expires_at}. Without this gate, a yesterday-
+	// minted bot token would silently satisfy EnsureToken's expiry check
+	// on today's binary, suppressing the new sign-in flow until the bot
+	// token happens to age out. Bump cacheVersion to retire the old
+	// shape on the next launch.
+	if t.Version != cacheVersion {
+		return nil, nil
 	}
 	return &t, nil
 }

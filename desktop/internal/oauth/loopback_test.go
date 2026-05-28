@@ -6,10 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -292,6 +295,96 @@ func TestPKCES256_KnownVector(t *testing.T) {
 	const want = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 	if got := pkceS256(verifier); got != want {
 		t.Errorf("pkceS256 = %q, want %q (RFC 7636 B.1)", got, want)
+	}
+}
+
+func TestLoadCachedToken_VersionGate(t *testing.T) {
+	// Point CachePath at a temp dir so we don't smash %APPDATA%\shows\.
+	t.Setenv("APPDATA", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	path, err := CachePath()
+	if err != nil {
+		t.Fatalf("CachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	farFuture := time.Now().Add(24 * time.Hour).Unix()
+
+	cases := []struct {
+		name    string
+		raw     string
+		wantNil bool
+		wantTok string
+	}{
+		{
+			name:    "missing version field reads as version 0; refused",
+			raw:     fmt.Sprintf(`{"token":"old-bot-token","expires_at":%d}`, farFuture),
+			wantNil: true,
+		},
+		{
+			name:    "older version refused even if not expired",
+			raw:     fmt.Sprintf(`{"version":0,"token":"older","expires_at":%d}`, farFuture),
+			wantNil: true,
+		},
+		{
+			name:    "current version accepted",
+			raw:     fmt.Sprintf(`{"version":%d,"token":"current","expires_at":%d}`, cacheVersion, farFuture),
+			wantTok: "current",
+		},
+		{
+			name:    "corrupt JSON treated as no cache (not an error)",
+			raw:     `{not json`,
+			wantNil: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(c.raw), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			got, err := LoadCachedToken()
+			if err != nil {
+				t.Fatalf("LoadCachedToken returned error: %v (caller should never see one for stale/corrupt caches)", err)
+			}
+			if c.wantNil {
+				if got != nil {
+					t.Errorf("LoadCachedToken = %+v, want nil", got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("LoadCachedToken = nil, want token")
+			}
+			if got.Token != c.wantTok {
+				t.Errorf("Token = %q, want %q", got.Token, c.wantTok)
+			}
+		})
+	}
+}
+
+func TestSaveToken_StampsVersion(t *testing.T) {
+	t.Setenv("APPDATA", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	if err := SaveToken(&Token{Token: "x", ExpiresAt: time.Now().Add(time.Hour).Unix()}); err != nil {
+		t.Fatalf("SaveToken: %v", err)
+	}
+	// SaveToken doesn't stamp Version itself (it serializes whatever the
+	// caller passed); the version is set by Authenticate via exchangeCode.
+	// This test guards the seam: if we ever move stamping into SaveToken,
+	// LoadCachedToken should still see the right value.
+	got, err := LoadCachedToken()
+	if err != nil {
+		t.Fatalf("LoadCachedToken: %v", err)
+	}
+	// With no Version stamped, LoadCachedToken refuses it (gate behaves
+	// the same as for legacy caches). This documents current behavior;
+	// flip if SaveToken grows version stamping.
+	if got != nil {
+		t.Errorf("expected nil for a token saved without Version, got %+v", got)
 	}
 }
 
