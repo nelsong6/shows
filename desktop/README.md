@@ -38,6 +38,7 @@ wails dev
 ```
 desktop/
   app.go                 # Wails App; methods auto-exposed to the TS frontend
+  debug.go               # localhost /status + /health introspection server
   main.go                # wails.Run entry; window options
   internal/
     player/              # libmpv cgo wrapper (supersonic-app/go-mpv)
@@ -78,3 +79,20 @@ desktop/
 7. Loop.
 
 Retries-with-backoff on transient `/next-round` and `/advance` failures. 401s trigger a token refresh and one retry.
+
+## Inspecting a running instance
+
+During playback mpv covers the WebView2 chrome, so the React status panel isn't visible. Two surfaces let you inspect state from outside:
+
+- **`%APPDATA%\shows\shows.log`** — slog JSON, one event per line (auth state transitions, round fetches, runner errors). Append-only; no rotation.
+- **`http://127.0.0.1:<port>/status`** — current Status snapshot as JSON (`phase`, `message`, `playlist`, current `round`, `last_advance`). The port is bound ephemerally and written to `%APPDATA%\shows\debug-port` on launch. Also exposes `/health` returning `ok`.
+
+From PowerShell:
+
+```powershell
+$port = Get-Content "$env:APPDATA\shows\debug-port"
+iwr "http://127.0.0.1:$port/status" -UseBasicParsing | Select-Object -ExpandProperty Content
+Get-Content "$env:APPDATA\shows\shows.log" -Tail 20
+```
+
+Localhost-only, no auth — the surface exposes nothing that isn't already in the React frontend's status events. The JWT and other secrets stay in `%APPDATA%\shows\token.json`.

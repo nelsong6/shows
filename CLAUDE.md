@@ -97,7 +97,9 @@ Episode paths are relative to the parent directory of the per-show JSON. `cmd/sh
 
 ## Observability
 
-`shows_*` Prometheus metrics exposed at `/metrics` (no auth) on the AKS pod, scraped by the kube-prometheus-stack via `k8s/templates/podmonitor.yaml`. Catalog in [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md). Grafana sees them in the `monitoring` namespace's dashboards.
+**Server side:** `shows_*` Prometheus metrics exposed at `/metrics` (no auth) on the AKS pod, scraped by the kube-prometheus-stack via `k8s/templates/podmonitor.yaml`. Catalog in [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md). Grafana sees them in the `monitoring` namespace's dashboards.
+
+**Desktop side:** the running `shows.exe` exposes a localhost-only debug HTTP server (port written to `%APPDATA%\shows\debug-port`) with `GET /status` (current Status struct) + `GET /health`. slog output is teed to `%APPDATA%\shows\shows.log`. See `desktop/README.md` "Inspecting a running instance" for usage.
 
 ## Related
 
