@@ -1,6 +1,8 @@
 # Feature Contract: Round Selection + Advance
 
-The two endpoints `GET /api/playlists/:name/next-round` and `POST /api/playlists/:name/advance` together implement the round-robin playback loop. This document is the contract those endpoints satisfy. Implementations must preserve every invariant below; new behavior must extend this contract, not contradict it.
+The round-robin playback loop is implemented by the **desktop engine** (`desktop-qt/shows/engine.py` + `runner.py`) against its local SQLite replica, syncing to the durable origin with `POST /sync`. (It began as a pair of server endpoints — `GET …/next-round` + `POST …/advance` — since removed in the offline-first migration; the invariants are unchanged, only their home moved. The endpoint-shaped prose in some invariants below is historical.) This document is the contract that engine satisfies. Implementations must preserve every invariant below; new behavior must extend this contract, not contradict it.
+
+Advance *timing* — when an episode becomes watched — is governed by [Advance timing (per-episode)](#advance-timing-per-episode) below.
 
 The shape comes from glimmung's pattern of [feature contracts as durable artifacts](https://github.com/nelsong6/glimmung/blob/main/docs/feature-contracts) — a future agent (or future-you) should be able to reason about the system from this doc without re-reading the implementation.
 
@@ -85,6 +87,25 @@ Invariants:
 
 - **X1. Cross-playlist order is the single-playlist order over the union.** Hashing is per absolute path, so a cross-playlist round is identical to sorting the concatenation of each playlist's candidates — playlist membership never affects an episode's key.
 - **X2. Advance stays per-playlist-atomic.** A cross-playlist advance is N independent per-playlist advances; there is no cross-playlist transaction. A failure surfaces after some playlists may have advanced (re-issue is safe by I3).
+
+## Advance timing (per-episode)
+
+The invariants above govern *what* a round is and *what* an advance does. This section governs *when* an advance happens on the desktop engine.
+
+### A1. Advance is per-episode, at each episode's natural end
+
+The desktop queues a whole round into mpv but advances **one episode at a time**: the moment a file plays to its natural end (mpv `end-file` with reason `EOF`), exactly that episode is marked watched in the replica — then a `watch_history` row is appended and the show is tombstoned if its queue is now empty (I5). It does **not** wait for the round to finish.
+
+Consequence: closing the app partway through a round keeps precisely the episodes you watched and loses nothing. The next round is recomputed from the updated watched-state and resumes with what you haven't seen. This *supersedes* the old "re-fetching mid-round returns the byte-identical round" reading of I1 — re-fetching now reflects the per-episode advances, which is the stronger crash-survival guarantee (you resume at the next unwatched episode rather than replaying the whole round).
+
+### A2. Only a watched episode advances
+
+An episode advances **only** on a natural end (A1) or an explicit skip (I7). Every other way a file can end leaves it unwatched — a non-watch is never recorded as a watch:
+
+- **Load failure** (`end-file` reason `ERROR`): a file that can't be opened is passed over, never marked watched. If *nothing* in a round opens, the runner treats it as "media unreachable" — it surfaces an error and parks rather than re-queuing the same unplayable round (which would spin and, before this rule, error-stormed entire rounds into a falsely-watched state).
+- **Defer** (D1–D3) and **closing mid-episode**: the forced or early end isn't an `EOF`, so the episode stays the show's next pick (defer also bumps its position to the back of the queue).
+
+This is the invariant the user's model turns on ("if I finished the Simpsons but missed Malcolm, don't make me re-watch the Simpsons, and don't skip Malcolm"). Mechanism: `shows/player.py` keys the advance callback on the `EOF` reason; `shows/runner.py` advances the now-playing entry on that callback. Locked by `desktop-qt/tests/test_runner.py`.
 
 ## Out of scope (today)
 

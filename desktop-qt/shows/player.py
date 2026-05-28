@@ -18,6 +18,12 @@ if TYPE_CHECKING:
     # otherwise force every importer (incl. the runner tests) to have the DLL.
     import mpv
 
+# mpv's MpvEventEndFile.reason for a file that played to completion (libmpv
+# MPV_END_FILE_REASON_EOF). A natural end is the only end that counts as
+# "watched"; ABORTED (skip/defer), ERROR (load failure), and QUIT do not.
+# Hard-coded so this module imports without libmpv (the runner tests have no DLL).
+_END_FILE_EOF = 0
+
 
 class PlayerShutdown(Exception):
     """Raised when mpv emits a shutdown event (window closed)."""
@@ -29,12 +35,28 @@ class Player:
         self._cv = threading.Condition()
         self._end_files = 0
         self._shutdown = False
+        # Called when a file plays to its natural end (EOF) — the runner uses it
+        # to advance that episode (per-episode advance). Set after construction
+        # (the runner is built later). Skip/defer/load-failure end the file too,
+        # but not via EOF, so they never advance through here.
+        self._on_natural_end: Optional[Callable[[], None]] = None
 
         @handle.event_callback("end-file")
-        def _on_end(_ev):
+        def _on_end(ev):
+            # Count every end-file (any reason) so wait_for_round can tell when
+            # the queued round has fully drained — even a file that errored out.
             with self._cv:
                 self._end_files += 1
                 self._cv.notify_all()
+            # Only a natural end (played to completion) means the episode was
+            # watched; advance keys on that alone.
+            try:
+                natural = ev.data.reason == _END_FILE_EOF
+            except Exception:
+                natural = False
+            cb = self._on_natural_end
+            if natural and cb is not None:
+                cb()
 
         @handle.event_callback("shutdown")
         def _on_shutdown(_ev):
@@ -79,6 +101,11 @@ class Player:
 
     def set_on_file_loaded(self, fn: Callable[[], None]) -> None:
         self._on_file_loaded = fn
+
+    def set_on_natural_end(self, fn: Callable[[], None]) -> None:
+        """Register the per-episode advance hook — invoked when a file plays to
+        its natural end (EOF) on mpv's event thread; keep it fast + local."""
+        self._on_natural_end = fn
 
     def time_pos(self) -> Optional[float]:
         """Current playback position in seconds, or None if not playing."""

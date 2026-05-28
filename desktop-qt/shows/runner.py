@@ -6,14 +6,20 @@ Syncer pushes those changes to the server at smart moments. Playback never
 blocks on the network — the loop runs entirely off the replica.
 
   IDLE    -> next round from replica -> queue N -> PLAYING
-  PLAYING -> N end-files -> advance (local) + push -> IDLE
+  PLAYING -> each episode's natural end advances it (local); round drains -> IDLE
   IDLE    -> empty round -> DRAINED -> park
+
+Advance is per-episode: an episode is marked watched the instant it plays to its
+natural end (contract A1). A file that fails to load, or one you close/skip/defer
+before it finishes, never reaches that point, so a non-watch is never recorded as
+a watch. The replica updates locally on each finish; the origin is synced at
+round end + on window close.
 
 Interactive controls (control-server thread) act on the current entry under a
 lock:
   skip  -> mark watched now (local advance, I7), push, jump forward.
-  defer -> bump the show's pick (local defer, D1-D3, NOT watched), exclude it
-           from the round-end advance (roundlogic), push, jump forward.
+  defer -> bump the show's pick (local defer, D1-D3, NOT watched), push, jump
+           forward; its non-natural end means it isn't advanced.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ import logging
 import threading
 from typing import Callable, Optional
 
-from . import engine, roundlogic
+from . import engine
 from .apiclient import AdvanceResult, RemovedShow, RoundEntry
 from .player import Player, PlayerShutdown
 from .replica import Replica
@@ -60,6 +66,8 @@ class Runner:
         self._round: Optional[list[RoundEntry]] = None
         self._pos = 0
         self._deferred: set[str] = set()
+        self._playing: Optional[RoundEntry] = None  # entry mpv is playing now
+        self._loaded_any = False  # did any entry open this round? (media-reachable guard)
 
     def run(self) -> None:
         try:
@@ -86,25 +94,37 @@ class Runner:
                 self._round = round_
                 self._pos = 0
                 self._deferred = set()
+                self._playing = None
+                self._loaded_any = False
 
             log.info("round queued: %d episodes", len(round_))
             self._queue_round(round_)
             if self.on_round:
                 self.on_round(round_)
 
+            # Episodes advance one-by-one as they finish (on_natural_end); this
+            # just blocks until every queued entry has ended (by any reason).
             self.player.wait_for_round(len(round_), self.stop)
             if self.stop.is_set():
                 return
             self.player.playlist_clear()
 
-            # Advance everything except what was deferred this round (D2).
             with self._lock:
-                entries = roundlogic.advance_entries(self._round or [], self._deferred)
+                loaded_any = self._loaded_any
                 self._round = None
-            result = self._advance(entries)
-            log.info("round advanced: %d, removed %d", result.advanced_count, len(result.removed_shows))
-            if self.on_advance:
-                self.on_advance(result)
+
+            if not loaded_any:
+                # Nothing in the round opened — the library files are unreachable
+                # (e.g. the media drive isn't mounted). Re-fetching would queue the
+                # same unplayable round and spin, so surface it and park instead.
+                log.error("round produced no playable media; parking until restart")
+                if self.on_error:
+                    self.on_error("no playable media — check that the show files are reachable")
+                self.stop.wait()
+                return
+
+            # Flush this round's per-episode advances to the origin (smart moment).
+            self.syncer.push()
 
     # ── interactive controls (control-server thread) ──────────────────────
     def set_pos(self, i: int) -> None:
@@ -120,16 +140,18 @@ class Runner:
         return None
 
     def skip(self) -> None:
-        """Skip the current episode: jump forward now, mark it watched locally
-        (per-episode advance, I7), push. All local — never blocks on the network."""
+        """Skip the current episode: jump forward now and mark it watched (the
+        per-episode skip, I7). Local; pushed right away since it's a user action."""
         cur = self._current()
         self.player.skip()
         if cur is not None:
-            self._advance([cur])
+            self._apply_advance([cur])
+            self.syncer.push()
 
     def defer(self) -> None:
         """Defer the current show's pick: bump it locally (D1-D3, not watched),
-        exclude it from the round-end advance, push, and jump forward."""
+        push, and jump forward. The forced jump ends the file non-naturally, so
+        it never advances (and the _deferred guard backs that up)."""
         cur = self._current()
         if cur is None:
             return
@@ -141,15 +163,35 @@ class Runner:
         self.syncer.push()
         self.player.skip()
 
-    # ── resume (local; resume_pos syncs to the server like any field) ─────
+    # ── playback callbacks (mpv event thread; keep fast + local) ──────────
     def on_file_loaded(self) -> None:
-        """A queued file just loaded — restore its saved resume position."""
+        """A queued file just opened — mark it the now-playing entry (so its
+        natural end advances exactly it), note the round has reachable media, and
+        restore its saved resume position."""
         cur = self._current()
         if cur is None:
             return
+        with self._lock:
+            self._playing = cur
+            self._loaded_any = True
         pos = self.replica.resume_pos(cur.episode_id)
         if pos and pos > 1.0:  # ignore zero / the very start
             self.player.seek_absolute(pos)
+
+    def on_natural_end(self) -> None:
+        """The now-playing episode reached its natural end — the user watched it,
+        so mark it watched now (per-episode advance, A1). Only a real EOF lands
+        here: a load failure, skip, or defer ends the file another way, so an
+        unwatched episode is never advanced. Local-only; synced at round end and
+        on window close."""
+        with self._lock:
+            cur = self._playing
+            self._playing = None
+            if cur is None or cur.episode_id in self._deferred:
+                return
+        result = self._apply_advance([cur])
+        if self.on_advance:
+            self.on_advance(result)
 
     def save_resume(self) -> None:
         """Persist the current episode's position to the replica (local; pushed
@@ -179,12 +221,13 @@ class Runner:
             for o in ordered
         ]
 
-    def _advance(self, entries: list[RoundEntry]) -> AdvanceResult:
+    def _apply_advance(self, entries: list[RoundEntry]) -> AdvanceResult:
+        """Mark entries watched in the local replica + build the reveal for any
+        show this finished. No network — callers push at their own smart moment."""
         advanced, removed_ids = self.replica.advance(
             [(e.show_id, e.episode_id) for e in entries]
         )
         removed = [RemovedShow(**self.replica.reveal(sid)) for sid in removed_ids]
-        self.syncer.push()  # smart moment: a record changed
         return AdvanceResult(advanced_count=advanced, removed_shows=removed)
 
     def _queue_round(self, round_: list[RoundEntry]) -> None:

@@ -52,7 +52,7 @@ desktop-qt/
     oauth.py             # auth.romaine.life PKCE + loopback user-login, cached token
     apiclient.py         # shows.romaine.life HTTP client with 401 refresh
     runner.py            # round-robin runner: fetch → queue → wait → skip/defer → advance
-    roundlogic.py        # pure round helpers (advance-set, playlist parse), no Qt/mpv
+    roundlogic.py        # pure helper: SHOWS_PLAYLISTS parse, no Qt/mpv
     player.py            # python-mpv handle wrapper (play/pause/skip/show_text)
     ordering.py          # SHA-256 path ordering, bit-identical to the server
 ```
@@ -112,20 +112,23 @@ one-time `?code=` on the loopback, and POSTs it + the PKCE `code_verifier` to
 `/api/auth/cli/user-token`. The JWT never travels through the browser. Token
 cache carries a `version` field (`CACHE_VERSION`) so the shape can evolve.
 
-**Playback loop** (`shows/runner.py`): the server's round/advance contract —
-`GET …/next-round` → queue all paths into mpv → wait for N end-of-file events →
-`POST …/advance` → `playlist-clear` → loop, with retry-and-backoff on transient
-failures and a token refresh + retry on 401. Ordering (`shows/ordering.py`)
-reproduces the server's SHA-256-of-path scheme bit-for-bit.
+**Playback loop** (`shows/runner.py`): offline-first — the desktop is the engine.
+Each round is computed locally from the SQLite replica (`engine.next_round`): one
+episode per active show, in the deterministic SHA-256-of-path order
+(`shows/ordering.py`, bit-identical to the legacy scheme). The runner queues all
+paths into mpv, then advances **per episode** — the instant a file plays to its
+natural end it's marked watched in the replica (contract A1), so closing partway
+through a round keeps exactly what you watched and never marks what you didn't.
+The Syncer pushes those local changes to the origin (`POST /sync`) at round end
+and on window close; playback never blocks on the network.
 
 Two interactive controls arrive on the control-server thread and act on the
 entry mpv is currently playing (tracked via the player's `playlist-pos`):
-**skip** (`n`) marks that episode watched immediately (per-episode advance) and
-jumps forward; **defer** (`d`) re-rolls the show's next-round pick via
-`POST …/defer-show` *without* marking it watched, and is excluded from the
-round-end advance (`shows/roundlogic.advance_entries`) so the defer holds. Set
-`SHOWS_PLAYLISTS=a,b,c` to round-robin across several playlists at once
-(`GET /api/rounds` + `POST /api/rounds/advance`); one playlist is the default.
+**skip** (`n`) marks that episode watched immediately (per-episode skip, I7) and
+jumps forward; **defer** (`d`) re-rolls the show's next pick *without* marking it
+watched (D1-D3) and jumps forward — its forced, non-natural end means it isn't
+advanced. Set `SHOWS_PLAYLISTS=a,b,c` to round-robin across several playlists at
+once; one playlist is the default.
 
 ## Package
 

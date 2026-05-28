@@ -206,6 +206,7 @@ def main() -> int:
 
         player.set_on_pos(on_pos)
         player.set_on_file_loaded(runner.on_file_loaded)  # restore resume on load
+        player.set_on_natural_end(runner.on_natural_end)  # per-episode advance on EOF
         server.set_command_handlers(skip=runner.skip, defer=runner.defer)
         started["runner"] = runner
         threading.Thread(target=runner.run, name="runner", daemon=True).start()
