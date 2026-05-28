@@ -49,6 +49,17 @@ def _add_libmpv_to_path() -> None:
 
 _add_libmpv_to_path()
 
+# Disable QtWebEngine's GPU compositing. On high-DPI Windows (seen on a 4K /
+# 300%-scale RTX display), WebEngine's DirectComposition path fails to get a
+# D3D11 device and composites the transparent overlay into only the top-left
+# 1/devicePixelRatio of the window — so over live mpv video the control bar's
+# right half (skip/defer/show-list + key hints) vanished. Software compositing
+# routes around it; the overlay is lightweight UI, and mpv keeps its own GL, so
+# there's no cost. Must be set before QtWebEngine initializes.
+_cef = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+if "--disable-gpu" not in _cef:
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = (_cef + " --disable-gpu").strip()
+
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QGuiApplication, QDesktopServices
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
