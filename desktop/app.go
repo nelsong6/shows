@@ -38,6 +38,13 @@ type App struct {
 	ctx    context.Context
 	logger *slog.Logger
 
+	// hostHWND is the Wails top-level window handle, captured at startup.
+	// libmpv embeds its render surface as a child of it; we re-raise that
+	// child above the WebView2 sibling at the start of each round (see
+	// OnRound) so the video is actually visible and not buried behind the
+	// React chrome. Zero when the host window couldn't be located.
+	hostHWND uintptr
+
 	mu     sync.Mutex
 	player *player.Player
 	client *apiclient.Client
@@ -149,6 +156,7 @@ func (a *App) startup(ctx context.Context) {
 		a.logger.Warn("could not locate host window — mpv will open its own", "err", err)
 		hwnd = 0
 	}
+	a.hostHWND = hwnd
 
 	p, err := player.New(hwnd)
 	if err != nil {
@@ -228,6 +236,17 @@ func (a *App) runForever(ctx context.Context) {
 			snapshot := a.status
 			a.statusMu.Unlock()
 			wruntime.EventsEmit(a.ctx, "status", snapshot)
+
+			// Lift libmpv's render window above the WebView2 chrome.
+			// Both are children of the host window; WebView2 wins the
+			// z-order by default, so without this the video plays
+			// (audible) but stays hidden behind the React UI. Re-raised
+			// every round in case WebView2 reclaimed the top on focus.
+			if a.hostHWND != 0 {
+				if mpvHWND := win32.RaiseChildByClass(a.hostHWND, "mpv"); mpvHWND == 0 {
+					a.logger.Warn("could not find mpv render window to raise; video may be hidden behind chrome")
+				}
+			}
 		},
 		OnAdvance: func(res *apiclient.AdvanceResult) {
 			a.statusMu.Lock()
