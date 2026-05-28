@@ -5,6 +5,7 @@ import {
   listHistory,
   pause,
   skip,
+  defer,
   type Status,
   type Show,
   type HistoryEvent,
@@ -51,7 +52,8 @@ function App() {
 
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (main.py gives the WebEngineView active focus). space=pause/play,
-  // n/→=skip, v/Tab=toggle the dashboard over video, Esc=hide it.
+  // n/→=skip, d=defer (different episode of this show next round),
+  // v/Tab=toggle the dashboard over video, Esc=hide it.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       switch (e.key) {
@@ -62,6 +64,9 @@ function App() {
         case 'n':
         case 'ArrowRight':
           skip();
+          break;
+        case 'd':
+          defer();
           break;
         case 'v':
         case 'Tab':
@@ -248,15 +253,18 @@ function ControlBar({
       <button className="gb" onClick={() => pause()} title="space">
         pause / play
       </button>
-      <button className="gb" onClick={() => skip()} title="n">
+      <button className="gb" onClick={() => skip()} title="n — mark watched, next">
         skip
+      </button>
+      <button className="gb" onClick={() => defer()} title="d — different episode next round">
+        defer
       </button>
       {playing && (
         <button className="gb" onClick={onToggleView} title="v / tab">
           {viewing ? 'hide list' : 'show list'}
         </button>
       )}
-      <span className="keys">space · n · v · esc</span>
+      <span className="keys">space · n · d · v · esc</span>
     </div>
   );
 }
@@ -266,6 +274,10 @@ function ControlBar({
 function Queue({ round, pos }: { round: Status['round']; pos: number }) {
   const entries = round ?? [];
   if (entries.length === 0) return null;
+  // Show the playlist tag only when the round interleaves more than one
+  // (a cross-playlist round); for a single playlist it's just noise.
+  const multiPlaylist =
+    new Set(entries.map((e) => e.playlist).filter(Boolean)).size > 1;
   return (
     <div className="section">
       <h3>queue</h3>
@@ -273,6 +285,7 @@ function Queue({ round, pos }: { round: Status['round']; pos: number }) {
         {entries.map((r, i) => (
           <li key={r.episode_id} className={i === pos ? 'now' : i < pos ? 'done' : 'next'}>
             <span className="q-mark">{i === pos ? '▶' : i < pos ? '✓' : ''}</span>
+            {multiPlaylist && r.playlist && <span className="q-pl">{r.playlist}</span>}
             <span className="q-show">{r.show_name}</span>
             <span className="q-ep">{shortPath(r.absolute_path)}</span>
           </li>

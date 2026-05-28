@@ -27,3 +27,23 @@ jobs:
 
       - name: go test
         run: go test ./...
+
+  desktop-tests:
+    name: desktop pure-logic tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Only httpx + pytest: the tests touch shows.roundlogic and
+      # shows.apiclient, neither of which imports Qt or libmpv, so the heavy
+      # PySide6/python-mpv runtime deps aren't needed here.
+      - name: Install test deps
+        run: pip install httpx pytest
+
+      - name: pytest
+        working-directory: desktop-qt
+        run: pytest

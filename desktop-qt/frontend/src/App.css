@@ -207,6 +207,14 @@ ul.queue li .q-ep {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+ul.queue li .q-pl {
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+}
 ul.queue li.now {
   background: color-mix(in srgb, var(--state-busy-bg) 40%, transparent);
 }

@@ -10,9 +10,13 @@ under a condition variable that the runner thread blocks on.
 from __future__ import annotations
 
 import threading
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
-import mpv
+if TYPE_CHECKING:
+    # Only needed for the `mpv.MPV` annotation, which `from __future__ import
+    # annotations` keeps as a string. Importing libmpv at module load would
+    # otherwise force every importer (incl. the runner tests) to have the DLL.
+    import mpv
 
 
 class PlayerShutdown(Exception):
@@ -42,16 +46,25 @@ class Player:
         # drop them.
         self._cbs = (_on_end, _on_shutdown)
 
-        # Report the current playlist index (which queued entry is playing)
-        # so the overlay can show an accurate "now playing / up next". Fires
-        # on mpv's thread; on_pos must be thread-safe.
+        # Report the current playlist index (which queued entry is playing) so
+        # the overlay can show "now playing / up next" and the runner knows
+        # which episode skip/defer act on. Fires on mpv's thread; the callback
+        # must be thread-safe. Always registered; set_on_pos can (re)point it
+        # after construction, since the runner that consumes it is built later.
         self._on_pos = on_pos
-        if on_pos is not None:
-            def _pos_handler(_name, value):
-                if value is not None:
-                    on_pos(int(value))
-            handle.observe_property("playlist-pos", _pos_handler)
-            self._pos_handler = _pos_handler  # keep ref alive
+
+        def _pos_handler(_name, value):
+            cb = self._on_pos
+            if cb is not None and value is not None:
+                cb(int(value))
+
+        handle.observe_property("playlist-pos", _pos_handler)
+        self._pos_handler = _pos_handler  # keep ref alive
+
+    def set_on_pos(self, fn: Callable[[int], None]) -> None:
+        """(Re)point the playlist-pos callback. Used by main.py to fan position
+        updates out to both the overlay status and the runner once both exist."""
+        self._on_pos = fn
 
     # ── commands ──────────────────────────────────────────────────────
     def play(self, path: str, mode: str) -> None:

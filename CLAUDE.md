@@ -26,10 +26,11 @@ desktop-qt/           PySide6 + libmpv client (mpv video composited under a
   main.py             entry: OpenGL/WebEngine setup, QML window, runner wiring
   shows/
     mpv_item.py       mpv render API → QQuickFramebufferObject (Qt composites)
-    webserver.py      control server: serves the React overlay + /status /shows /pause /skip
+    webserver.py      control server: serves the overlay + /status /shows /pause /skip /defer
     oauth.py          user-login flow against auth.romaine.life (PKCE + loopback)
     apiclient.py      shows.romaine.life HTTP client + 401 refresh hook
-    runner.py         round-robin runner (fetch → queue → wait → advance)
+    runner.py         round-robin runner (fetch → queue → wait → skip/defer → advance)
+    roundlogic.py     pure round helpers (advance-set minus deferred, playlist parse)
     player.py         python-mpv handle wrapper
   frontend/           Vite + React + TS overlay (glimmung design-system tokens)
   shows-qt.spec       PyInstaller onedir build (bundles libmpv + the overlay)
@@ -99,7 +100,7 @@ Episode paths are relative to the parent directory of the per-show JSON. `cmd/sh
 
 **Server side:** `shows_*` Prometheus metrics exposed at `/metrics` (no auth) on the AKS pod, scraped by the kube-prometheus-stack via `k8s/templates/podmonitor.yaml`. Catalog in [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md). Grafana sees them in the `monitoring` namespace's dashboards.
 
-**Desktop side:** the running app's control server (localhost, ephemeral port logged at startup) serves `GET /status` (current status) + `GET /shows` + `GET /health`, and also backs the React overlay's data layer. Logs go to stdout. See `desktop-qt/README.md` for architecture and the control surface.
+**Desktop side:** the running app's control server (localhost, ephemeral port logged at startup) serves `GET /status` (current status) + `GET /shows` + `GET /health`, plus the overlay's `POST /pause` `/skip` `/defer` controls, and also backs the React overlay's data layer. Logs go to stdout. See `desktop-qt/README.md` for architecture and the control surface.
 
 ## Related
 

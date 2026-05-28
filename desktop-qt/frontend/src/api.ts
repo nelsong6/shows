@@ -1,7 +1,7 @@
 // Data layer. The desktop client's control server exposes a same-origin HTTP
 // surface — GET /status, GET /shows, GET /history?show=<id>, POST /pause,
-// POST /skip — and serves this page, so all of these are relative to its
-// origin.
+// POST /skip, POST /defer — and serves this page, so all of these are relative
+// to its origin.
 
 export type RoundEntry = {
   show_id: string;
@@ -9,6 +9,8 @@ export type RoundEntry = {
   episode_id: string;
   absolute_path: string;
   order_value: number;
+  // Set on cross-playlist rounds so each entry shows which playlist it's from.
+  playlist?: string;
 };
 
 export type RemovedShow = {
@@ -80,6 +82,12 @@ export function pause(): void {
 
 export function skip(): void {
   void fetch('/skip', {method: 'POST'});
+}
+
+// Re-roll the current show's next-round pick without marking it watched
+// (server contract D1-D3). The runner jumps to the next entry too.
+export function defer(): void {
+  void fetch('/defer', {method: 'POST'});
 }
 
 // Poll /status on an interval, invoking `onStatus` with each successful

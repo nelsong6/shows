@@ -3,10 +3,10 @@ round-robin runner (background thread) driving the mpv QML item, in a
 single composited window (mpv video bottom, transparent web chrome top).
 
 A localhost control server (shows.webserver) serves the overlay and a
-/status + /shows + /pause + /skip surface; the overlay polls it same-origin.
-This replaces QWebChannel, which doesn't wire cleanly into a QML WebEngineView
-under PySide6 (registerObject isn't QML-callable; a QWebChannel can't be
-assigned to the QQmlWebChannel-typed property).
+/status + /shows + /pause + /skip + /defer surface; the overlay polls it
+same-origin. This replaces QWebChannel, which doesn't wire cleanly into a QML
+WebEngineView under PySide6 (registerObject isn't QML-callable; a QWebChannel
+can't be assigned to the QQmlWebChannel-typed property).
 
 The overlay is the built React frontend (`frontend/`, `npm run build`) served
 from the control server; it is required (no placeholder fallback)."""
@@ -63,10 +63,14 @@ from shows import oauth  # noqa: E402
 from shows.apiclient import Client  # noqa: E402
 from shows.mpv_item import MpvItem  # noqa: E402
 from shows.player import Player  # noqa: E402
+from shows.roundlogic import parse_playlists  # noqa: E402
 from shows.runner import Runner  # noqa: E402
 from shows.webserver import ControlServer  # noqa: E402
 
-PLAYLIST = "nelson"
+# Playlists to round-robin over. One by default (the primary single-playlist
+# path); set SHOWS_PLAYLISTS=a,b,c to interleave several via cross-playlist
+# rounds (contract X1/X2).
+PLAYLISTS = parse_playlists(os.environ.get("SHOWS_PLAYLISTS", ""), ["nelson"])
 
 # Built React overlay (`frontend/`, `npm run build`), served by the control
 # server. Frozen builds bundle the dist under `frontend_dist` in the resource
@@ -122,12 +126,19 @@ def main() -> int:
     tok = oauth.ensure_token(opener=_opener)
     client = Client(tok.token, refresh_token=lambda: oauth.ensure_token(opener=_opener).token)
 
+    def active_shows():
+        out = []
+        for pl in PLAYLISTS:
+            out.extend(client.list_active_shows(pl))
+        return out
+
     server = ControlServer(
         dist_dir=DIST_DIR,
-        shows_provider=lambda: client.list_active_shows(PLAYLIST),
+        shows_provider=active_shows,
         history_provider=client.show_history,
     )
     port = server.start()
+    server.push(playlist=", ".join(PLAYLISTS))
     overlay_url = f"http://127.0.0.1:{port}/"
     logging.info("control server on %s", overlay_url)
 
@@ -153,15 +164,24 @@ def main() -> int:
         if started["v"]:
             return
         started["v"] = True
-        player = Player(mpv_item.mpv, on_pos=lambda i: server.push(round_pos=i))
+        player = Player(mpv_item.mpv)
         server.set_player(player)
         runner = Runner(
-            client, player, PLAYLIST, stop,
+            client, player, PLAYLISTS, stop,
             on_round=lambda r: server.push(phase="playing", message=f"round of {len(r)}", round=r, round_pos=0),
             on_advance=lambda res: server.push(last_advance=res),
             on_drained=lambda: server.push(phase="drained", message="every show finished", round=[]),
             on_error=lambda e: server.push(phase="error", message=e),
         )
+
+        # playlist-pos fans out to both the overlay status and the runner (so
+        # skip/defer act on the entry mpv is actually playing).
+        def on_pos(i):
+            server.push(round_pos=i)
+            runner.set_pos(i)
+
+        player.set_on_pos(on_pos)
+        server.set_command_handlers(skip=runner.skip, defer=runner.defer)
         threading.Thread(target=runner.run, name="runner", daemon=True).start()
 
     mpv_item.renderReady.connect(start_runner, Qt.ConnectionType.QueuedConnection)

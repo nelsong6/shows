@@ -48,17 +48,18 @@ desktop-qt/
   requirements.txt       # runtime deps (PySide6, python-mpv, httpx)
   shows/
     mpv_item.py          # MpvItem(QQuickFramebufferObject): mpv render API → FBO
-    webserver.py         # ControlServer: serves the React overlay + /status /shows /pause /skip
+    webserver.py         # ControlServer: serves the overlay + /status /shows /pause /skip /defer
     oauth.py             # auth.romaine.life PKCE + loopback user-login, cached token
     apiclient.py         # shows.romaine.life HTTP client with 401 refresh
-    runner.py            # round-robin runner: fetch → queue → wait → advance
+    runner.py            # round-robin runner: fetch → queue → wait → skip/defer → advance
+    roundlogic.py        # pure round helpers (advance-set, playlist parse), no Qt/mpv
     player.py            # python-mpv handle wrapper (play/pause/skip/show_text)
     ordering.py          # SHA-256 path ordering, bit-identical to the server
 ```
 
 The overlay UI is the React app under `frontend/`; its data layer
-(`src/api.ts`) polls this server's `/status` + `/shows` and POSTs `/pause` +
-`/skip`.
+(`src/api.ts`) polls this server's `/status` + `/shows` and POSTs `/pause`,
+`/skip`, and `/defer`.
 
 ## Architecture notes
 
@@ -91,7 +92,7 @@ while `loadHtml` composites the whole viewport. `baseUrl` is the control server,
 so the bundle's relative `./assets/*` and its `fetch('/status')` resolve
 same-origin.
 
-**Adaptive UI.** A thin control bar (phase + now-playing + pause/skip) is the
+**Adaptive UI.** A thin control bar (phase + now-playing + pause/skip/defer) is the
 only chrome shown over live video; the full dashboard (sidebar of active shows +
 KPIs + round/just-finished tables) appears only when *not* playing
 (auth/fetching/drained/error), where there's no video to occlude. The React root
@@ -99,8 +100,8 @@ background is transparent so video shows through the gaps.
 
 **Control surface, not QWebChannel** (`shows/webserver.py`): a localhost
 `ThreadingHTTPServer` serves the overlay and a `GET /status` + `POST /pause` +
-`POST /skip` surface that the overlay polls **same-origin** (the WebEngineView's
-`baseUrl` is the control server). QWebChannel was abandoned: under PySide6 a
+`POST /skip` + `POST /defer` surface that the overlay polls **same-origin** (the
+WebEngineView's `baseUrl` is the control server). QWebChannel was abandoned: under PySide6 a
 `QWebChannel` can't be assigned to a QML `WebEngineView`'s `QQmlWebChannel`-typed
 `webChannel` property, and `registerObject` isn't QML-callable. The HTTP surface
 also doubles as the external debug endpoint.
@@ -116,6 +117,15 @@ cache carries a `version` field (`CACHE_VERSION`) so the shape can evolve.
 `POST …/advance` → `playlist-clear` → loop, with retry-and-backoff on transient
 failures and a token refresh + retry on 401. Ordering (`shows/ordering.py`)
 reproduces the server's SHA-256-of-path scheme bit-for-bit.
+
+Two interactive controls arrive on the control-server thread and act on the
+entry mpv is currently playing (tracked via the player's `playlist-pos`):
+**skip** (`n`) marks that episode watched immediately (per-episode advance) and
+jumps forward; **defer** (`d`) re-rolls the show's next-round pick via
+`POST …/defer-show` *without* marking it watched, and is excluded from the
+round-end advance (`shows/roundlogic.advance_entries`) so the defer holds. Set
+`SHOWS_PLAYLISTS=a,b,c` to round-robin across several playlists at once
+(`GET /api/rounds` + `POST /api/rounds/advance`); one playlist is the default.
 
 ## Package
 

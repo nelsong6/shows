@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Callable, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -20,6 +21,11 @@ class RoundEntry:
     episode_id: str
     absolute_path: str
     order_value: int
+    # Which playlist this entry came from. The cross-playlist round
+    # (GET /api/rounds) sets it server-side so advance can route back; the
+    # single-playlist next-round omits it, so next_round() fills it in. Either
+    # way every entry the runner holds carries its playlist for skip/defer.
+    playlist: str = ""
 
 
 @dataclass
@@ -105,6 +111,19 @@ class Client:
 
     def next_round(self, playlist: str) -> list[RoundEntry]:
         data = self._do("GET", f"/api/playlists/{playlist}/next-round").json()
+        out = [_only(RoundEntry, e) for e in (data.get("round") or [])]
+        # The single-playlist endpoint omits `playlist`; stamp it so skip/defer
+        # and advance routing have it uniformly with the cross-playlist path.
+        for e in out:
+            e.playlist = playlist
+        return out
+
+    def next_round_multi(self, playlists: list[str]) -> list[RoundEntry]:
+        """Cross-playlist round (contract X1): one episode per active show
+        across all named playlists, ordered by the same key over the union.
+        Each entry carries its own `playlist`."""
+        q = ",".join(playlists)
+        data = self._do("GET", f"/api/rounds?playlists={quote(q)}").json()
         return [_only(RoundEntry, e) for e in (data.get("round") or [])]
 
     def list_active_shows(self, playlist: str) -> list[Show]:
@@ -124,3 +143,26 @@ class Client:
             advanced_count=data.get("advanced_count", 0),
             removed_shows=[_only(RemovedShow, r) for r in (data.get("removed_shows") or [])],
         )
+
+    def advance_multi(self, entries: list[RoundEntry]) -> AdvanceResult:
+        """Cross-playlist advance (contract X2): group entries by playlist
+        server-side and run each playlist's advance. Entries must carry
+        `playlist` (round entries from next_round/next_round_multi do)."""
+        if not entries:
+            return AdvanceResult()
+        body = {"entries": [
+            {"playlist": e.playlist, "show_id": e.show_id, "episode_id": e.episode_id}
+            for e in entries
+        ]}
+        data = self._do("POST", "/api/rounds/advance", body).json()
+        return AdvanceResult(
+            advanced_count=data.get("advanced_count", 0),
+            removed_shows=[_only(RemovedShow, r) for r in (data.get("removed_shows") or [])],
+        )
+
+    def defer_show(self, playlist: str, show_id: str, episode_id: str) -> None:
+        """Re-roll one show's next-round pick (contract D1–D3): bump the named
+        episode to the back of its queue without marking it watched. 204 on
+        success; 404 (already-watched/unknown episode) surfaces as APIError."""
+        self._do("POST", f"/api/playlists/{playlist}/defer-show",
+                 {"show_id": show_id, "episode_id": episode_id})

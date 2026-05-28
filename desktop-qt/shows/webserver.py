@@ -1,8 +1,8 @@
 """Localhost control server backing the web overlay. Replaces QWebChannel
 (which is a morass to wire into a QML WebEngineView under PySide6) with a
 plain same-origin HTTP surface — the React overlay bundle is served from
-here, polls /status and /shows, and POSTs /pause and /skip. Also doubles as
-the external debug endpoint.
+here, polls /status and /shows, and POSTs /pause, /skip, and /defer. Also
+doubles as the external debug endpoint.
 """
 
 from __future__ import annotations
@@ -55,6 +55,8 @@ class ControlServer:
                         "playlist": "nelson", "round": [], "round_pos": 0}
         self._lock = threading.Lock()
         self._player: Optional[Player] = None
+        self._on_skip: Optional[Callable[[], None]] = None
+        self._on_defer: Optional[Callable[[], None]] = None
         self._httpd: Optional[http.server.HTTPServer] = None
         self.port = 0
         self._dist = dist_dir
@@ -63,6 +65,18 @@ class ControlServer:
 
     def set_player(self, player: Player) -> None:
         self._player = player
+
+    def set_command_handlers(
+        self,
+        skip: Optional[Callable[[], None]] = None,
+        defer: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Wire POST /skip and POST /defer to the runner. Set after the runner
+        exists (it's built once mpv's render context is ready)."""
+        if skip is not None:
+            self._on_skip = skip
+        if defer is not None:
+            self._on_defer = defer
 
     def set_shows_provider(self, fn: Callable[[], list]) -> None:
         self._shows_provider = fn
@@ -140,8 +154,11 @@ class ControlServer:
                 if self.path == "/pause" and srv._player:
                     srv._player.toggle_pause()
                     self._send(204)
-                elif self.path == "/skip" and srv._player:
-                    srv._player.skip()
+                elif self.path == "/skip" and srv._on_skip:
+                    srv._on_skip()
+                    self._send(204)
+                elif self.path == "/defer" and srv._on_defer:
+                    srv._on_defer()
                     self._send(204)
                 else:
                     self._send(404, b"not found")
