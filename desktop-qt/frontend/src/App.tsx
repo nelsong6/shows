@@ -12,6 +12,9 @@ import {
   setSub,
   setAudio,
   syncNow,
+  addShow,
+  removeShow,
+  rescanShow,
   type Status,
   type Show,
   type HistoryEvent,
@@ -145,6 +148,13 @@ function App() {
   const pos = currentPos(status);
   const selectedShow = shows.find((s) => s.id === selected) ?? null;
 
+  // Library edits mutate the replica but don't change phase/advance, so re-fetch
+  // the sidebar shows explicitly after add/remove/rescan.
+  const refreshShows = () =>
+    listShows()
+      .then((s) => setShows(s ?? []))
+      .catch(() => {});
+
   return (
     <div className="overlay-root">
       <ControlBar
@@ -171,7 +181,19 @@ function App() {
                     className={selected === sh.id ? 'selected' : ''}
                     onClick={() => setSelected(selected === sh.id ? null : sh.id)}
                   >
-                    <div>{sh.name}</div>
+                    <div className="row-top">
+                      <span>{sh.name}</span>
+                      <button
+                        className="mini"
+                        title="scan this show's folder for new episodes"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void rescanShow(sh.id).then(refreshShows);
+                        }}
+                      >
+                        rescan
+                      </button>
+                    </div>
                     <div className="meta">
                       added {relTime(sh.date_added)}
                       {playingByShow.has(sh.id) && (
@@ -184,6 +206,7 @@ function App() {
                 ))}
               </ul>
             )}
+            <AddShowForm playlist={status.playlist} onAdded={refreshShows} />
           </aside>
 
           <main className="main">
@@ -211,7 +234,16 @@ function App() {
             </div>
 
             {selectedShow ? (
-              <ShowHistory show={selectedShow} events={history} onClose={() => setSelected(null)} />
+              <ShowHistory
+                show={selectedShow}
+                events={history}
+                onClose={() => setSelected(null)}
+                onRemove={() => {
+                  removeShow(selectedShow.id);
+                  setSelected(null);
+                  setTimeout(refreshShows, 400);
+                }}
+              />
             ) : (
               <>
                 <Queue round={round} pos={pos} />
@@ -416,10 +448,12 @@ function ShowHistory({
   show,
   events,
   onClose,
+  onRemove,
 }: {
   show: Show;
   events: HistoryEvent[];
   onClose: () => void;
+  onRemove: () => void;
 }) {
   return (
     <div className="section">
@@ -428,7 +462,13 @@ function ShowHistory({
         <button className="gb" style={{ marginLeft: 12 }} onClick={onClose}>
           back
         </button>
+        <button className="gb danger" style={{ marginLeft: 8 }} onClick={onRemove}>
+          remove show
+        </button>
       </h3>
+      <div className="meta" style={{ margin: '0 0 12px' }}>
+        {shortPath(show.root_path)}
+      </div>
       {events.length === 0 ? (
         <div className="empty">no watch history yet.</div>
       ) : (
@@ -449,6 +489,69 @@ function ShowHistory({
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+// Add a show by pointing at a local folder; the desktop scans it for episodes.
+function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [path, setPath] = useState('');
+  const [pl, setPl] = useState(playlist || 'nelson');
+  const [msg, setMsg] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  if (!open) {
+    return (
+      <button className="gb add-toggle" onClick={() => setOpen(true)}>
+        + add show
+      </button>
+    );
+  }
+
+  const submit = () => {
+    if (!name.trim() || !path.trim()) {
+      setMsg('name and folder are required');
+      return;
+    }
+    setBusy(true);
+    setMsg('scanning…');
+    addShow(name.trim(), path.trim(), (pl || 'nelson').trim())
+      .then((r) => {
+        setMsg(`added ${r.episodes} episode${r.episodes === 1 ? '' : 's'}`);
+        setName('');
+        setPath('');
+        onAdded();
+      })
+      .catch((e) => setMsg(String(e.message || e)))
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="add-form">
+      <input placeholder="show name" value={name} onChange={(e) => setName(e.target.value)} />
+      <input
+        placeholder="folder path"
+        value={path}
+        onChange={(e) => setPath(e.target.value)}
+      />
+      <input placeholder="playlist" value={pl} onChange={(e) => setPl(e.target.value)} />
+      <div className="add-actions">
+        <button className="gb" disabled={busy} onClick={submit}>
+          add
+        </button>
+        <button
+          className="gb"
+          onClick={() => {
+            setOpen(false);
+            setMsg('');
+          }}
+        >
+          cancel
+        </button>
+      </div>
+      {msg && <div className="add-msg">{msg}</div>}
     </div>
   );
 }

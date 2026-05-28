@@ -209,6 +209,58 @@ table.runs th {
   max-width: 160px;
 }
 
+/* Library management (sidebar): per-row rescan, add-show form, remove button. */
+.sidebar li .row-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mini {
+  font-size: 10px;
+  padding: 1px 6px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+}
+.sidebar li:hover .mini {
+  opacity: 1;
+}
+.gb.danger,
+.mini.danger {
+  color: var(--state-drain-fg, #e06c75);
+  border-color: color-mix(in srgb, var(--state-drain-fg, #e06c75) 45%, var(--border));
+}
+.add-toggle {
+  margin: 12px 16px;
+}
+.add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+.add-form input {
+  background: var(--bg-deep);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.add-actions {
+  display: flex;
+  gap: 8px;
+}
+.add-msg {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
 /* Sidebar rows are clickable (select a show -> its watch history). */
 .sidebar li {
   cursor: pointer;

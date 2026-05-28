@@ -158,6 +158,7 @@ def main() -> int:
         shows_provider=lambda: replica.overlay_shows(PLAYLISTS),
         history_provider=replica.show_history,
     )
+    server.set_library(replica)  # backs the /library/* management endpoints
     port = server.start()
     server.push(playlist=", ".join(PLAYLISTS))
     overlay_url = f"http://127.0.0.1:{port}/"

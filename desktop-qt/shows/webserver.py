@@ -17,6 +17,7 @@ import threading
 import urllib.parse
 from typing import Callable, Optional
 
+from . import scan
 from .player import Player
 
 log = logging.getLogger("shows.webserver")
@@ -58,6 +59,7 @@ class ControlServer:
         self._on_skip: Optional[Callable[[], None]] = None
         self._on_defer: Optional[Callable[[], None]] = None
         self._syncer = None  # set after the runner is built; backs /sync-now + status
+        self._replica = None  # set for /library/* management endpoints
         self._httpd: Optional[http.server.HTTPServer] = None
         self.port = 0
         self._dist = dist_dir
@@ -83,6 +85,11 @@ class ControlServer:
         """Wire the Syncer so /status reports online/pending and POST /sync-now
         triggers a manual reconcile (the 'check connectivity' button)."""
         self._syncer = syncer
+
+    def set_library(self, replica) -> None:
+        """Wire the replica for the /library/* management endpoints (add show by
+        scanning a directory, remove/edit, rescan for new episodes)."""
+        self._replica = replica
 
     def set_shows_provider(self, fn: Callable[[], list]) -> None:
         self._shows_provider = fn
@@ -211,8 +218,56 @@ class ControlServer:
                     if "aid" in b:
                         p.set_audio(b["aid"])
                     self._send(204)
+                elif self.path == "/library/add" and srv._replica is not None:
+                    self._library_add()
+                elif self.path == "/library/remove" and srv._replica is not None:
+                    srv._replica.remove_show(self._json_body().get("show_id", ""))
+                    self._push()
+                    self._send(204)
+                elif self.path == "/library/update" and srv._replica is not None:
+                    b = self._json_body()
+                    srv._replica.update_show(
+                        b.get("show_id", ""), name=b.get("name"),
+                        root_path=b.get("root_path"), playlist=b.get("playlist"),
+                    )
+                    self._push()
+                    self._send(204)
+                elif self.path == "/library/rescan" and srv._replica is not None:
+                    self._library_rescan()
                 else:
                     self._send(404, b"not found")
+
+            def _push(self):
+                if srv._syncer is not None:
+                    srv._syncer.push()
+
+            def _library_add(self):
+                b = self._json_body()
+                name = (b.get("name") or "").strip()
+                root = (b.get("root_path") or "").strip()
+                playlist = (b.get("playlist") or "nelson").strip()
+                if not name or not root:
+                    self._send(400, b'{"error":"name and root_path are required"}', "application/json")
+                    return
+                eps = scan.scan_episodes(root)
+                if not eps:
+                    self._send(400, b'{"error":"no video files found under root_path"}', "application/json")
+                    return
+                sid = srv._replica.create_show(playlist, name, root, eps)
+                self._push()
+                self._send(200, json.dumps({"id": sid, "episodes": len(eps)}).encode("utf-8"), "application/json")
+
+            def _library_rescan(self):
+                sid = self._json_body().get("show_id", "")
+                sh = srv._replica.show(sid)
+                added = 0
+                if sh is not None:
+                    known = srv._replica.episode_paths(sid)
+                    new = [f for f in scan.scan_episodes(sh.root_path) if f not in known]
+                    added = srv._replica.add_episodes(sid, new)
+                    if added:
+                        self._push()
+                self._send(200, json.dumps({"added": added}).encode("utf-8"), "application/json")
 
         self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self._httpd.server_address[1]

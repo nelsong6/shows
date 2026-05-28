@@ -238,6 +238,89 @@ class Replica:
             )
             self._db.commit()
 
+    # ── library management (local-first; syncs up like any change) ──────
+    def create_show(self, playlist: str, name: str, root_path: str,
+                    episodes: list[str], now: Optional[str] = None) -> str:
+        """Create a show + its episode queue from a scanned file list. Returns
+        the new show id; rows are dirty so the next sync creates them upstream
+        (SyncUpsert creates unknown shows/episodes)."""
+        now = now or _now()
+        sid = str(uuid.uuid4())
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO shows(id,playlist,name,root_path,date_added,removed_at,updated_at,dirty)"
+                " VALUES(?,?,?,?,?,NULL,?,1)",
+                (sid, playlist, name, root_path, now, now),
+            )
+            for i, rel in enumerate(episodes):
+                self._db.execute(
+                    "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty)"
+                    " VALUES(?,?,?,?,NULL,NULL,?,1)",
+                    (str(uuid.uuid4()), sid, rel, i, now),
+                )
+            self._db.commit()
+        return sid
+
+    def update_show(self, show_id: str, *, name: Optional[str] = None,
+                    root_path: Optional[str] = None, playlist: Optional[str] = None,
+                    now: Optional[str] = None) -> bool:
+        now = now or _now()
+        sets, vals = [], []
+        if name is not None:
+            sets.append("name=?"); vals.append(name)
+        if root_path is not None:
+            sets.append("root_path=?"); vals.append(root_path)
+        if playlist is not None:
+            sets.append("playlist=?"); vals.append(playlist)
+        if not sets:
+            return False
+        sets += ["updated_at=?", "dirty=1"]
+        vals += [now, show_id]
+        with self._lock:
+            cur = self._db.execute(f"UPDATE shows SET {', '.join(sets)} WHERE id=?", vals)
+            self._db.commit()
+            return cur.rowcount > 0
+
+    def remove_show(self, show_id: str, now: Optional[str] = None) -> bool:
+        """Tombstone a show (removes it from rotation). Soft-delete — the engine
+        skips removed shows; the tombstone syncs up."""
+        now = now or _now()
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE shows SET removed_at=?, updated_at=?, dirty=1 WHERE id=?",
+                (now, now, show_id),
+            )
+            self._db.commit()
+            return cur.rowcount > 0
+
+    def add_episodes(self, show_id: str, rels: list[str], now: Optional[str] = None) -> int:
+        """Append new episodes to a show, positions continuing from max+1 (the
+        new-episode-detection path). Returns how many were added."""
+        if not rels:
+            return 0
+        now = now or _now()
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT position FROM episodes WHERE show_id=?", (show_id,)
+            ).fetchall()
+            start = max((r["position"] for r in rows), default=-1) + 1
+            for i, rel in enumerate(rels):
+                self._db.execute(
+                    "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty)"
+                    " VALUES(?,?,?,?,NULL,NULL,?,1)",
+                    (str(uuid.uuid4()), show_id, rel, start + i, now),
+                )
+            self._db.commit()
+            return len(rels)
+
+    def episode_paths(self, show_id: str) -> set[str]:
+        """Relative paths already known for a show — for diffing a rescan."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT relative_path FROM episodes WHERE show_id=?", (show_id,)
+            ).fetchall()
+            return {r["relative_path"] for r in rows}
+
     # ── seed / reconcile (pull): upsert last-write-wins ─────────────────
     def merge_shows(self, shows: list[dict]) -> None:
         """Upsert shows + episodes pulled from the server. Last-write-wins by

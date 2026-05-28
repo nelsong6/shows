@@ -144,6 +144,39 @@ export function syncNow(): void {
   void fetch('/sync-now', {method: 'POST'});
 }
 
+// ── library management (desktop scans the dir, the change syncs up) ──
+export async function addShow(
+  name: string,
+  root_path: string,
+  playlist: string,
+): Promise<{id: string; episodes: number}> {
+  const r = await fetch('/library/add', {
+    method: 'POST',
+    body: JSON.stringify({name, root_path, playlist}),
+  });
+  if (!r.ok) {
+    const msg = await r.json().catch(() => ({}));
+    throw new Error(msg.error || `add failed (${r.status})`);
+  }
+  return r.json();
+}
+
+export function removeShow(show_id: string): void {
+  void fetch('/library/remove', {method: 'POST', body: JSON.stringify({show_id})});
+}
+
+export function updateShow(
+  show_id: string,
+  fields: {name?: string; root_path?: string; playlist?: string},
+): void {
+  void fetch('/library/update', {method: 'POST', body: JSON.stringify({show_id, ...fields})});
+}
+
+export async function rescanShow(show_id: string): Promise<{added: number}> {
+  const r = await fetch('/library/rescan', {method: 'POST', body: JSON.stringify({show_id})});
+  return r.json();
+}
+
 // Poll /status on an interval, invoking `onStatus` with each successful
 // read. Returns an unsubscribe that stops the polling — same lifecycle
 // contract as the old EventsOn('status', …) subscription.

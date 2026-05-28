@@ -93,3 +93,37 @@ def test_mark_synced_clears_pending():
     r.mark_synced("watch_history", [h["id"] for h in d["history"]])
     p = r.pending()
     assert p["episodes"] == 0 and p["history"] == 0
+
+
+def test_create_show_is_dirty_and_in_round():
+    r = Replica(":memory:")
+    sid = r.create_show("nelson", "New", r"D:\New", ["e1.mkv", "e2.mkv"])
+    assert sid
+    me = next(s for s in r.active_shows(["nelson"]) if s.id == sid)
+    assert len(me.episodes) == 2
+    p = r.pending()
+    assert p["shows"] == 1 and p["episodes"] == 2  # queued to sync up
+
+
+def test_remove_show_tombstones():
+    r = Replica(":memory:")
+    sid = r.create_show("nelson", "X", r"D:\X", ["a.mkv"])
+    assert r.remove_show(sid) is True
+    assert all(s.id != sid for s in r.active_shows(["nelson"]))
+
+
+def test_add_episodes_appends_positions():
+    r = Replica(":memory:")
+    sid = r.create_show("nelson", "X", r"D:\X", ["a.mkv", "b.mkv"])
+    assert r.add_episodes(sid, ["c.mkv"]) == 1
+    c = next(e for e in r.show(sid).episodes if e.relative_path == "c.mkv")
+    assert c.position == 2  # continues after a(0), b(1)
+
+
+def test_episode_paths_and_update_show():
+    r = Replica(":memory:")
+    sid = r.create_show("nelson", "X", r"D:\X", ["a.mkv", "b.mkv"])
+    assert r.episode_paths(sid) == {"a.mkv", "b.mkv"}
+    assert r.update_show(sid, name="Y", playlist="couple") is True
+    s = r.show(sid)
+    assert s.name == "Y" and s.playlist == "couple"
