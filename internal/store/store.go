@@ -180,10 +180,18 @@ var (
 // ─── playlists ─────────────────────────────────────────────────────
 
 // ListPlaylists returns the distinct playlist names that appear on any
-// show doc. Cross-partition aggregate — rare, called only by humans.
+// show doc. Cross-partition — rare, called only by humans.
+//
+// The query is a plain projection, NOT `SELECT DISTINCT`: the azcosmos
+// Go SDK can't perform the cross-partition merge that DISTINCT (and
+// ORDER BY / GROUP BY / aggregates) require — the gateway rejects it
+// with "cross partition query can not be directly served by the gateway"
+// (surfacing as a 500 on GET /api/playlists). A bare `SELECT VALUE
+// c.playlist FROM c` streams every doc's playlist across partitions and
+// we dedupe with the `seen` map below — same result, server-supported.
 func (s *Store) ListPlaylists(ctx context.Context) ([]Playlist, error) {
 	pager := s.shows.NewQueryItemsPager(
-		"SELECT DISTINCT VALUE c.playlist FROM c",
+		"SELECT VALUE c.playlist FROM c",
 		azcosmos.NewPartitionKey(),
 		nil,
 	)
