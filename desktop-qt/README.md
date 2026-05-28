@@ -143,6 +143,23 @@ unpack dir when `sys.frozen`. The spec finds `libmpv-2.dll` via
 `.github/workflows/build-desktop.yaml` runs this on a Windows runner and
 publishes the zipped bundle as a GitHub Release on push to main.
 
+## Install (latest Release)
+
+Push to main publishes the packaged bundle as a GitHub Release (tag
+`desktop-<short-sha>`, marked `--latest`). **Fetching and unpacking that build
+is the assistant's chore, not the user's** — when a new build needs installing
+or smoke-testing, the assistant pulls it onto the machine from the session
+rather than asking the user to click through the Releases page:
+
+```powershell
+gh release download --pattern 'shows-qt-windows-amd64.zip' --dir $env:TEMP\shows-dl --clobber
+Expand-Archive $env:TEMP\shows-dl\shows-qt-windows-amd64.zip -DestinationPath $env:LOCALAPPDATA\shows-qt -Force
+# then launch:  & "$env:LOCALAPPDATA\shows-qt\shows-qt.exe"
+```
+
+The user's only manual step is watching the running app behave (the live Qt/mpv
+window) — never the download, unpack, or launch.
+
 ## Status
 
 Works end-to-end (verified from source and as a packaged exe): cached auth →
