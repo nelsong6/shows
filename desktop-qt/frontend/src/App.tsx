@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   subscribeStatus,
   listShows,
@@ -6,9 +6,15 @@ import {
   pause,
   skip,
   defer,
+  seekPercent,
+  seekRelative,
+  setVolume,
+  setSub,
+  setAudio,
   type Status,
   type Show,
   type HistoryEvent,
+  type Playback,
 } from './api';
 import './App.css';
 
@@ -50,10 +56,16 @@ function App() {
 
   useEffect(() => subscribeStatus(setStatus), []);
 
+  // Latest playback, mirrored to a ref so the (mount-once) key handler can read
+  // current volume for relative +/- without re-binding every poll.
+  const pbRef = useRef<Playback | undefined>(undefined);
+  useEffect(() => {
+    pbRef.current = status.playback;
+  }, [status.playback]);
+
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (main.py gives the WebEngineView active focus). space=pause/play,
-  // n/→=skip, d=defer (different episode of this show next round),
-  // v/Tab=toggle the dashboard over video, Esc=hide it.
+  // n/→=skip, d=defer, j/l=seek -/+10s, ↑/↓=volume, v/Tab=dashboard, Esc=hide.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       switch (e.key) {
@@ -68,6 +80,22 @@ function App() {
         case 'd':
           defer();
           break;
+        case 'j':
+          seekRelative(-10);
+          break;
+        case 'l':
+          seekRelative(10);
+          break;
+        case 'ArrowUp': {
+          e.preventDefault();
+          setVolume(Math.min(130, (pbRef.current?.volume ?? 100) + 5));
+          break;
+        }
+        case 'ArrowDown': {
+          e.preventDefault();
+          setVolume(Math.max(0, (pbRef.current?.volume ?? 100) - 5));
+          break;
+        }
         case 'v':
         case 'Tab':
           e.preventDefault();
@@ -125,6 +153,7 @@ function App() {
         viewing={showDashboard}
         onToggleView={() => setShowDashboard((v) => !v)}
       />
+      {playing && <PlaybackBar pb={status.playback} />}
       {dashboardVisible && (
         <div className={`layout${playing ? ' over-video' : ''}`}>
           <aside className="sidebar">
@@ -264,7 +293,82 @@ function ControlBar({
           {viewing ? 'hide list' : 'show list'}
         </button>
       )}
-      <span className="keys">space · n · d · v · esc</span>
+      <span className="keys">space · n · d · j/l · ↑↓ · v · esc</span>
+    </div>
+  );
+}
+
+function fmtTime(s: number | null | undefined): string {
+  if (s == null || isNaN(s)) return '--:--';
+  const t = Math.max(0, Math.floor(s));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const sec = t % 60;
+  const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
+  return (h > 0 ? `${h}:` : '') + `${mm}:${String(sec).padStart(2, '0')}`;
+}
+
+// Scrub bar + time + volume + subtitle/audio menus, shown under the control bar
+// during playback. Driven by status.playback (live mpv state, polled).
+function PlaybackBar({ pb }: { pb?: Playback }) {
+  if (!pb) return null;
+  const pct =
+    pb.percent_pos ??
+    (pb.duration && pb.time_pos != null ? (pb.time_pos / pb.duration) * 100 : 0);
+  return (
+    <div className="playbar">
+      <span className="time">{fmtTime(pb.time_pos)}</span>
+      <div
+        className="scrub"
+        onClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
+        }}
+      >
+        <div className="scrub-fill" style={{ width: `${pct ?? 0}%` }} />
+      </div>
+      <span className="time">{fmtTime(pb.duration)}</span>
+      <label className="vol" title="volume (up / down)">
+        vol
+        <input
+          type="range"
+          min={0}
+          max={130}
+          value={Math.round(pb.volume ?? 100)}
+          onChange={(e) => setVolume(Number(e.currentTarget.value))}
+        />
+      </label>
+      {pb.sub_tracks.length > 0 && (
+        <select
+          className="trk"
+          title="subtitles"
+          value={String(pb.sid ?? 'no')}
+          onChange={(e) =>
+            setSub(e.currentTarget.value === 'no' ? 'no' : Number(e.currentTarget.value))
+          }
+        >
+          <option value="no">subs: off</option>
+          {pb.sub_tracks.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.title}
+            </option>
+          ))}
+        </select>
+      )}
+      {pb.audio_tracks.length > 1 && (
+        <select
+          className="trk"
+          title="audio track"
+          value={String(pb.aid ?? '')}
+          onChange={(e) => setAudio(Number(e.currentTarget.value))}
+        >
+          {pb.audio_tracks.map((t) => (
+            <option key={t.id} value={t.id}>
+              {t.title}
+            </option>
+          ))}
+        </select>
+      )}
     </div>
   );
 }

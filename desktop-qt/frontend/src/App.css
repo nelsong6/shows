@@ -162,6 +162,53 @@ table.runs th {
   white-space: nowrap;
 }
 
+/* Playback bar: scrub + time + volume + track menus, under the control bar. */
+.playbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  background: color-mix(in srgb, var(--bg-deep) 82%, transparent);
+  border-bottom: 1px solid var(--border);
+  pointer-events: auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.playbar .time {
+  font-variant-numeric: tabular-nums;
+  min-width: 46px;
+  text-align: center;
+}
+.playbar .scrub {
+  flex: 1;
+  height: 8px;
+  background: color-mix(in srgb, var(--fg) 16%, transparent);
+  border-radius: 4px;
+  cursor: pointer;
+  overflow: hidden;
+}
+.playbar .scrub-fill {
+  height: 100%;
+  background: var(--state-busy-fg);
+}
+.playbar .vol {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.playbar .vol input[type='range'] {
+  width: 90px;
+}
+.playbar .trk {
+  background: var(--bg-deep);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  padding: 2px 4px;
+  max-width: 160px;
+}
+
 /* Sidebar rows are clickable (select a show -> its watch history). */
 .sidebar li {
   cursor: pointer;

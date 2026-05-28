@@ -97,6 +97,76 @@ class Player:
         except Exception:
             pass
 
+    # ── playback controls (seek / volume / tracks) ─────────────────────
+    def seek_relative(self, seconds: float) -> None:
+        """Seek by `seconds` from the current position (negative = back)."""
+        try:
+            self._m.command("seek", seconds, "relative")
+        except Exception:
+            pass
+
+    def seek_percent(self, pct: float) -> None:
+        """Seek to an absolute percentage (0-100) of the file — what the
+        scrub bar posts."""
+        try:
+            self._m.command("seek", max(0.0, min(100.0, pct)), "absolute-percent")
+        except Exception:
+            pass
+
+    def set_volume(self, vol: float) -> None:
+        try:
+            self._m.volume = max(0.0, min(130.0, vol))
+        except Exception:
+            pass
+
+    def set_sub(self, sid) -> None:
+        """sid is an int track id, or "no" to disable subtitles."""
+        try:
+            self._m.sid = sid
+        except Exception:
+            pass
+
+    def set_audio(self, aid) -> None:
+        try:
+            self._m.aid = aid
+        except Exception:
+            pass
+
+    def playback_state(self) -> dict:
+        """Snapshot of current playback for the overlay's scrub bar, volume,
+        and track menus. Reads mpv properties; safe from the HTTP thread."""
+        def g(name, default=None):
+            try:
+                return getattr(self._m, name)
+            except Exception:
+                return default
+
+        def tracks(kind):
+            out = []
+            for t in (g("track_list", []) or []):
+                if t.get("type") != kind:
+                    continue
+                tid = t.get("id")
+                out.append({
+                    "id": tid,
+                    "title": t.get("title") or t.get("lang") or f"{kind} {tid}",
+                    "lang": t.get("lang"),
+                    "selected": bool(t.get("selected")),
+                })
+            return out
+
+        return {
+            "time_pos": g("time_pos"),
+            "duration": g("duration"),
+            "percent_pos": g("percent_pos"),
+            "volume": g("volume"),
+            "paused": bool(g("pause", False)),
+            "sub_tracks": tracks("sub"),
+            "audio_tracks": tracks("audio"),
+            "sid": g("sid"),
+            "aid": g("aid"),
+        }
+
     # ── round synchronization ─────────────────────────────────────────
     def wait_for_round(self, n: int, stop: threading.Event) -> None:
         """Block until `n` more end-file events arrive. Raises

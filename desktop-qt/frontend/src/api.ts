@@ -33,6 +33,26 @@ export type Phase =
   | 'drained'
   | 'error';
 
+export type Track = {
+  id: number;
+  title: string;
+  lang?: string | null;
+  selected: boolean;
+};
+
+// Live mpv playback state, read fresh on each /status poll.
+export type Playback = {
+  time_pos: number | null;
+  duration: number | null;
+  percent_pos: number | null;
+  volume: number | null;
+  paused: boolean;
+  sub_tracks: Track[];
+  audio_tracks: Track[];
+  sid: number | string | null;
+  aid: number | string | null;
+};
+
 export type Status = {
   phase: Phase;
   message: string;
@@ -41,6 +61,7 @@ export type Status = {
   // Index into `round` of the entry currently playing (mpv playlist-pos).
   round_pos?: number;
   last_advance?: AdvanceResult;
+  playback?: Playback;
 };
 
 export type Show = {
@@ -88,6 +109,26 @@ export function skip(): void {
 // (server contract D1-D3). The runner jumps to the next entry too.
 export function defer(): void {
   void fetch('/defer', {method: 'POST'});
+}
+
+export function seekPercent(percent: number): void {
+  void fetch('/seek', {method: 'POST', body: JSON.stringify({percent})});
+}
+
+export function seekRelative(seconds: number): void {
+  void fetch('/seek', {method: 'POST', body: JSON.stringify({seconds})});
+}
+
+export function setVolume(volume: number): void {
+  void fetch('/volume', {method: 'POST', body: JSON.stringify({volume})});
+}
+
+export function setSub(sid: number | string): void {
+  void fetch('/sub', {method: 'POST', body: JSON.stringify({sid})});
+}
+
+export function setAudio(aid: number | string): void {
+  void fetch('/audio', {method: 'POST', body: JSON.stringify({aid})});
 }
 
 // Poll /status on an interval, invoking `onStatus` with each successful

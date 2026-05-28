@@ -90,7 +90,15 @@ class ControlServer:
 
     def _status_json(self) -> bytes:
         with self._lock:
-            return json.dumps(self._status).encode("utf-8")
+            status = dict(self._status)
+        # Live playback state (position/duration/volume/tracks) for the scrub
+        # bar + menus — read fresh from mpv on each poll, merged under "playback".
+        if self._player is not None:
+            try:
+                status["playback"] = self._player.playback_state()
+            except Exception as e:  # noqa: BLE001 — keep /status serving
+                log.warning("playback_state failed: %s", e)
+        return json.dumps(status).encode("utf-8")
 
     def index_html(self) -> bytes:
         """The overlay document — the built React index.html. main.py feeds
@@ -150,15 +158,44 @@ class ControlServer:
                     else:
                         self._send(404, b"not found")
 
+            def _json_body(self):
+                try:
+                    n = int(self.headers.get("Content-Length", 0) or 0)
+                    raw = self.rfile.read(n) if n else b""
+                    return json.loads(raw) if raw else {}
+                except Exception:
+                    return {}
+
             def do_POST(self):
-                if self.path == "/pause" and srv._player:
-                    srv._player.toggle_pause()
+                p = srv._player
+                if self.path == "/pause" and p:
+                    p.toggle_pause()
                     self._send(204)
                 elif self.path == "/skip" and srv._on_skip:
                     srv._on_skip()
                     self._send(204)
                 elif self.path == "/defer" and srv._on_defer:
                     srv._on_defer()
+                    self._send(204)
+                elif self.path == "/seek" and p:
+                    b = self._json_body()
+                    if "percent" in b:
+                        p.seek_percent(float(b["percent"]))
+                    elif "seconds" in b:
+                        p.seek_relative(float(b["seconds"]))
+                    self._send(204)
+                elif self.path == "/volume" and p:
+                    b = self._json_body()
+                    if "volume" in b:
+                        p.set_volume(float(b["volume"]))
+                    self._send(204)
+                elif self.path == "/sub" and p:
+                    p.set_sub(self._json_body().get("sid", "no"))
+                    self._send(204)
+                elif self.path == "/audio" and p:
+                    b = self._json_body()
+                    if "aid" in b:
+                        p.set_audio(b["aid"])
                     self._send(204)
                 else:
                     self._send(404, b"not found")
