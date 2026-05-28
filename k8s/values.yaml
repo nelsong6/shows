@@ -7,7 +7,7 @@ image:
   # through Helm's float-backed value pipeline, and rendered as
   # "5.651694e+06" — which is not a real ACR tag. Mirrors auth's
   # values.yaml comment for the same reason.
-  tag: "9ed36b2"
+  tag: "aa45d3c"
 
 # auth.romaine.life integration. The Go verifier in internal/auth defaults
 # to these values; setting them here makes the runtime config explicit
