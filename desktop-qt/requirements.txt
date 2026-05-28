@@ -1,0 +1,5 @@
+# Runtime deps for the PySide6 client. PyInstaller (the build tool) is
+# installed separately in CI, not pinned here.
+PySide6
+python-mpv
+httpx

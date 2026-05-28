@@ -1,6 +1,6 @@
 # shows
 
-App repo on the romaine.life AKS cluster. Cosmos-backed playlist API at `shows.romaine.life` plus a Wails-based Windows desktop app that drives libmpv for round-robin playback.
+App repo on the romaine.life AKS cluster. Cosmos-backed playlist API at `shows.romaine.life` plus a PySide6/Qt Windows desktop app that drives libmpv for round-robin playback.
 
 ## Quality timeframe
 
@@ -21,18 +21,18 @@ internal/
   device/             auth.romaine.life CLI device flow (used by shows-migrate)
   store/              Cosmos SDK store layer (shows + watch_history containers)
   api/                chi routes, handlers, Prometheus metrics
-desktop/
-  app.go              Wails-bound App struct; methods auto-exposed to TS frontend
-  main.go             wails.Run entry; window options
-  internal/
-    player/           libmpv cgo wrapper (supersonic-app/go-mpv)
-    win32/            HWND lookup so libmpv parents into the Wails window
-    oauth/            user-login flow against auth.romaine.life (PKCE + loopback)
-    apiclient/        shows.romaine.life HTTP client + 401 refresh hook
-    playlist/         round-robin runner (fetch → queue → wait → advance)
-  frontend/           Vite + React + TS using glimmung's design-system tokens
-  scripts/            setup-libmpv.ps1 + build.ps1
-  third_party/        gitignored; libmpv DLL + headers per-machine
+desktop-qt/           PySide6 + libmpv client (mpv video composited under a
+                      transparent React overlay in one Qt window)
+  main.py             entry: OpenGL/WebEngine setup, QML window, runner wiring
+  shows/
+    mpv_item.py       mpv render API → QQuickFramebufferObject (Qt composites)
+    webserver.py      control server: serves the React overlay + /status /shows /pause /skip
+    oauth.py          user-login flow against auth.romaine.life (PKCE + loopback)
+    apiclient.py      shows.romaine.life HTTP client + 401 refresh hook
+    runner.py         round-robin runner (fetch → queue → wait → advance)
+    player.py         python-mpv handle wrapper
+  frontend/           Vite + React + TS overlay (glimmung design-system tokens)
+  shows-qt.spec       PyInstaller onedir build (bundles libmpv + the overlay)
 docs/
   feature-contracts/  durable invariant docs (round-and-advance, …)
 k8s/                  Helm chart (Deployment, Service, HTTPRoute, XListenerSet,
@@ -50,13 +50,13 @@ Per the fleet convention:
 - **`k8s/`** — Helm chart consumed by the ArgoCD `Application` defined in `infra-bootstrap/k8s/apps/shows.yaml`. ArgoCD auto-syncs on push.
 - **`.github/workflows/build-and-deploy.yaml`** — builds `cmd/shows-api`, pushes to `romainecr.azurecr.io/shows:<sha>`, bumps `k8s/values.yaml`, commits. ArgoCD picks up the new tag.
 
-The desktop app (`desktop/`) and the migrate tool (`cmd/shows-migrate`) are **not** deployed by CI. They build locally per-machine; the desktop's build pipeline is `desktop/scripts/build.ps1`.
+The desktop app (`desktop-qt/`) and the migrate tool (`cmd/shows-migrate`) are **not** deployed to AKS. `.github/workflows/build-desktop.yaml` packages the desktop app with PyInstaller on a Windows runner and publishes it as a GitHub Release; the migrate tool builds locally per-machine.
 
 ## Auth
 
 Every `/api/*` route requires an auth.romaine.life JWT with `role in {admin, user}`. Tokens are verified against the JWKS at `https://auth.romaine.life/api/auth/jwks` with required claims `["exp", "iat", "iss", "role"]` (mirrors `nelsong6/romaine-auth-py`).
 
-The desktop app uses the **user-login** path at `GET /api/auth/cli/user-login` (PKCE + loopback `redirect_uri`). If the user has no `.romaine.life` session cookie, auth.romaine.life bounces them through Microsoft/Google and returns; the server then redirects to the loopback with a one-time `?code=...`. The desktop POSTs `{grant_type: authorization_code, code, code_verifier, redirect_uri}` to `/api/auth/cli/user-token` and receives the user's own JWT (`role=user|admin`, no `purpose` claim — same shape the browser session would yield). The JWT never travels through the browser. Token caches at `%APPDATA%\shows\token.json`; on 401 the apiclient calls back to `oauth.EnsureToken` for an in-place refresh.
+The desktop app uses the **user-login** path at `GET /api/auth/cli/user-login` (PKCE + loopback `redirect_uri`). If the user has no `.romaine.life` session cookie, auth.romaine.life bounces them through Microsoft/Google and returns; the server then redirects to the loopback with a one-time `?code=...`. The desktop POSTs `{grant_type: authorization_code, code, code_verifier, redirect_uri}` to `/api/auth/cli/user-token` and receives the user's own JWT (`role=user|admin`, no `purpose` claim — same shape the browser session would yield). The JWT never travels through the browser. Token caches at `%APPDATA%\shows\token.json`; on 401 the apiclient calls back into the oauth module's `ensure_token` for an in-place refresh.
 
 `cmd/shows-migrate` still uses the **bot-token** CLI flow (`internal/device` → `/api/cli/device` + `/api/cli/token`) because it's an unattended import script, not a user-facing app. Both go away when the desktop grows an in-app import flow.
 
@@ -99,7 +99,7 @@ Episode paths are relative to the parent directory of the per-show JSON. `cmd/sh
 
 **Server side:** `shows_*` Prometheus metrics exposed at `/metrics` (no auth) on the AKS pod, scraped by the kube-prometheus-stack via `k8s/templates/podmonitor.yaml`. Catalog in [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md). Grafana sees them in the `monitoring` namespace's dashboards.
 
-**Desktop side:** the running `shows.exe` exposes a localhost-only debug HTTP server (port written to `%APPDATA%\shows\debug-port`) with `GET /status` (current Status struct) + `GET /health`. slog output is teed to `%APPDATA%\shows\shows.log`. See `desktop/README.md` "Inspecting a running instance" for usage.
+**Desktop side:** the running app's control server (localhost, ephemeral port logged at startup) serves `GET /status` (current status) + `GET /shows` + `GET /health`, and also backs the React overlay's data layer. Logs go to stdout. See `desktop-qt/README.md` for architecture and the control surface.
 
 ## Related
 

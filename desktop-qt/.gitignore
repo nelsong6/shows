@@ -2,4 +2,18 @@ __pycache__/
 *.pyc
 build/
 dist/
+_pkg/
+third_party/
+
+# PyInstaller auto-generates specs from `pyinstaller main.py`; ignore those
+# but keep the committed onedir build spec.
 *.spec
+!shows-qt.spec
+
+# Local verification scratch: fake-media path dump, screenshots, run logs,
+# throwaway harness, generated test clip.
+_*.py
+_*.png
+_*.json
+_*.log
+_*.mp4

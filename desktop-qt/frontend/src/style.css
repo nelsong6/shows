@@ -1,13 +1,21 @@
 @import "./design-tokens.css";
 
+/* Transparent root: this bundle is composited OVER live mpv video by the
+   Qt scene graph, so the page background must be transparent (overrides
+   the opaque `--bg` that design-tokens.css sets on :root). Individual
+   panels paint their own backgrounds; the gaps let video show through. */
 html, body, #root {
   margin: 0;
   padding: 0;
   height: 100vh;
-  background: var(--bg);
+  background: transparent;
   color: var(--fg);
   font-family: var(--font-sans);
   font-variant-numeric: tabular-nums;
+}
+
+:root {
+  background: transparent;
 }
 
 * {

@@ -3,13 +3,13 @@ round-robin runner (background thread) driving the mpv QML item, in a
 single composited window (mpv video bottom, transparent web chrome top).
 
 A localhost control server (shows.webserver) serves the overlay and a
-/status + /pause + /skip surface; the overlay polls it same-origin. This
-replaces QWebChannel, which doesn't wire cleanly into a QML WebEngineView
+/status + /shows + /pause + /skip surface; the overlay polls it same-origin.
+This replaces QWebChannel, which doesn't wire cleanly into a QML WebEngineView
 under PySide6 (registerObject isn't QML-callable; a QWebChannel can't be
 assigned to the QQmlWebChannel-typed property).
 
-The overlay is still minimal HTML; swapping in the built React frontend
-is the remaining step (it talks to the same HTTP surface)."""
+The overlay is the built React frontend (`frontend/`, `npm run build`) served
+from the control server; it is required (no placeholder fallback)."""
 
 import logging
 import os
@@ -18,15 +18,24 @@ import threading
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+
+def _resource_root() -> str:
+    """Root for bundled resources (libmpv, the React dist). When frozen by
+    PyInstaller that's the unpack dir (sys._MEIPASS); in source it's this
+    file's directory."""
+    if getattr(sys, "frozen", False):
+        return sys._MEIPASS  # type: ignore[attr-defined]
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def _add_libmpv_to_path() -> None:
     """Make libmpv discoverable by python-mpv before `import mpv`. Checks,
-    in order: $SHOWS_LIBMPV_DIR, the Go build's bundled DLL (sibling
-    desktop/build/bin), and the scoop mpv install. Falls back to the
-    existing PATH if none match (lets a system-installed libmpv work)."""
-    here = os.path.dirname(os.path.abspath(__file__))
+    in order: the frozen bundle root (PyInstaller ships libmpv-2.dll there),
+    $SHOWS_LIBMPV_DIR, and the scoop mpv install. Falls back to the existing
+    PATH if none match (lets a system-installed libmpv work)."""
     candidates = [
+        _resource_root(),
         os.environ.get("SHOWS_LIBMPV_DIR", ""),
-        os.path.normpath(os.path.join(here, "..", "desktop", "build", "bin")),
         os.path.expandvars(r"%USERPROFILE%\scoop\apps\mpv\current"),
     ]
     for d in candidates:
@@ -55,9 +64,19 @@ from shows.apiclient import Client  # noqa: E402
 from shows.mpv_item import MpvItem  # noqa: E402
 from shows.player import Player  # noqa: E402
 from shows.runner import Runner  # noqa: E402
-from shows.webserver import ControlServer, OVERLAY_HTML  # noqa: E402
+from shows.webserver import ControlServer  # noqa: E402
 
 PLAYLIST = "nelson"
+
+# Built React overlay (`frontend/`, `npm run build`), served by the control
+# server. Frozen builds bundle the dist under `frontend_dist` in the resource
+# root; in source it's the sibling frontend/dist tree. Required — there's no
+# placeholder fallback.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, "frozen", False):
+    DIST_DIR = os.path.join(_resource_root(), "frontend_dist")
+else:
+    DIST_DIR = os.path.join(_HERE, "frontend", "dist")
 
 QML = """
 import QtQuick
@@ -92,17 +111,25 @@ def _opener(url: str) -> None:
 def main() -> int:
     app = QGuiApplication(sys.argv)
 
+    if not os.path.isdir(DIST_DIR):
+        print(f"overlay bundle missing at {DIST_DIR}; build it: "
+              "cd frontend && npm run build", file=sys.stderr)
+        return 1
+
     tok = oauth.ensure_token(opener=_opener)
     client = Client(tok.token, refresh_token=lambda: oauth.ensure_token(opener=_opener).token)
 
-    server = ControlServer()
+    server = ControlServer(
+        dist_dir=DIST_DIR,
+        shows_provider=lambda: client.list_active_shows(PLAYLIST),
+    )
     port = server.start()
     overlay_url = f"http://127.0.0.1:{port}/"
     logging.info("control server on %s", overlay_url)
 
     qmlRegisterType(MpvItem, "shows", 1, 0, "MpvItem")
     engine = QQmlApplicationEngine()
-    engine.rootContext().setContextProperty("overlayHtml", OVERLAY_HTML)
+    engine.rootContext().setContextProperty("overlayHtml", server.index_html().decode("utf-8"))
     engine.rootContext().setContextProperty("overlayBase", QUrl(overlay_url))
     engine.loadData(QML.encode("utf-8"))
     if not engine.rootObjects():

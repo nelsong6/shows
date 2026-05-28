@@ -1,13 +1,45 @@
-/* Phase 3 layout: sidebar of active shows on the left, a status panel
-   on the right with the current phase + round + last advance. mpv's
-   render surface covers everything once playback begins; the HTML
-   chrome is visible during auth, between rounds, and on drain.
-   Phase 4 layers chrome over mpv via the render API. */
+/* Qt build: the overlay composites over live mpv video. The full-viewport
+   inset:0 container is load-bearing — a fixed container that spans the
+   viewport composites reliably over actively-rendering video, where a
+   bare top/bottom bar may not (see desktop-qt README). pointer-events
+   pass through the transparent gaps to nothing; interactive panels
+   re-enable them. */
+.overlay-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+}
+
+/* Always-on control bar — the only chrome shown over live video. Anchored
+   to the top (top-anchored content composites reliably over video) and
+   semi-opaque so the video reads through faintly at the edges. */
+.controlbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: color-mix(in srgb, var(--bg-deep) 82%, transparent);
+  border-bottom: 1px solid var(--border);
+  pointer-events: auto;
+}
+
+.controlbar .now {
+  flex: 1;
+  font-size: 14px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .layout {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: 220px 1fr;
-  height: 100vh;
+  pointer-events: auto;
 }
 
 .sidebar {

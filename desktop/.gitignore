@@ -1,8 +1,0 @@
-build/bin
-node_modules
-frontend/dist
-
-# libmpv dev artifacts — downloaded per-machine by scripts/setup-libmpv.ps1.
-# CI re-downloads on every run; we don't commit the 30 MB archive or its
-# extracted headers/DLLs.
-third_party/
