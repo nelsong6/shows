@@ -12,6 +12,15 @@
   pointer-events: none;
 }
 
+/* Chrome fully hidden ('h') and the mouse gone idle: the root (normally
+   pointer-events:none, so it can't take a cursor) claims the pointer just long
+   enough for `cursor: none` to hit-test, hiding the cursor over the video. The
+   next mousemove drops the class, restoring pointer-through and the cursor. */
+.overlay-root.cursor-hidden {
+  pointer-events: auto;
+  cursor: none;
+}
+
 /* Always-on control bar — the only chrome shown over live video. Anchored
    to the top (top-anchored content composites reliably over video) and
    semi-opaque so the video reads through faintly at the edges. */

@@ -64,6 +64,7 @@ function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
   const [chromeHidden, setChromeHidden] = useState(false);
+  const [cursorIdle, setCursorIdle] = useState(false);
 
   useEffect(() => subscribeStatus(setStatus), []);
 
@@ -138,6 +139,33 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // With all chrome hidden ('h') the window is just video — no overlay — so
+  // auto-hide the mouse cursor too after a short idle, the way a media player
+  // does, so a stray pointer doesn't mar the unobstructed view. Any movement
+  // brings it back and re-arms the timer. Scoped to the chrome-hidden state:
+  // whenever an overlay (control bar / dashboard) is visible the cursor stays.
+  useEffect(() => {
+    if (!chromeHidden) {
+      setCursorIdle(false);
+      return;
+    }
+    let timer: number | undefined;
+    const arm = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setCursorIdle(true), 2000);
+    };
+    const onMove = () => {
+      setCursorIdle(false);
+      arm();
+    };
+    window.addEventListener('mousemove', onMove);
+    arm();
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('mousemove', onMove);
+    };
+  }, [chromeHidden]);
+
   useEffect(() => {
     // Re-fetch shows whenever the playlist gains a round or advance — a
     // finished show drops out of the active list after advance. Keyed on
@@ -181,9 +209,10 @@ function App() {
 
   // `h` hides ALL overlay chrome (control bar, scrub, dashboard) for an
   // unobstructed view; press `h` again to bring it back. The window key handler
-  // stays mounted while hidden, so the toggle still fires.
+  // stays mounted while hidden, so the toggle still fires. With nothing drawn,
+  // the cursor auto-hides on idle (cursorIdle) for a fully clean frame.
   if (chromeHidden) {
-    return <div className="overlay-root" />;
+    return <div className={`overlay-root${cursorIdle ? ' cursor-hidden' : ''}`} />;
   }
 
   return (
