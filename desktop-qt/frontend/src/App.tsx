@@ -63,6 +63,7 @@ function App() {
   const [showDashboard, setShowDashboard] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
+  const [chromeHidden, setChromeHidden] = useState(false);
 
   useEffect(() => subscribeStatus(setStatus), []);
 
@@ -85,7 +86,8 @@ function App() {
 
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (main.py gives the WebEngineView active focus). space=pause/play,
-  // n/→=skip, d=defer, j/l=seek -/+10s, ↑/↓=volume, v/Tab=dashboard, Esc=hide.
+  // n/→=skip, d=defer, f=fullscreen, h=hide all chrome, j/l=seek -/+10s,
+  // ↑/↓=volume, v/Tab=dashboard, Esc=hide dashboard.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       switch (e.key) {
@@ -102,6 +104,9 @@ function App() {
           break;
         case 'f':
           toggleFullscreen();
+          break;
+        case 'h':
+          setChromeHidden((v) => !v);
           break;
         case 'j':
           seekRelative(-10);
@@ -173,6 +178,13 @@ function App() {
     listShows()
       .then((s) => setShows(s ?? []))
       .catch(() => {});
+
+  // `h` hides ALL overlay chrome (control bar, scrub, dashboard) for an
+  // unobstructed view; press `h` again to bring it back. The window key handler
+  // stays mounted while hidden, so the toggle still fires.
+  if (chromeHidden) {
+    return <div className="overlay-root" />;
+  }
 
   return (
     <div className="overlay-root">
@@ -400,7 +412,7 @@ function ControlBar({
       <button className="gb" onClick={() => syncNow()} title="push queued changes + pull">
         sync
       </button>
-      <span className="keys">space · n · d · f · j/l · ↑↓ · v · esc</span>
+      <span className="keys">space · n · d · f · h · j/l · ↑↓ · v · esc</span>
     </div>
   );
 }
