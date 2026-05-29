@@ -65,6 +65,8 @@ function App() {
   const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
   const [chromeHidden, setChromeHidden] = useState(false);
   const [cursorIdle, setCursorIdle] = useState(false);
+  // Volume to flash in the transient OSD, or null when hidden.
+  const [volOsd, setVolOsd] = useState<number | null>(null);
 
   useEffect(() => subscribeStatus(setStatus), []);
 
@@ -85,11 +87,23 @@ function App() {
     pbRef.current = status.playback;
   }, [status.playback]);
 
+  // Auto-hide timer for the volume OSD, held in a ref so the mount-once key
+  // handler can re-arm it without re-binding.
+  const volOsdTimer = useRef<number | undefined>(undefined);
+
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (main.py gives the WebEngineView active focus). space=pause/play,
   // n/→=skip, d=defer, f=fullscreen, h=hide all chrome, j/l=seek -/+10s,
   // ↑/↓=volume, v/Tab=dashboard, Esc=hide dashboard.
   useEffect(() => {
+    // Flash the transient volume OSD with the new level and re-arm its
+    // auto-hide. Defined inside the mount-once effect so it closes over only
+    // the stable state setter + timer ref (no exhaustive-deps churn).
+    const flashVol = (v: number) => {
+      setVolOsd(v);
+      window.clearTimeout(volOsdTimer.current);
+      volOsdTimer.current = window.setTimeout(() => setVolOsd(null), 1400);
+    };
     const onKey = (e: KeyboardEvent) => {
       switch (e.key) {
         case ' ':
@@ -117,12 +131,16 @@ function App() {
           break;
         case 'ArrowUp': {
           e.preventDefault();
-          setVolume(Math.min(130, (pbRef.current?.volume ?? 100) + 5));
+          const nv = Math.min(130, (pbRef.current?.volume ?? 100) + 5);
+          setVolume(nv);
+          flashVol(nv);
           break;
         }
         case 'ArrowDown': {
           e.preventDefault();
-          setVolume(Math.max(0, (pbRef.current?.volume ?? 100) - 5));
+          const nv = Math.max(0, (pbRef.current?.volume ?? 100) - 5);
+          setVolume(nv);
+          flashVol(nv);
           break;
         }
         case 'v':
@@ -136,7 +154,10 @@ function App() {
       }
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.clearTimeout(volOsdTimer.current);
+    };
   }, []);
 
   // With all chrome hidden ('h') the window is just video — no overlay — so
@@ -212,11 +233,18 @@ function App() {
   // stays mounted while hidden, so the toggle still fires. With nothing drawn,
   // the cursor auto-hides on idle (cursorIdle) for a fully clean frame.
   if (chromeHidden) {
-    return <div className={`overlay-root${cursorIdle ? ' cursor-hidden' : ''}`} />;
+    // Chrome is gone, but the volume OSD still flashes on ↑/↓ — it's the only
+    // feedback left when the window is bare video.
+    return (
+      <div className={`overlay-root${cursorIdle ? ' cursor-hidden' : ''}`}>
+        <VolumeOsd volume={volOsd} />
+      </div>
+    );
   }
 
   return (
     <div className="overlay-root">
+      <VolumeOsd volume={volOsd} />
       {status.update?.available && status.update.latest !== updateDismissed && (
         <UpdateBanner
           info={status.update}
@@ -454,6 +482,23 @@ function fmtTime(s: number | null | undefined): string {
   const sec = t % 60;
   const mm = h > 0 ? String(m).padStart(2, '0') : String(m);
   return (h > 0 ? `${h}:` : '') + `${mm}:${String(sec).padStart(2, '0')}`;
+}
+
+// Transient volume indicator. Flashes bottom-center on ↑/↓ and auto-hides —
+// the only volume feedback when chrome ('h') or the dashboard is hidden and the
+// PlaybackBar's slider isn't on screen. Display-only (pointer-events:none); the
+// bar fills against mpv's 0–130 range, so 100% sits short of full (boost room).
+function VolumeOsd({ volume }: { volume: number | null }) {
+  if (volume === null) return null;
+  return (
+    <div className="vol-osd" role="status" aria-live="polite">
+      <span className="vol-osd-label">vol</span>
+      <div className="vol-osd-bar">
+        <div className="vol-osd-fill" style={{ width: `${(volume / 130) * 100}%` }} />
+      </div>
+      <span className="vol-osd-num">{Math.round(volume)}</span>
+    </div>
+  );
 }
 
 // Scrub bar + time + volume + subtitle/audio menus, shown under the control bar

@@ -171,6 +171,53 @@ table.runs th {
   white-space: nowrap;
 }
 
+/* Transient volume OSD — flashes bottom-center on ↑/↓ so a volume change is
+   visible even with all chrome hidden ('h') or the dashboard closed. Fixed
+   (out of the overlay-root flex column), display-only (pointer-events:none),
+   and fades in. Fill is against mpv's 0–130 range to match the playbar slider. */
+.vol-osd {
+  position: fixed;
+  left: 50%;
+  bottom: 56px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: color-mix(in srgb, var(--bg-deep) 82%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  pointer-events: none;
+  font-size: 12px;
+  color: var(--fg);
+  animation: vol-osd-in 120ms ease-out;
+}
+.vol-osd-label {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+.vol-osd-bar {
+  width: 160px;
+  height: 8px;
+  background: color-mix(in srgb, var(--fg) 16%, transparent);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.vol-osd-fill {
+  height: 100%;
+  background: var(--state-busy-fg);
+}
+.vol-osd-num {
+  font-variant-numeric: tabular-nums;
+  min-width: 30px;
+  text-align: right;
+}
+@keyframes vol-osd-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
 /* Playback bar: scrub + time + volume + track menus, under the control bar. */
 .playbar {
   display: flex;
