@@ -4,8 +4,8 @@
 *.exe
 *.test
 
-# Desktop: build-SHA stamp written by the packaging workflow (read by shows/update.py)
-desktop-qt/shows/_build.py
+# Rust workspace build dir (per-workspace, not just at the repo root).
+target/
 
 # Local config
 .env

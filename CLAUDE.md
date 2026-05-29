@@ -1,6 +1,6 @@
 # shows
 
-App repo on the romaine.life AKS cluster. Cosmos-backed playlist API at `shows.romaine.life` plus a PySide6/Qt Windows desktop app that drives libmpv for round-robin playback.
+App repo on the romaine.life AKS cluster. Cosmos-backed playlist API at `shows.romaine.life` plus a Rust Windows desktop app that drives libmpv for round-robin playback.
 
 ## Quality timeframe
 
@@ -23,25 +23,35 @@ internal/
   auth/               JWKS verifier + chi middleware for auth.romaine.life JWTs
   store/              Cosmos SDK store layer (shows + watch_history; library/sync)
   api/                chi routes, handlers, Prometheus metrics
-desktop-qt/           PySide6 + libmpv client (mpv video composited under a
-                      transparent React overlay in one Qt window) — the engine
-  main.py             entry: OpenGL/WebEngine setup, QML window, runner wiring
-  shows/
-    mpv_item.py       mpv render API → QQuickFramebufferObject (Qt composites)
-    webserver.py      control server: serves the overlay + /status /pause /skip
-                      /defer /seek /volume /sub /audio /sync-now /library/* /stats
-    oauth.py          user-login flow against auth.romaine.life (PKCE + loopback)
-    apiclient.py      shows.romaine.life client (get_library / post_sync + 401 refresh)
-    replica.py        local SQLite working copy (seed, mutate, dirty-track, LWW)
-    engine.py         the round/advance/defer engine over the replica
-    sync.py           git-style sync: seed/push/connectivity (no polling)
-    scan.py           scan a show's folder for episode files
-    ordering.py       SHA-256 path ordering, bit-identical to the old Go server
-    runner.py         round-robin runner (replica round → queue → wait → advance + push)
-    roundlogic.py     pure helpers (advance-set minus deferred, playlist parse)
-    player.py         python-mpv handle wrapper (seek/volume/tracks/resume)
+desktop-rs/           cargo workspace: the Rust client (mpv video composited
+                      under a transparent React overlay in one DirectComposition
+                      window) — the engine
+  core/               shows-core: pure, #![forbid(unsafe_code)], all the engine
+    src/
+      ordering.rs     SHA-256 path ordering, bit-identical to the old Go server
+      roundlogic.rs   pure helpers (advance-set minus deferred, playlist parse)
+      scan.rs         scan a show's folder for episode files
+      replica.rs      local SQLite working copy (seed, mutate, dirty-track, LWW)
+      engine.rs       round/advance/defer engine over the replica
+      runner.rs       round-robin runner (round → queue → wait → advance + push)
+      apiclient.rs    shows.romaine.life client (get_library / post_sync + 401 refresh)
+      oauth.rs        user-login flow against auth.romaine.life (PKCE + loopback)
+      sync.rs         git-style sync: seed/push/connectivity (no polling)
+      model.rs        ⟂ replica/apiclient row/wire types
+      update.rs       latest-release check (GitHub Releases API)
+  desktop/            shows-desktop: the Windows shell (the only unsafe code lives here)
+    src/
+      main.rs         entry: single-instance guard, runner + control server wiring
+      compositor.rs   DirectComposition window + transparent WebView2 overlay
+                      over a D3D11 composition swapchain; input forwarding
+      gl.rs           WGL + WGL_NV_DX_interop2: mpv OpenGL render → shared D3D
+                      texture (the production video path; no ANGLE DLLs)
+      mpv.rs          libmpv FFI via libloading (vo=libmpv)
+      player.rs       libmpv handle wrapper + PlayerOps impl + event pump
+      webserver.rs    control server: serves the overlay + /status /pause /skip
+                      /defer /seek /volume /sub /audio /sync-now /fullscreen
+                      /library/* /stats
   frontend/           Vite + React + TS overlay (glimmung design-system tokens)
-  shows-qt.spec       PyInstaller onedir build (bundles libmpv + the overlay)
 docs/
   feature-contracts/  durable invariant docs (round-and-advance, …)
 k8s/                  Helm chart (Deployment, Service, HTTPRoute, XListenerSet,
@@ -59,7 +69,7 @@ Per the fleet convention:
 - **`k8s/`** — Helm chart consumed by the ArgoCD `Application` defined in `infra-bootstrap/k8s/apps/shows.yaml`. ArgoCD auto-syncs on push.
 - **`.github/workflows/build-and-deploy.yaml`** — builds `cmd/shows-api`, pushes to `romainecr.azurecr.io/shows:<sha>`, bumps `k8s/values.yaml`, commits. ArgoCD picks up the new tag.
 
-The desktop app (`desktop-qt/`) is **not** deployed to AKS. `.github/workflows/build-desktop.yaml` packages it with PyInstaller on a Windows runner and publishes it as a GitHub Release.
+The desktop app (`desktop-rs/`) is **not** deployed to AKS. `.github/workflows/build-desktop.yaml` cargo-builds it on a Windows runner, bundles the React dist + libmpv-2.dll next to the exe, and publishes it as a GitHub Release.
 
 ## Auth
 
@@ -67,7 +77,7 @@ Every `/api/*` route requires an auth.romaine.life JWT with `role in {admin, use
 
 The desktop app uses the **user-login** path at `GET /api/auth/cli/user-login` (PKCE + loopback `redirect_uri`). If the user has no `.romaine.life` session cookie, auth.romaine.life bounces them through Microsoft/Google and returns; the server then redirects to the loopback with a one-time `?code=...`. The desktop POSTs `{grant_type: authorization_code, code, code_verifier, redirect_uri}` to `/api/auth/cli/user-token` and receives the user's own JWT (`role=user|admin`, no `purpose` claim — same shape the browser session would yield). The JWT never travels through the browser. Token caches at `%APPDATA%\shows\token.json`; on 401 the apiclient calls back into the oauth module's `ensure_token` for an in-place refresh.
 
-Library import is now in-app: the desktop scans a folder (`shows/scan.py`) and creates the show locally, which syncs up via `/sync`. The old `cmd/shows-migrate` bulk-import tool and its bot-token CLI flow (`internal/device`) have been removed.
+Library import is now in-app: the desktop scans a folder (`desktop-rs/core/src/scan.rs`) and creates the show locally, which syncs up via `/sync`. The old `cmd/shows-migrate` bulk-import tool and its bot-token CLI flow (`internal/device`) have been removed.
 
 ## Cosmos store
 
@@ -80,7 +90,7 @@ The runtime pod attaches to Cosmos via workload identity: `serviceaccount/shows:
 
 ## Ordering invariant
 
-The deterministic-random round order is now computed **on the desktop** by `desktop-qt/shows/ordering.py` (the server no longer computes rounds):
+The deterministic-random round order is now computed **on the desktop** by `desktop-rs/core/src/ordering.rs` (the server no longer computes rounds):
 
 ```
 hash := SHA-256(UTF-8 bytes of: root_path + "\" + relative_path)
@@ -88,7 +98,7 @@ order_value := uint32(first 4 hex chars of hash, parsed as base 16)
 shows in round are sorted by order_value ascending
 ```
 
-Bit-for-bit reproduces `Get-FileHash -InputStream` + `SubString(0,4)` + `[uint32]` from the legacy `play_ordered_show.ps1`. Locked by `desktop-qt/tests/test_engine.py` (round selection/advance/defer) + `ordering`'s own tests. See [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md) for the invariants the round + advance pair satisfies — the contract the desktop engine now implements.
+Bit-for-bit reproduces `Get-FileHash -InputStream` + `SubString(0,4)` + `[uint32]` from the legacy `play_ordered_show.ps1`. Locked by the in-file tests in `desktop-rs/core/src/engine.rs` (round selection/advance/defer) and `ordering.rs` (the SHA-256 path hashing). See [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md) for the invariants the round + advance pair satisfies — the contract the desktop engine now implements.
 
 ## Migration source data
 
@@ -102,13 +112,13 @@ Legacy state at `D:\Downloads\Group-Nelson\nelson.json` + the per-show JSONs it 
 }
 ```
 
-Episode paths were relative to the parent directory of the per-show JSON, joined with that parent to produce the absolute path stored as `episodes.relative_path` and the show's `root_path`. This one-time legacy import is done (the `cmd/shows-migrate` tool has been removed); new shows are now added in-app by scanning a folder (`desktop-qt/shows/scan.py`), which derives `relative_path` the same way (backslash-joined, to match the ordering hash).
+Episode paths were relative to the parent directory of the per-show JSON, joined with that parent to produce the absolute path stored as `episodes.relative_path` and the show's `root_path`. This one-time legacy import is done (the `cmd/shows-migrate` tool has been removed); new shows are now added in-app by scanning a folder (`desktop-rs/core/src/scan.rs`), which derives `relative_path` the same way (backslash-joined, to match the ordering hash).
 
 ## Observability
 
 **Server side:** `shows_*` Prometheus metrics exposed at `/metrics` (no auth) on the AKS pod, scraped by the kube-prometheus-stack via `k8s/templates/podmonitor.yaml`. Catalog in [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md). Grafana sees them in the `monitoring` namespace's dashboards.
 
-**Desktop side:** the running app's control server (localhost, ephemeral port logged at startup) serves `GET /status` (current status) + `GET /shows` + `GET /health`, plus the overlay's `POST /pause` `/skip` `/defer` controls, and also backs the React overlay's data layer. Logs go to stdout. See `desktop-qt/README.md` for architecture and the control surface.
+**Desktop side:** the running app's control server (localhost, ephemeral port logged at startup) serves `GET /status` (current status) + `GET /shows` + `GET /health`, plus the overlay's `POST /pause` `/skip` `/defer` `/fullscreen` controls, and also backs the React overlay's data layer. Dev runs log to stderr; release builds (no console subsystem) append to `%APPDATA%\shows\shows.log`. The control surface lives in `desktop-rs/desktop/src/webserver.rs`.
 
 ## Related
 

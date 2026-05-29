@@ -1,17 +1,16 @@
 name: Build Desktop
 
-# Packages shows-desktop (the PySide6/Qt client under desktop-qt/) for
-# Windows with PyInstaller. PyInstaller freezes the host's Python + native
-# Qt/WebEngine, so it CANNOT cross-compile on Linux — the job runs on a
-# Windows runner. On push to main it publishes a GitHub Release (zip of the
-# onedir bundle) tagged with the short SHA and marked `--latest`; on
-# PRs/dispatch it validates the build and uploads the zip as an artifact.
+# Packages shows-desktop (the Rust client under desktop-rs/) for Windows.
+# The release zip bundles the cargo --release binary, the React overlay's
+# built dist, and libmpv-2.dll. On push to main the job publishes a GitHub
+# Release (zip) tagged with the short SHA and marked `--latest`; on PRs /
+# dispatch it validates the build and uploads the zip as an artifact.
 
 on:
   push:
     branches: [main]
     paths:
-      - desktop-qt/**
+      - desktop-rs/**
       - .github/workflows/build-desktop.yaml
   # No paths filter on PRs: keep the status check reporting, and
   # short-circuit inside when nothing relevant changed.
@@ -36,7 +35,7 @@ jobs:
           fetch-depth: 0
 
       # PR short-circuit: always trigger (so the check reports), but skip
-      # the ~10-minute Windows build when the PR touched nothing relevant.
+      # the Windows build when the PR touched nothing relevant.
       - name: Detect relevant changes
         id: changes
         if: github.event_name == 'pull_request'
@@ -63,18 +62,22 @@ jobs:
           # land past the merge base when main advances during the PR.
           changed="$(git diff --name-only "$BASE_SHA"...HEAD)"
           echo "$changed"
-          if printf '%s\n' "$changed" | grep -qE '^(desktop-qt/|\.github/workflows/build-desktop\.yaml$)'; then
+          if printf '%s\n' "$changed" | grep -qE '^(desktop-rs/|\.github/workflows/build-desktop\.yaml$)'; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
           else
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::No desktop-qt/ changes — short-circuiting."
+            echo "::notice::No desktop-rs/ changes — short-circuiting."
           fi
 
-      - name: Setup Python
+      - name: Setup Rust (stable MSVC)
         if: steps.changes.outputs.skip != 'true'
-        uses: actions/setup-python@v5
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo target
+        if: steps.changes.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
         with:
-          python-version: '3.12'
+          workspaces: desktop-rs
 
       - name: Setup Node
         if: steps.changes.outputs.skip != 'true'
@@ -82,24 +85,25 @@ jobs:
         with:
           node-version: '20'
           cache: npm
-          cache-dependency-path: desktop-qt/frontend/package-lock.json
+          cache-dependency-path: desktop-rs/frontend/package-lock.json
 
       - name: Build React overlay
         if: steps.changes.outputs.skip != 'true'
-        working-directory: desktop-qt/frontend
+        working-directory: desktop-rs/frontend
         run: |
           npm ci
           npm run build
 
-      # Same libmpv .7z pin the Go build used. The dev bundle ships
-      # libmpv-2.dll, which the spec bundles at the app root and python-mpv
-      # loads. Bump the cache key when libmpv bumps.
+      # libmpv runtime: the same dev .7z the Go/Python builds used. The
+      # release bundle ships libmpv-2.dll next to shows-desktop.exe; the
+      # Rust dynamic loader (libloading) picks it up at runtime. Bump the
+      # cache key when libmpv bumps.
       - name: Cache libmpv runtime
         if: steps.changes.outputs.skip != 'true'
         id: libmpv-cache
         uses: actions/cache@v4
         with:
-          path: desktop-qt/third_party/libmpv
+          path: desktop-rs/desktop/third_party/libmpv
           key: libmpv-windows-20250420-3600c71
 
       - name: Fetch libmpv (cold cache only)
@@ -111,39 +115,51 @@ jobs:
           hash=3600c71
           file="mpv-dev-x86_64-${version}-git-${hash}.7z"
           url="https://master.dl.sourceforge.net/project/mpv-player-windows/libmpv/${file}?viasf=1"
-          mkdir -p desktop-qt/third_party/libmpv
+          mkdir -p desktop-rs/desktop/third_party/libmpv
           curl -fSL -o /tmp/libmpv.7z "$url"
-          7z x /tmp/libmpv.7z -odesktop-qt/third_party/libmpv -y
-          test -f desktop-qt/third_party/libmpv/libmpv-2.dll
+          7z x /tmp/libmpv.7z -odesktop-rs/desktop/third_party/libmpv -y
+          test -f desktop-rs/desktop/third_party/libmpv/libmpv-2.dll
 
-      - name: Install Python deps
+      - name: cargo test (shows-core)
         if: steps.changes.outputs.skip != 'true'
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r desktop-qt/requirements.txt pyinstaller
+        working-directory: desktop-rs
+        run: cargo test -p shows-core --release
 
-      # Stamp the short SHA into the bundle so the app can tell whether it's the
-      # latest release (read by shows/update.py). Absent in source checkouts, so
-      # dev runs report "version unknown" and skip the update check.
-      - name: Stamp build SHA into the bundle
+      - name: cargo build --release
         if: steps.changes.outputs.skip != 'true'
-        shell: bash
-        run: echo "SHA = \"${GITHUB_SHA:0:7}\"" > desktop-qt/shows/_build.py
-
-      - name: Package (PyInstaller)
-        if: steps.changes.outputs.skip != 'true'
-        working-directory: desktop-qt
+        working-directory: desktop-rs
+        # `SHOWS_BUILD_SHA` is read at compile time by `core/src/update.rs`
+        # via `option_env!`. With it set, the running app can compare its
+        # SHA to the latest GitHub Release and offer the overlay's update
+        # banner; without it (a source/dev run), `update.rs` returns `None`
+        # and the banner stays hidden — exactly the dev-vs-release contract
+        # the Python build had with `_build.py`.
         env:
-          # Absolute path so the spec's libmpv lookup finds the fetched DLL.
-          SHOWS_LIBMPV_DIR: ${{ github.workspace }}\desktop-qt\third_party\libmpv
+          SHOWS_BUILD_SHA: ${{ github.sha }}
+        run: cargo build --release -p shows-desktop
+
+      # Stage the bundle: shows-desktop.exe + libmpv-2.dll + the React dist
+      # under frontend/, matching the layout main.rs's release-mode fallback
+      # expects (current_exe()/frontend/index.html).
+      - name: Stage release bundle
+        if: steps.changes.outputs.skip != 'true'
+        shell: pwsh
         run: |
-          pyinstaller shows-qt.spec --noconfirm
-          if (-not (Test-Path dist/shows-qt/shows-qt.exe)) { throw "build failed: shows-qt.exe missing" }
+          $out = "desktop-rs/dist/shows-desktop"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          New-Item -ItemType Directory -Force -Path "$out/frontend" | Out-Null
+          Copy-Item desktop-rs/target/release/shows-desktop.exe "$out/" -Force
+          Copy-Item desktop-rs/desktop/third_party/libmpv/libmpv-2.dll "$out/" -Force
+          Copy-Item desktop-rs/frontend/dist/* "$out/frontend/" -Recurse -Force
+          if (-not (Test-Path "$out/shows-desktop.exe")) { throw "build failed: shows-desktop.exe missing" }
+          if (-not (Test-Path "$out/libmpv-2.dll"))     { throw "bundle missing libmpv-2.dll" }
+          if (-not (Test-Path "$out/frontend/index.html")) { throw "bundle missing frontend/index.html" }
 
       - name: Zip bundle
         if: steps.changes.outputs.skip != 'true'
-        working-directory: desktop-qt
-        run: Compress-Archive -Path dist/shows-qt/* -DestinationPath dist/shows-qt-windows-amd64.zip -Force
+        shell: pwsh
+        working-directory: desktop-rs
+        run: Compress-Archive -Path dist/shows-desktop/* -DestinationPath dist/shows-desktop-windows-amd64.zip -Force
 
       # PR + dispatch: upload the zip for download/debugging. Push-to-main
       # distributes via the Release below.
@@ -152,7 +168,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: shows-desktop-${{ github.sha }}
-          path: desktop-qt/dist/shows-qt-windows-amd64.zip
+          path: desktop-rs/dist/shows-desktop-windows-amd64.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -168,8 +184,8 @@ jobs:
           sha_short="${GITHUB_SHA:0:7}"
           tag="desktop-${sha_short}"
           gh release create "$tag" \
-            desktop-qt/dist/shows-qt-windows-amd64.zip \
+            desktop-rs/dist/shows-desktop-windows-amd64.zip \
             --title "shows-desktop @ ${sha_short}" \
-            --notes "PySide6 client packaged from ${GITHUB_SHA}. Download the zip, unpack, and run shows-qt.exe." \
+            --notes "Rust client built from ${GITHUB_SHA}. Download the zip, unpack, and run shows-desktop.exe." \
             --target main \
             --latest
