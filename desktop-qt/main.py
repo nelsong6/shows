@@ -62,6 +62,7 @@ if "--disable-gpu" not in _cef:
 
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QGuiApplication, QWindow
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
 from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 from PySide6.QtWebEngineQuick import QtWebEngineQuick
@@ -135,8 +136,67 @@ def _opener(url: str) -> None:
     QDesktopServices.openUrl(QUrl(url))
 
 
+# Single-instance key, scoped per-user (the replica lives under each user's
+# %APPDATA%, so different users are genuinely separate instances).
+_SINGLE_INSTANCE_KEY = "shows-desktop-" + (os.environ.get("USERNAME") or os.environ.get("USER") or "user")
+
+
+def _raise_window(root) -> None:
+    """Bring the primary instance's window to the foreground — called when a
+    second launch pings us. No-op until the window exists."""
+    if root is None:
+        return
+    if root.visibility() == QWindow.Visibility.Minimized:
+        root.showNormal()
+    root.raise_()
+    root.requestActivate()
+
+
+def _signal_running_instance() -> bool:
+    """If another instance already holds the single-instance socket, ping it to
+    surface its window and return True (caller should exit). False when we're the
+    only instance."""
+    sock = QLocalSocket()
+    sock.connectToServer(_SINGLE_INSTANCE_KEY)
+    if not sock.waitForConnected(300):
+        return False
+    sock.write(b"raise")
+    sock.waitForBytesWritten(500)
+    sock.disconnectFromServer()
+    return True
+
+
+def _serve_single_instance(on_ping) -> QLocalServer:
+    """Listen on the single-instance socket so a later launch can find us. A
+    crashed instance leaves a stale socket, which removeServer clears before we
+    listen. Keep the returned server referenced for the app's lifetime."""
+    QLocalServer.removeServer(_SINGLE_INSTANCE_KEY)
+    srv = QLocalServer()
+    srv.listen(_SINGLE_INSTANCE_KEY)
+
+    def _on_new_connection():
+        conn = srv.nextPendingConnection()
+        if conn is not None:
+            conn.disconnectFromServer()
+        on_ping()
+
+    srv.newConnection.connect(_on_new_connection)
+    return srv
+
+
 def main() -> int:
     app = QGuiApplication(sys.argv)
+
+    # Single-instance guard: only one copy may drive the local replica + sync at
+    # a time — two would race on the SQLite file and the server account and
+    # silently drop writes (e.g. a watch you just recorded). If another instance
+    # is already running, ask it to come forward and exit; otherwise become the
+    # instance that later launches will find.
+    if _signal_running_instance():
+        logging.info("shows is already running — raised the existing window; exiting")
+        return 0
+    _win: dict = {}
+    _instance_server = _serve_single_instance(lambda: _raise_window(_win.get("root")))  # noqa: F841 — kept alive
 
     if not os.path.isdir(DIST_DIR):
         print(f"overlay bundle missing at {DIST_DIR}; build it: "
@@ -185,6 +245,7 @@ def main() -> int:
         return 1
 
     root = engine.rootObjects()[0]
+    _win["root"] = root  # single-instance: a later launch raises this window
     mpv_item = root.findChild(MpvItem, "mpvItem")
     if mpv_item is None:
         print("MpvItem not found", file=sys.stderr)
