@@ -15,8 +15,35 @@ import logging
 import os
 import sys
 import threading
+from logging.handlers import RotatingFileHandler
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+def _setup_logging() -> None:
+    """Log to a rotating file under %APPDATA%\\shows so the packaged app stays
+    debuggable without a console window (the release is built windowed, see
+    shows-qt.spec). Also log to stderr when one exists — source runs and any
+    console build — which a windowed frozen build lacks (sys.stderr is None)."""
+    handlers: list[logging.Handler] = []
+    try:
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        logdir = os.path.join(base, "shows")
+        os.makedirs(logdir, exist_ok=True)
+        handlers.append(RotatingFileHandler(
+            os.path.join(logdir, "shows.log"),
+            maxBytes=1_000_000, backupCount=3, encoding="utf-8",
+        ))
+    except OSError:
+        pass
+    if sys.stderr is not None:
+        handlers.append(logging.StreamHandler(sys.stderr))
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+    )
+
+
+_setup_logging()
 
 
 def _resource_root() -> str:
@@ -199,8 +226,8 @@ def main() -> int:
     _instance_server = _serve_single_instance(lambda: _raise_window(_win.get("root")))  # noqa: F841 — kept alive
 
     if not os.path.isdir(DIST_DIR):
-        print(f"overlay bundle missing at {DIST_DIR}; build it: "
-              "cd frontend && npm run build", file=sys.stderr)
+        logging.error("overlay bundle missing at %s; build it: "
+                      "cd frontend && npm run build", DIST_DIR)
         return 1
 
     tok = oauth.ensure_token(opener=_opener)
@@ -241,14 +268,14 @@ def main() -> int:
     engine.rootContext().setContextProperty("overlayBase", QUrl(overlay_url))
     engine.loadData(QML.encode("utf-8"))
     if not engine.rootObjects():
-        print("QML failed to load", file=sys.stderr)
+        logging.error("QML failed to load")
         return 1
 
     root = engine.rootObjects()[0]
     _win["root"] = root  # single-instance: a later launch raises this window
     mpv_item = root.findChild(MpvItem, "mpvItem")
     if mpv_item is None:
-        print("MpvItem not found", file=sys.stderr)
+        logging.error("MpvItem not found")
         return 1
 
     # Fullscreen toggle. The overlay POSTs /fullscreen on the control-server

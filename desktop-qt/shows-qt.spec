@@ -42,7 +42,9 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="shows-qt",
-    console=True,  # keep the log console for now; flip to False for release
+    # Windowed (GUI subsystem): no console window pops up on launch. Logs go to
+    # %APPDATA%\shows\shows.log instead (see main._setup_logging).
+    console=False,
     icon=None,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="shows-qt")
