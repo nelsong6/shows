@@ -42,12 +42,26 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: bash
         env:
-          BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "$BASE_REF"
-          base="$(git rev-parse "origin/$BASE_REF")"
-          changed="$(git diff --name-only "$base"...HEAD)"
+          # Auto-merge can squash this PR onto main before this check finishes —
+          # it races the merge. Once the PR is no longer OPEN the build is moot,
+          # and diffing the moved base fails ("no merge base"), so bail cleanly.
+          state="$(gh pr view "$PR_NUMBER" --json state -q .state)"
+          if [ "$state" != "OPEN" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::PR is $state, not OPEN — skipping desktop build."
+            exit 0
+          fi
+          # Diff against the PR's immutable base SHA — already present via the
+          # checkout's full history (fetch-depth: 0) and a guaranteed ancestor of
+          # HEAD — instead of a freshly shallow-fetched origin/main, which can
+          # land past the merge base when main advances during the PR.
+          changed="$(git diff --name-only "$BASE_SHA"...HEAD)"
           echo "$changed"
           if printf '%s\n' "$changed" | grep -qE '^(desktop-qt/|\.github/workflows/build-desktop\.yaml$)'; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
