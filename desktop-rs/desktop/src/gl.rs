@@ -346,7 +346,9 @@ impl GlVideo {
             (self.procs.viewport)(0, 0, self.w, self.h);
 
             let mut fbo = MpvOpenglFbo { fbo: self.fbo as c_int, w: self.w, h: self.h, internal_format: 0 };
-            let mut flip: c_int = 1; // FBO origin is bottom-left; flip to match D3D top-left
+            // WGL_NV_DX_interop2 already lands mpv's default GL output upright in the
+            // D3D texture; an extra FLIP_Y inverts it (video shows upside down).
+            let mut flip: c_int = 0;
             let mut block: c_int = 0;
             let mut params = [
                 MpvRenderParam { kind: MPV_RENDER_PARAM_OPENGL_FBO, data: &mut fbo as *mut _ as *mut c_void },
