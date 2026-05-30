@@ -52,6 +52,11 @@ struct State {
     gl: GlVideo,
     quit: Option<QuitCb>,
     device: ID3D11Device, // needed by gl.resize on WM_SIZE
+    // Cursor the windowless overlay last asked the host to show (NULL =
+    // hidden). The host owns the OS cursor; WM_SETCURSOR applies this. `arrow`
+    // is the fallback shown the instant the pointer moves while hidden.
+    cursor: HCURSOR,
+    arrow: HCURSOR,
     _target: IDCompositionTarget,
     _root: IDCompositionVisual,
     _bottom: IDCompositionVisual,
@@ -166,6 +171,32 @@ impl Compositor {
             controller.SetRootVisualTarget(&web_unknown)?;
             dcomp.Commit()?;
         }
+
+        // Honor the overlay's requested cursor. A windowless (visual-hosted)
+        // WebView2 can't own the OS cursor: it reports the cursor it wants
+        // (arrow over video, pointer over buttons, NULL for CSS `cursor: none`)
+        // via CursorChanged, and the host must apply it. Caching it here is what
+        // lets the overlay's idle auto-hide and button hover cursors reach the
+        // screen; WM_SETCURSOR applies the cache.
+        let arrow = unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or(HCURSOR(std::ptr::null_mut()));
+        let cursor_handler = CursorChangedEventHandler::create(Box::new(
+            |sender: Option<ICoreWebView2CompositionController>, _args| {
+                if let Some(c) = sender {
+                    let mut hc = HCURSOR(std::ptr::null_mut());
+                    unsafe { c.Cursor(&mut hc)? };
+                    STATE.with(|s| {
+                        if let Some(st) = s.borrow_mut().as_mut() {
+                            st.cursor = hc;
+                        }
+                    });
+                    unsafe { SetCursor(if hc.0.is_null() { None } else { Some(hc) }) };
+                }
+                Ok(())
+            },
+        ));
+        let mut cursor_token = 0i64;
+        unsafe { controller.add_CursorChanged(&cursor_handler, &mut cursor_token)? };
+
         let webview = unsafe { base.CoreWebView2()? };
         // Same-origin to the control server so the overlay's fetch('/status') works.
         let url = CoTaskMemPWSTR::from(overlay_url);
@@ -183,6 +214,8 @@ impl Compositor {
                 gl,
                 quit: None,
                 device,
+                cursor: arrow,
+                arrow,
                 _target: target,
                 _root: root,
                 _bottom: bottom,
@@ -282,6 +315,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             }
             WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
             | WM_MBUTTONDOWN | WM_MBUTTONUP => {
+                if msg == WM_MOUSEMOVE {
+                    // The overlay's idle auto-hide sets `cursor: none`; reveal the
+                    // pointer the instant the mouse moves rather than waiting for
+                    // the overlay's JS to clear idle and round-trip a CursorChanged.
+                    // Updating the cache too stops the very next WM_SETCURSOR from
+                    // re-hiding it mid-move. (Scoped borrow, dropped before the
+                    // SendMouseInput below, so no nested STATE borrow.)
+                    STATE.with(|s| {
+                        if let Some(st) = s.borrow_mut().as_mut() {
+                            if st.cursor.0.is_null() {
+                                SetCursor(Some(st.arrow));
+                                st.cursor = st.arrow;
+                            }
+                        }
+                    });
+                }
                 // Forward mouse input to the composition-hosted overlay (it has no
                 // HWND of its own). The COREWEBVIEW2_MOUSE_EVENT_KIND values equal
                 // the WM_* message ids, so `msg` maps straight through. lParam holds
@@ -311,6 +360,28 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     }
                 });
                 LRESULT(0)
+            }
+            WM_SETCURSOR => {
+                // The windowless overlay can't own the OS cursor, so the host
+                // applies the cursor it requested. Over the client area use the
+                // cached cursor (NULL = hidden — this is how the overlay's idle
+                // auto-hide reaches the OS); returning TRUE stops DefWindowProc
+                // from resetting it to the class arrow. Non-client area (resize
+                // borders, caption) falls through so system cursors still show.
+                if (l.0 as u32 & 0xFFFF) == HTCLIENT {
+                    let handled = STATE.with(|s| {
+                        if let Some(st) = s.borrow().as_ref() {
+                            SetCursor(if st.cursor.0.is_null() { None } else { Some(st.cursor) });
+                            true
+                        } else {
+                            false
+                        }
+                    });
+                    if handled {
+                        return LRESULT(1);
+                    }
+                }
+                DefWindowProcW(hwnd, msg, w, l)
             }
             WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
                 // Wheel lParam is in screen coordinates (unlike the other mouse
@@ -497,6 +568,7 @@ fn create_window() -> Result<HWND> {
         lpfnWndProc: Some(wndproc),
         hInstance: hinstance,
         lpszClassName: class,
+        hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or(HCURSOR(std::ptr::null_mut())),
         ..Default::default()
     };
     unsafe { RegisterClassW(&wc) };
