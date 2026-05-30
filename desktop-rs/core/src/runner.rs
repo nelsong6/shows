@@ -62,9 +62,43 @@ impl StopFlag {
     }
 }
 
-/// Returned by [`PlayerOps::wait_for_round`] when mpv closed or the runner was
-/// stopped — ends the loop.
+/// Returned by [`PlayerOps::wait_for_round_end`] when mpv closed or the runner
+/// was stopped — ends the loop.
 pub struct PlayerShutdown(pub String);
+
+/// Tracks the round boundary from mpv's `playlist-pos`. A round ends exactly
+/// once — when the queued playlist is exhausted (pos -> -1) *after* it actually
+/// started playing. The startup/idle -1 (mpv's observe fires once with the
+/// initial value) and any -1 seen while already idle don't count, so skips and
+/// back-navigation (playlist-prev) never miscount the boundary.
+#[derive(Default)]
+pub struct RoundEndTracker {
+    active: bool,
+    ended: u64,
+}
+
+impl RoundEndTracker {
+    /// Feed a `playlist-pos` value (negative = exhausted/idle). Returns true
+    /// when this transition is a real round end — the caller wakes the waiter.
+    pub fn observe(&mut self, pos: i64) -> bool {
+        if pos >= 0 {
+            self.active = true;
+            false
+        } else if self.active {
+            self.active = false;
+            self.ended += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// How many rounds have ended so far. [`PlayerOps::wait_for_round_end`]
+    /// waits for this to advance past the value captured when the round began.
+    pub fn ended_count(&self) -> u64 {
+        self.ended
+    }
+}
 
 /// The playback operations the runner drives (implemented by the libmpv player;
 /// faked in tests).
@@ -73,10 +107,14 @@ pub trait PlayerOps: Send + Sync {
     fn playlist_clear(&self);
     fn show_text(&self, text: &str, duration_ms: i64);
     fn skip(&self);
+    fn previous(&self);
     fn time_pos(&self) -> Option<f64>;
     fn seek_absolute(&self, seconds: f64);
-    /// Block until `n` more end-file events arrive (or stop/shutdown).
-    fn wait_for_round(&self, n: usize, stop: &StopFlag) -> Result<(), PlayerShutdown>;
+    /// Block until the queued round's playlist is exhausted (mpv goes idle /
+    /// playlist-pos -> -1), or stop/shutdown. Detecting the boundary this way —
+    /// not by counting end-file events — keeps in-round navigation (skip/prev)
+    /// from miscounting the round.
+    fn wait_for_round_end(&self, stop: &StopFlag) -> Result<(), PlayerShutdown>;
 }
 
 /// The sync operations the runner triggers (implemented by [`crate::sync::Syncer`]).
@@ -213,8 +251,9 @@ impl Runner {
                 cb(&round);
             }
             // Episodes advance one-by-one as they finish (on_natural_end); this
-            // just blocks until every queued entry has ended (by any reason).
-            if self.player.wait_for_round(round.len(), &self.stop).is_err() {
+            // just blocks until the queued playlist is exhausted (playlist-pos
+            // -> -1), which is robust to in-round navigation (skip/prev).
+            if self.player.wait_for_round_end(&self.stop).is_err() {
                 return;
             }
             if self.stop.is_set() {
@@ -263,6 +302,15 @@ impl Runner {
             self.apply_advance(&[cur]);
             self.syncer.push();
         }
+    }
+
+    /// Step back to the previous entry in the current round. Navigation only:
+    /// going back never marks anything watched, and replaying an already-watched
+    /// entry is a no-op at its natural end (engine I3). The playlist-pos observer
+    /// moves `pos` + the overlay's now-playing as mpv steps back; a finished
+    /// episode replays from the start because [`apply_advance`] clears resume.
+    pub fn previous(&self) {
+        self.player.previous();
     }
 
     /// Defer the current show's pick: bump it locally (D1-D3, not watched), push,
@@ -392,6 +440,7 @@ mod tests {
     #[derive(Default)]
     struct FakePlayer {
         skips: AtomicUsize,
+        prevs: AtomicUsize,
         time: Mutex<Option<f64>>,
         seeked: Mutex<Option<f64>>,
         on_wait: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -408,13 +457,16 @@ mod tests {
         fn skip(&self) {
             self.skips.fetch_add(1, Ordering::SeqCst);
         }
+        fn previous(&self) {
+            self.prevs.fetch_add(1, Ordering::SeqCst);
+        }
         fn time_pos(&self) -> Option<f64> {
             *self.time.lock().unwrap()
         }
         fn seek_absolute(&self, seconds: f64) {
             *self.seeked.lock().unwrap() = Some(seconds);
         }
-        fn wait_for_round(&self, _n: usize, _stop: &StopFlag) -> Result<(), PlayerShutdown> {
+        fn wait_for_round_end(&self, _stop: &StopFlag) -> Result<(), PlayerShutdown> {
             if let Some(f) = self.on_wait.lock().unwrap().as_ref() {
                 f();
             }
@@ -540,6 +592,20 @@ mod tests {
         assert!(ep.watched_at.is_none() && ep.position == 2);
         assert!(run.inner.lock().unwrap().deferred.contains(&cur.episode_id));
         assert_eq!(p.skips.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn previous_steps_back_without_watching() {
+        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        set_round(&run);
+        run.set_pos(0);
+        let cur = run.current().unwrap();
+        run.previous();
+        assert_eq!(p.prevs.load(Ordering::SeqCst), 1);
+        // navigation only — stepping back marks nothing watched
+        assert!(watched(&r, &cur.episode_id).is_none());
     }
 
     #[test]
@@ -710,5 +776,58 @@ mod tests {
         run.on_file_loaded();
         assert_eq!(*p.seeked.lock().unwrap(), Some(200.0));
         assert_eq!(run.inner.lock().unwrap().playing.as_ref().unwrap().episode_id, cur.episode_id);
+    }
+
+    // ── round-end detection (playlist-pos -> -1) ───────────────────────
+    #[test]
+    fn startup_idle_minus_one_is_not_a_round_end() {
+        // mpv's observe fires once with the initial value; before anything
+        // plays that value is -1. It must not count as a round ending.
+        let mut t = RoundEndTracker::default();
+        assert!(!t.observe(-1));
+        assert_eq!(t.ended_count(), 0);
+    }
+
+    #[test]
+    fn playing_then_exhausted_ends_exactly_one_round() {
+        let mut t = RoundEndTracker::default();
+        assert!(!t.observe(0)); // first entry
+        assert!(!t.observe(1)); // second entry
+        assert!(t.observe(-1)); // playlist exhausted -> round end
+        assert_eq!(t.ended_count(), 1);
+    }
+
+    #[test]
+    fn back_navigation_does_not_miscount_the_round() {
+        // skip forward then step back (playlist-prev) revisits earlier
+        // positions; only the final exhaustion ends the round.
+        let mut t = RoundEndTracker::default();
+        for pos in [0, 1, 2, 1, 0, 1, 2] {
+            assert!(!t.observe(pos));
+        }
+        assert!(t.observe(-1));
+        assert_eq!(t.ended_count(), 1);
+    }
+
+    #[test]
+    fn repeated_idle_minus_one_counts_only_once() {
+        // After exhaustion mpv may report -1 again while idle; the round
+        // boundary is edge-triggered, so the extra -1 is ignored.
+        let mut t = RoundEndTracker::default();
+        assert!(!t.observe(0));
+        assert!(t.observe(-1));
+        assert!(!t.observe(-1));
+        assert!(!t.observe(-1));
+        assert_eq!(t.ended_count(), 1);
+    }
+
+    #[test]
+    fn consecutive_rounds_each_end_once() {
+        let mut t = RoundEndTracker::default();
+        assert!(!t.observe(0));
+        assert!(t.observe(-1));
+        assert!(!t.observe(0)); // next round starts
+        assert!(t.observe(-1));
+        assert_eq!(t.ended_count(), 2);
     }
 }

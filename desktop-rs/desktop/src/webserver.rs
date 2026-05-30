@@ -1,7 +1,7 @@
 //! Localhost control server backing the web overlay. Serves the built React
 //! bundle and a same-origin control surface: the overlay polls `/status`,
-//! `/shows`, `/stats`, `/history`, and POSTs `/pause` `/skip` `/defer` `/seek`
-//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/library/*`.
+//! `/shows`, `/stats`, `/history`, and POSTs `/pause` `/skip` `/prev` `/defer`
+//! `/seek` `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/library/*`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -129,6 +129,10 @@ impl ControlServer {
             }
             "/skip" => {
                 self.with_runner(|r| r.skip());
+                respond(request, 204, vec![], "text/plain");
+            }
+            "/prev" => {
+                self.with_runner(|r| r.previous());
                 respond(request, 204, vec![], "text/plain");
             }
             "/defer" => {
