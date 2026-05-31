@@ -1,7 +1,7 @@
 //! Localhost control server backing the web overlay. Serves the built React
 //! bundle and a same-origin control surface: the overlay polls `/status`,
-//! `/shows`, `/stats`, `/history`, and POSTs `/pause` `/skip` `/defer` `/seek`
-//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/library/*`.
+//! `/shows`, `/stats`, `/history`, and POSTs `/pause` `/skip` `/prev` `/defer`
+//! `/seek` `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/library/*`.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -132,7 +132,7 @@ impl ControlServer {
                 respond(request, 204, vec![], "text/plain");
             }
             "/prev" => {
-                self.with_runner(|r| r.prev());
+                self.with_runner(|r| r.previous());
                 respond(request, 204, vec![], "text/plain");
             }
             "/play-show" => {
@@ -140,11 +140,6 @@ impl ControlServer {
                 if let Some(show_id) = b.get("show_id").and_then(Value::as_str) {
                     if let Some(show) = self.replica.show(show_id) {
                         if let Some(ep) = shows_core::engine::first_unwatched(&show.episodes) {
-                            // 1. Mark watched immediately in the database
-                            self.replica.advance(&[(show_id.to_string(), ep.id.clone())]);
-                            self.push_sync();
-                            
-                            // 2. Play it
                             self.with_runner(|r| {
                                 r.play_episode(&show, ep);
                             });

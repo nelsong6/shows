@@ -6,7 +6,7 @@ import {
   getStats,
   pause,
   skip,
-  prev,
+  previous,
   playShow,
   markShowWatched,
   markShowUnwatched,
@@ -96,9 +96,9 @@ function App() {
   const volOsdTimer = useRef<number | undefined>(undefined);
 
   // Keyboard controls. Bound on window so they work whenever the overlay has
-  // focus (main.py gives the WebEngineView active focus). space=pause/play,
-  // n/→=skip, d=defer, f=fullscreen, h=hide all chrome, j/l=seek -/+10s,
-  // ↑/↓=volume, v/Tab=dashboard, Esc=hide dashboard.
+  // focus (the WebView2 overlay holds focus over the video). space=pause/play,
+  // n=next show, p=previous show, d=defer, f=fullscreen, h=hide all chrome,
+  // ←/→ (or j/l)=seek -/+10s, ↑/↓=volume, v/Tab=dashboard, Esc=hide dashboard.
   useEffect(() => {
     // Flash the transient volume OSD with the new level and re-arm its
     // auto-hide. Defined inside the mount-once effect so it closes over only
@@ -118,7 +118,7 @@ function App() {
           skip();
           break;
         case 'p':
-          prev();
+          previous();
           break;
         case 'd':
           defer();
@@ -131,10 +131,14 @@ function App() {
           break;
         case 'ArrowLeft':
         case 'j':
+        case 'ArrowLeft':
+          e.preventDefault();
           seekRelative(-10);
           break;
         case 'ArrowRight':
         case 'l':
+        case 'ArrowRight':
+          e.preventDefault();
           seekRelative(10);
           break;
         case 'ArrowUp': {
@@ -497,7 +501,7 @@ function ControlBar({
       <button className="gb" onClick={() => pause()} title="space">
         pause / play
       </button>
-      <button className="gb" onClick={() => prev()} title="p — previous show">
+      <button className="gb" onClick={() => previous()} title="p — previous show">
         prev
       </button>
       <button className="gb" onClick={() => skip()} title="n — mark watched, next">

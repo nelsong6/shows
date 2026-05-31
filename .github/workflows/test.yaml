@@ -41,7 +41,7 @@ jobs:
           workspaces: desktop-rs
 
       # `shows-core` is `#![forbid(unsafe_code)]` and Win32/libmpv-free, so the
-      # 66-test suite (ordering / roundlogic / scan / update / engine / replica
+      # 73-test suite (ordering / roundlogic / scan / update / engine / replica
       # / apiclient / oauth / sync / runner / model) runs fine on Linux. This
       # is the cheap per-PR sanity check; the Windows-only shell goes through
       # `build-desktop.yaml`.

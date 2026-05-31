@@ -147,7 +147,9 @@ export function skip(): void {
   void fetch('/skip', {method: 'POST'});
 }
 
-export function prev(): void {
+// Step back to the previous show in the current round (navigation only — going
+// back never marks anything watched).
+export function previous(): void {
   void fetch('/prev', {method: 'POST'});
 }
 
@@ -164,7 +166,6 @@ export async function markShowUnwatched(showId: string): Promise<void> {
   const r = await fetch('/library/mark-unwatched', {method: 'POST', body: JSON.stringify({show_id: showId})});
   if (!r.ok) throw new Error(`Failed to mark unwatched: ${r.status}`);
 }
-
 // Re-roll the current show's next-round pick without marking it watched
 // (server contract D1-D3). The runner jumps to the next entry too.
 export function defer(): void {

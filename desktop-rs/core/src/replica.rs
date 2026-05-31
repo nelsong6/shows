@@ -167,7 +167,7 @@ impl Replica {
             }
             for h in &history {
                 conn.execute(
-                    "UPDATE episodes SET watched_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+                    "UPDATE episodes SET watched_at=?1, resume_pos=NULL, updated_at=?2, dirty=1 WHERE id=?3",
                     params![now, now, h.episode_id],
                 )
                 .expect("mark watched");
@@ -1034,6 +1034,17 @@ mod tests {
         seed(&r);
         r.set_resume("a", Some(123.5));
         assert_eq!(r.resume_pos("a"), Some(123.5));
+    }
+
+    #[test]
+    fn advance_clears_resume_pos() {
+        // A finished episode has no meaningful resume point; clearing it means
+        // stepping back to it ('previous') replays from the start, not the end.
+        let r = Replica::new(":memory:");
+        seed(&r);
+        r.set_resume("a", Some(123.5));
+        r.advance(&[("s1".into(), "a".into())]);
+        assert_eq!(r.resume_pos("a"), None);
     }
 
     #[test]

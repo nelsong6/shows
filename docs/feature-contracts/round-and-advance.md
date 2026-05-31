@@ -74,6 +74,17 @@ Invariants:
 
 Defer is the **without-counting-it-watched** counterpart to the per-episode skip in I7.
 
+## Previous: step back without watching
+
+Previous (`runner.previous`, the `p` control) steps mpv back to the prior entry in the current round — pure navigation, the backward counterpart to the `n` skip. It issues `playlist-prev` *weak* (going back at the first entry is a no-op rather than ending playback); nothing is marked watched and no `watch_history` row is written.
+
+Invariants:
+
+- **P1. Previous never marks watched.** Stepping back is navigation only. If the revisited episode was already watched, replaying it to its natural end is a no-op by I3 — so back-and-forth navigation can neither double-advance nor skip an unwatched episode, and the round boundary (detected from playlist exhaustion, not an end-file tally) is unaffected.
+- **P2. A replayed episode restarts from the beginning.** `replica.advance` clears `resume_pos` when it marks an episode watched, so stepping back to a finished episode plays it from the start rather than its prior resume point.
+
+Previous is navigation; skip (I7) and defer (D1–D3) are the operations that change watched/queue state.
+
 ## Cross-playlist rounds
 
 Single-playlist is the primary path; cross-playlist is purely additive — set `SHOWS_PLAYLISTS=a,b,c` to interleave several playlists in one rotation.

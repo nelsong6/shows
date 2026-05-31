@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use shows_core::runner::{PlayerOps, PlayerShutdown, StopFlag};
+use shows_core::runner::{PlayerOps, PlayerShutdown, RoundEndTracker, StopFlag};
 
 use crate::mpv::{
     Handle, MpvEventEndFile, MPV_END_FILE_REASON_EOF, MPV_EVENT_END_FILE, MPV_EVENT_FILE_LOADED,
@@ -30,7 +30,10 @@ type Cb = Box<dyn Fn() + Send + Sync>;
 type PosCb = Box<dyn Fn(usize) + Send + Sync>;
 
 struct Shared {
-    end_files: u64,
+    // Round boundary, driven by playlist-pos (-1 == exhausted). The tracker
+    // counts a round end once per real exhaustion and ignores the startup/idle
+    // -1, so in-round navigation (skip/prev) never miscounts the boundary.
+    round: RoundEndTracker,
     shutdown: bool,
     interrupted: bool,
 }
@@ -51,7 +54,7 @@ impl Player {
         let player = Arc::new(Player {
             handle,
             cv: Condvar::new(),
-            shared: Mutex::new(Shared { end_files: 0, shutdown: false, interrupted: false }),
+            shared: Mutex::new(Shared { round: RoundEndTracker::default(), shutdown: false, interrupted: false }),
             on_natural_end: Mutex::new(None),
             on_file_loaded: Mutex::new(None),
             on_pos: Mutex::new(None),
@@ -94,12 +97,10 @@ impl Player {
                     return; // mpv core is going away; stop pumping
                 }
                 MPV_EVENT_END_FILE => {
-                    {
-                        let mut s = self.shared.lock().unwrap();
-                        s.end_files += 1;
-                    }
-                    self.cv.notify_all();
-                    // Only a natural end (played to completion) counts as watched.
+                    // Only a natural end (played to completion) marks the episode
+                    // watched. The round boundary is detected from playlist-pos
+                    // -> -1 (below), not by counting end-file events, so a
+                    // replayed entry (playlist-prev) never miscounts the round.
                     let natural = unsafe {
                         let d = (*ev).data as *const MpvEventEndFile;
                         !d.is_null() && (*d).reason == MPV_END_FILE_REASON_EOF
@@ -132,6 +133,16 @@ impl Player {
                         let sptr = *((*prop).data as *const *const c_char);
                         if !sptr.is_null() {
                             if let Ok(i) = CStr::from_ptr(sptr).to_string_lossy().parse::<i64>() {
+                                // Feed the tracker: a -1 after real playback is
+                                // the round boundary that wakes
+                                // wait_for_round_end (keep-open=no lets the last
+                                // entry advance past its end so this fires
+                                // instead of pausing on the final frame). The
+                                // startup/idle -1 returns false and is ignored.
+                                let ended = self.shared.lock().unwrap().round.observe(i);
+                                if ended {
+                                    self.cv.notify_all();
+                                }
                                 if i >= 0 {
                                     if let Some(cb) = self.on_pos.lock().unwrap().as_ref() {
                                         cb(i as usize);
@@ -232,11 +243,15 @@ impl PlayerOps for Player {
         self.handle.command(&["show-text", text, &duration_ms.to_string()]);
     }
     fn skip(&self) {
-        // Force-advance to the next queued entry (its end-file counts like any).
+        // Force-advance to the next queued entry. At the last entry this
+        // exhausts the playlist (playlist-pos -> -1), which ends the round.
         self.handle.command(&["playlist-next", "force"]);
     }
-    fn prev(&self) {
-        self.handle.command(&["playlist-prev", "force"]);
+    fn previous(&self) {
+        // Step back to the previous queued entry. "weak" so going back at the
+        // first entry is a no-op rather than terminating playback.
+        self.handle.command(&["playlist-prev", "weak"]);
+    }
     }
     fn time_pos(&self) -> Option<f64> {
         self.prop_f64("time-pos")
@@ -247,11 +262,11 @@ impl PlayerOps for Player {
     fn set_playlist_pos(&self, idx: usize) {
         self.handle.set_property("playlist-pos", &idx.to_string());
     }
-    fn wait_for_round(&self, n: usize, stop: &StopFlag) -> Result<(), PlayerShutdown> {
+    fn wait_for_round_end(&self, stop: &StopFlag) -> Result<(), PlayerShutdown> {
         let mut s = self.shared.lock().unwrap();
         s.interrupted = false; // Reset interrupted status before waiting
-        let target = s.end_files + n as u64;
-        while s.end_files < target {
+        let target = s.round.ended_count() + 1;
+        while s.round.ended_count() < target {
             if s.shutdown {
                 return Err(PlayerShutdown("mpv shutdown event".into()));
             }
