@@ -713,8 +713,27 @@ function BottomControlBar({
 
       {/* 2. Controls Row */}
       <div className="controls-row">
-        {/* Left: Playback controls */}
-        <div className="controls-group left-controls">
+        {/* Left: Info digital display */}
+        <div className="controls-group left-display">
+          <div className="hud-display">
+            <div className="hud-status">
+              <span className={`pill ${pillClass(pb?.paused ? 'initializing' : status.phase)}`} style={{ fontSize: '9px', height: '14px', padding: '0 4px', textTransform: 'uppercase' }}>
+                {pb?.paused ? 'paused' : status.phase}
+              </span>
+              {status.playlist && (
+                <span className="hud-playlist" style={{ fontSize: '10px', color: 'var(--fg-dim)', marginLeft: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                  {status.playlist}
+                </span>
+              )}
+            </div>
+            <div className="display-now-playing" title={nowPlayingText}>
+              {nowPlayingText}
+            </div>
+          </div>
+        </div>
+
+        {/* Center: Playback controls */}
+        <div className="controls-group center-controls">
           <button
             className="control-btn"
             onClick={() => previous()}
@@ -759,9 +778,12 @@ function BottomControlBar({
           >
             <NextIcon />
           </button>
+        </div>
 
+        {/* Right: Sound, Selectors, Sync, Fullscreen, View, Hide */}
+        <div className="controls-group right-controls">
           <button
-            className="control-btn"
+            className="control-btn defer-btn"
             onClick={() => defer()}
             disabled={!playing}
             title="Defer Episode (d)"
@@ -778,17 +800,7 @@ function BottomControlBar({
               <CcIcon />
             </button>
           )}
-        </div>
 
-        {/* Center: Info digital display */}
-        <div className="controls-group center-display">
-          <div className="display-now-playing" title={nowPlayingText}>
-            {nowPlayingText}
-          </div>
-        </div>
-
-        {/* Right: Sound, Selectors, Sync, Fullscreen, View, Hide */}
-        <div className="controls-group right-controls">
           <div className="volume-control-group">
             <button
               className="control-btn volume-btn"
@@ -844,18 +856,16 @@ function BottomControlBar({
           )}
 
           <button
-            className="control-btn"
+            className="control-btn sync-btn"
             onClick={() => syncNow()}
             title="Sync Now"
           >
             <SyncIcon />
           </button>
 
-
-
           {playing && (
             <button
-              className={`control-btn${viewing ? ' active' : ''}`}
+              className={`control-btn playlist-btn${viewing ? ' active' : ''}`}
               onClick={onToggleView}
               title="Toggle Playlist (v / Tab)"
             >
@@ -864,7 +874,7 @@ function BottomControlBar({
           )}
 
           <button
-            className="control-btn"
+            className="control-btn fullscreen-btn"
             onClick={() => toggleFullscreen()}
             title="Fullscreen (f)"
           >

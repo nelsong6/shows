@@ -296,14 +296,21 @@ table.runs th {
   gap: 10px;
 }
 
-.left-controls {
-  flex: 1;
+.left-display {
+  flex: 1 1 0%;
   justify-content: flex-start;
+  min-width: 0;
+}
+
+.center-controls {
+  flex: 0 0 auto;
+  justify-content: center;
 }
 
 .right-controls {
-  flex: 1;
+  flex: 1 1 0%;
   justify-content: flex-end;
+  min-width: 0;
 }
 
 /* Slick circular media control buttons */
@@ -367,12 +374,12 @@ table.runs th {
   color: var(--fg-dimmest);
 }
 
-/* Center digital HUD display */
-.center-display {
-  flex: 0 1 360px;
+/* HUD digital display */
+.hud-display {
+  flex: 0 1 320px;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   background: rgba(0, 0, 0, 0.45);
   border: 1px solid rgba(255, 255, 255, 0.06);
@@ -380,18 +387,14 @@ table.runs th {
   padding: 6px 16px;
   height: 48px;
   gap: 2px;
+  min-width: 0;
+  width: 100%;
 }
 
-.display-status {
+.hud-status {
   display: flex;
   align-items: center;
-  gap: 6px;
-}
-
-.display-status .pill {
-  font-size: 9px;
-  height: 14px;
-  padding: 0 5px;
+  gap: 8px;
 }
 
 .display-now-playing {
@@ -399,7 +402,7 @@ table.runs th {
   color: var(--fg);
   font-weight: 500;
   width: 100%;
-  text-align: center;
+  text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -683,4 +686,83 @@ ul.queue li.next .q-mark {
 button.gb.toggle-view-btn {
   width: 90px;
   justify-content: center;
+}
+
+/* Responsive Media Queries to prevent overlapping of bottom control bar elements */
+
+@media (max-width: 1000px) {
+  .hud-display {
+    max-width: 240px;
+  }
+}
+
+@media (max-width: 900px) {
+  /* Collapse the volume slider range by default, auto-expand on hover or focus */
+  .volume-slider {
+    width: 0px;
+    opacity: 0;
+    pointer-events: none;
+    transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, background 0.15s ease;
+  }
+  
+  .volume-control-group:hover .volume-slider,
+  .volume-control-group:focus-within .volume-slider {
+    width: 80px;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .hud-display {
+    max-width: 180px;
+  }
+}
+
+@media (max-width: 800px) {
+  /* Compact control button sizing & spacing */
+  .control-btn {
+    width: 30px;
+    height: 30px;
+  }
+  
+  .control-btn.play-pause-btn {
+    width: 38px;
+    height: 38px;
+  }
+  
+  .controls-group {
+    gap: 6px;
+  }
+  
+  /* Hide selectors since they take up a lot of space and are rarely used compared to keyboard hotkeys */
+  .track-select {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  /* Simplify the HUD display details */
+  .hud-status {
+    display: none;
+  }
+  .hud-display {
+    height: 36px;
+    padding: 0 10px;
+    max-width: 120px;
+  }
+  .display-now-playing {
+    font-size: 11.5px;
+  }
+  
+  /* Hide Defer and Sync buttons */
+  .defer-btn,
+  .sync-btn {
+    display: none;
+  }
+}
+
+@media (max-width: 580px) {
+  /* Completely hide the HUD display on very narrow widths to prioritize playback controls */
+  .left-display {
+    display: none;
+  }
 }
