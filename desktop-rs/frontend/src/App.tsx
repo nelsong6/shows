@@ -7,6 +7,9 @@ import {
   pause,
   skip,
   prev,
+  playShow,
+  markShowWatched,
+  markShowUnwatched,
   defer,
   toggleFullscreen,
   seekPercent,
@@ -233,6 +236,22 @@ function App() {
       .then((s) => setShows(s ?? []))
       .catch(() => {});
 
+  const handlePlayShow = (showId: string) => {
+    playShow(showId);
+  };
+
+  const handleToggleWatched = (showId: string, watched: boolean) => {
+    if (watched) {
+      markShowWatched(showId);
+    } else {
+      markShowUnwatched(showId);
+    }
+    setTimeout(() => {
+      refreshShows();
+      setSelected(null);
+    }, 250);
+  };
+
   // `h` hides ALL overlay chrome (control bar, scrub, dashboard) for an
   // unobstructed view; press `h` again to bring it back. The window key handler
   // stays mounted while hidden, so the toggle still fires. With nothing drawn,
@@ -337,6 +356,8 @@ function App() {
                 show={selectedShow}
                 events={history}
                 onClose={() => setSelected(null)}
+                onPlay={() => handlePlayShow(selectedShow.id)}
+                onToggleWatched={() => handleToggleWatched(selectedShow.id, !selectedShow.removed_at)}
                 onRemove={() => {
                   removeShow(selectedShow.id);
                   setSelected(null);
@@ -608,11 +629,15 @@ function ShowHistory({
   show,
   events,
   onClose,
+  onPlay,
+  onToggleWatched,
   onRemove,
 }: {
   show: Show;
   events: HistoryEvent[];
   onClose: () => void;
+  onPlay: () => void;
+  onToggleWatched: () => void;
   onRemove: () => void;
 }) {
   return (
@@ -621,6 +646,12 @@ function ShowHistory({
         history — {show.name}
         <button className="gb" style={{ marginLeft: 12 }} onClick={onClose}>
           back
+        </button>
+        <button className="gb" style={{ marginLeft: 8 }} onClick={onPlay}>
+          play show
+        </button>
+        <button className="gb" style={{ marginLeft: 8 }} onClick={onToggleWatched}>
+          {show.removed_at ? 'mark unwatched' : 'mark watched'}
         </button>
         <button className="gb danger" style={{ marginLeft: 8 }} onClick={onRemove}>
           remove show

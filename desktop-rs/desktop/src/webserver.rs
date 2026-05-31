@@ -135,6 +135,40 @@ impl ControlServer {
                 self.with_runner(|r| r.prev());
                 respond(request, 204, vec![], "text/plain");
             }
+            "/play-show" => {
+                let b = read_body(&mut request);
+                if let Some(show_id) = b.get("show_id").and_then(Value::as_str) {
+                    if let Some(show) = self.replica.show(show_id) {
+                        if let Some(ep) = shows_core::engine::first_unwatched(&show.episodes) {
+                            // 1. Mark watched immediately in the database
+                            self.replica.advance(&[(show_id.to_string(), ep.id.clone())]);
+                            self.push_sync();
+                            
+                            // 2. Play it
+                            self.with_runner(|r| {
+                                r.play_episode(&show, ep);
+                            });
+                        }
+                    }
+                }
+                respond(request, 204, vec![], "text/plain");
+            }
+            "/library/mark-watched" => {
+                let b = read_body(&mut request);
+                if let Some(id) = b.get("show_id").and_then(Value::as_str) {
+                    self.replica.mark_show_watched(id);
+                    self.push_sync();
+                }
+                respond(request, 204, vec![], "text/plain");
+            }
+            "/library/mark-unwatched" => {
+                let b = read_body(&mut request);
+                if let Some(id) = b.get("show_id").and_then(Value::as_str) {
+                    self.replica.mark_show_unwatched(id);
+                    self.push_sync();
+                }
+                respond(request, 204, vec![], "text/plain");
+            }
             "/defer" => {
                 self.with_runner(|r| r.defer());
                 respond(request, 204, vec![], "text/plain");

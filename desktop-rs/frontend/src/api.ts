@@ -151,6 +151,18 @@ export function prev(): void {
   void fetch('/prev', {method: 'POST'});
 }
 
+export function playShow(showId: string): void {
+  void fetch('/play-show', {method: 'POST', body: JSON.stringify({show_id: showId})});
+}
+
+export function markShowWatched(showId: string): void {
+  void fetch('/library/mark-watched', {method: 'POST', body: JSON.stringify({show_id: showId})});
+}
+
+export function markShowUnwatched(showId: string): void {
+  void fetch('/library/mark-unwatched', {method: 'POST', body: JSON.stringify({show_id: showId})});
+}
+
 // Re-roll the current show's next-round pick without marking it watched
 // (server contract D1-D3). The runner jumps to the next entry too.
 export function defer(): void {

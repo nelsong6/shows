@@ -283,6 +283,69 @@ impl Replica {
         n > 0
     }
 
+    /// Mark all episodes of a show as watched, and tombstone/remove the show.
+    pub fn mark_show_watched(&self, show_id: &str) -> bool {
+        let now = now();
+        let conn = self.db.lock().unwrap();
+        
+        // Get all episodes that are unwatched
+        let mut stmt = conn
+            .prepare("SELECT id, relative_path FROM episodes WHERE show_id=?1 AND watched_at IS NULL")
+            .expect("prep unwatched");
+        let unwatched: Vec<(String, String)> = stmt
+            .query_map(params![show_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query unwatched")
+            .filter_map(Result::ok)
+            .collect();
+            
+        for (eid, rel) in &unwatched {
+            conn.execute(
+                "UPDATE episodes SET watched_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+                params![now, now, eid],
+            )
+            .expect("mark watched");
+            conn.execute(
+                "INSERT INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,1)",
+                params![Uuid::new_v4().to_string(), show_id, eid, rel, now],
+            )
+            .expect("append history");
+        }
+        
+        let n = conn.execute(
+            "UPDATE shows SET removed_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+            params![now, now, show_id],
+        )
+        .expect("tombstone");
+        
+        n > 0
+    }
+
+    /// Mark all episodes of a show as unwatched, reset resume positions, and restore the show.
+    pub fn mark_show_unwatched(&self, show_id: &str) -> bool {
+        let now = now();
+        let conn = self.db.lock().unwrap();
+        
+        conn.execute(
+            "UPDATE shows SET removed_at=NULL, updated_at=?1, dirty=1 WHERE id=?2",
+            params![now, show_id],
+        )
+        .expect("restore show");
+        
+        conn.execute(
+            "UPDATE episodes SET watched_at=NULL, resume_pos=NULL, updated_at=?1, dirty=1 WHERE show_id=?2",
+            params![now, show_id],
+        )
+        .expect("reset episodes");
+        
+        conn.execute(
+            "DELETE FROM watch_history WHERE show_id=?1",
+            params![show_id],
+        )
+        .expect("clear history");
+        
+        true
+    }
+
     /// Append new episodes to a show, positions continuing from max+1 (the
     /// new-episode-detection path). Returns how many were added.
     pub fn add_episodes(&self, show_id: &str, rels: &[String]) -> usize {

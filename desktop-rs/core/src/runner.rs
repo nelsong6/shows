@@ -286,6 +286,28 @@ impl Runner {
         self.player.skip();
     }
 
+    /// Play a specific show's episode immediately, replacing the current round playlist.
+    pub fn play_episode(&self, show: &crate::engine::Show, ep: &crate::engine::Episode) {
+        let entry = RoundEntry {
+            show_id: show.id.clone(),
+            show_name: show.name.clone(),
+            episode_id: ep.id.clone(),
+            absolute_path: crate::ordering::join_path(&show.root_path, &ep.relative_path),
+            order_value: 0,
+            playlist: show.playlist.clone(),
+        };
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.round = Some(vec![entry.clone()]);
+            inner.pos = 0;
+            inner.deferred.clear();
+            inner.playing = None;
+            inner.loaded_any = false;
+        }
+        self.player.playlist_clear();
+        self.player.play(&entry.absolute_path, "replace");
+    }
+
     // ── playback callbacks (mpv event thread; keep fast + local) ─────────
     /// A queued file opened — mark it now-playing, note reachable media, restore
     /// its saved resume position.
