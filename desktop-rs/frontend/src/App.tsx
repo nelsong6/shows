@@ -342,13 +342,6 @@ function App() {
           onDismiss={() => setUpdateDismissed(status.update!.latest)}
         />
       )}
-      <ControlBar
-        status={status}
-        pos={pos}
-        playing={playing}
-        viewing={showDashboard}
-        onToggleView={() => setShowDashboard((v) => !v)}
-      />
       {dashboardVisible ? (
         <div className={`layout${playing ? ' over-video' : ''}`}>
           <aside className="sidebar">
@@ -490,7 +483,14 @@ function App() {
       ) : (
         <div style={{ flex: 1 }} />
       )}
-      {playing && <PlaybackBar pb={status.playback} />}
+      <BottomControlBar
+        status={status}
+        pos={pos}
+        playing={playing}
+        viewing={showDashboard}
+        onToggleView={() => setShowDashboard((v) => !v)}
+        setChromeHidden={setChromeHidden}
+      />
     </div>
   );
 }
@@ -528,66 +528,101 @@ function UpdateBanner({ info, onDismiss }: { info: UpdateInfo; onDismiss: () => 
   );
 }
 
-// Always-on control bar at the top — the only chrome over live video when
-// the dashboard is hidden. Top-anchored + semi-opaque so it composites
-// reliably over the mpv layer.
-function ControlBar({
-  status,
-  pos,
-  playing,
-  viewing,
-  onToggleView,
-}: {
-  status: Status;
-  pos: number;
-  playing: boolean;
-  viewing: boolean;
-  onToggleView: () => void;
-}) {
-  const round = status.round ?? [];
-  const now = round.length
-    ? `${round[pos].show_name}   (${pos + 1}/${round.length})`
-    : status.message || '—';
-  return (
-    <div className="controlbar">
-      <span className={`pill ${pillClass(status.phase)}`}>{status.phase}</span>
-      <span className="now">{now}</span>
-      <button className="gb" onClick={() => pause()} title="space">
-        pause / play
-      </button>
-      <button className="gb" onClick={() => previous()} title="p — previous show">
-        prev
-      </button>
-      <button className="gb" onClick={() => skip()} title="n — mark watched, next">
-        skip
-      </button>
-      <button className="gb" onClick={() => defer()} title="d — different episode next round">
-        defer
-      </button>
-      <button className="gb" onClick={() => toggleFullscreen()} title="f — toggle fullscreen">
-        fullscreen
-      </button>
-      {playing && (
-        <button className="gb toggle-view-btn" onClick={onToggleView} title="v / tab">
-          {viewing ? 'hide list' : 'show list'}
-        </button>
-      )}
-      {status.sync && (
-        <span
-          className={`pill ${status.sync.online ? 'info' : 'drain'}`}
-          title={status.sync.online ? 'synced with server' : 'offline — changes queued locally'}
-        >
-          {status.sync.online ? 'online' : 'offline'}
-          {status.sync.pending > 0 ? ` ·${status.sync.pending}` : ''}
-        </span>
-      )}
-      <button className="gb" onClick={() => syncNow()} title="push queued changes + pull">
-        sync
-      </button>
-      <span className="keys">space · n/p · d · f · h · c · j/l · ←→ · ↑↓ · v · esc</span>
-    </div>
-  );
-}
+// SVG Icons for bottom controls
+const PlayIcon = () => (
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+    <path d="M8 5v14l11-7z" />
+  </svg>
+);
+
+const PauseIcon = () => (
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+    <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+  </svg>
+);
+
+const PrevIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
+  </svg>
+);
+
+const NextIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6z" />
+  </svg>
+);
+
+const RewindIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <polyline points="3 3 3 8 8 8" />
+    <text x="12" y="15" fontSize="8" fontWeight="bold" fontFamily="sans-serif" textAnchor="middle" fill="currentColor" stroke="none">10</text>
+  </svg>
+);
+
+const ForwardIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+    <polyline points="21 3 21 8 16 8" />
+    <text x="12" y="15" fontSize="8" fontWeight="bold" fontFamily="sans-serif" textAnchor="middle" fill="currentColor" stroke="none">10</text>
+  </svg>
+);
+
+const DeferIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="12" cy="12" r="10" />
+    <polyline points="12 6 12 12 16 14" />
+  </svg>
+);
+
+const CcIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M19 4H5c-1.11 0-2 .9-2 2v12c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-8 7H9.5v-.5h-2v3h2V13H11v1c0 .55-.45 1-1 1H6c-.55 0-1-.45-1-1V10c0-.55.45-1 1-1h4c.55 0 1 .45 1 1v1zm7 0h-1.5v-.5h-2v3h2V13H18v1c0 .55-.45 1-1 1h-4c-.55 0-1-.45-1-1V10c0-.55.45-1 1-1h4c.55 0 1 .45 1 1v1z" />
+  </svg>
+);
+
+const VolumeIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" />
+  </svg>
+);
+
+const VolumeMuteIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+    <path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.21.05-.42.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z" />
+  </svg>
+);
+
+const SyncIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+  </svg>
+);
+
+const HideUiIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+    <line x1="1" y1="1" x2="23" y2="23" />
+  </svg>
+);
+
+const PlaylistIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="8" y1="6" x2="21" y2="6" />
+    <line x1="8" y1="12" x2="21" y2="12" />
+    <line x1="8" y1="18" x2="21" y2="18" />
+    <line x1="3" y1="6" x2="3.01" y2="6" />
+    <line x1="3" y1="12" x2="3.01" y2="12" />
+    <line x1="3" y1="18" x2="3.01" y2="18" />
+  </svg>
+);
+
+const FullscreenIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+  </svg>
+);
 
 function fmtTime(s: number | null | undefined): string {
   if (s == null || isNaN(s)) return '--:--';
@@ -616,67 +651,249 @@ function VolumeOsd({ volume }: { volume: number | null }) {
   );
 }
 
-// Scrub bar + time + volume + subtitle/audio menus, shown under the control bar
-// during playback. Driven by status.playback (live mpv state, polled).
-function PlaybackBar({ pb }: { pb?: Playback }) {
-  if (!pb) return null;
-  const pct =
-    pb.percent_pos ??
-    (pb.duration && pb.time_pos != null ? (pb.time_pos / pb.duration) * 100 : 0);
+// Unified bottom-anchored control bar.
+function BottomControlBar({
+  status,
+  pos,
+  playing,
+  viewing,
+  onToggleView,
+  setChromeHidden,
+}: {
+  status: Status;
+  pos: number;
+  playing: boolean;
+  viewing: boolean;
+  onToggleView: () => void;
+  setChromeHidden: (hidden: boolean) => void;
+}) {
+  const pb = status.playback;
+  const pct = pb
+    ? pb.percent_pos ?? (pb.duration && pb.time_pos != null ? (pb.time_pos / pb.duration) * 100 : 0)
+    : 0;
+
+  const [lastVolume, setLastVolume] = useState(100);
+
+  const handleToggleMute = () => {
+    if (!pb) return;
+    const currentVol = pb.volume ?? 100;
+    if (currentVol > 0) {
+      setLastVolume(currentVol);
+      setVolume(0);
+    } else {
+      setVolume(lastVolume);
+    }
+  };
+
+  const handleToggleCc = () => {
+    if (pb && pb.sub_tracks.length > 0) {
+      const currentSid = pb.sid;
+      const isOff = currentSid === null || currentSid === undefined || currentSid === 'no';
+      if (isOff) {
+        const firstTrack = pb.sub_tracks[0];
+        if (firstTrack) {
+          setSub(firstTrack.id);
+        }
+      } else {
+        setSub('no');
+      }
+    }
+  };
+
+  const round = status.round ?? [];
+  const nowPlayingText = round.length
+    ? `${round[pos].show_name}   (${pos + 1}/${round.length})`
+    : status.message || '—';
+
+  const isMuted = pb ? (pb.volume ?? 100) === 0 : false;
+  const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
+
   return (
-    <div className="playbar">
-      <span className="time">{fmtTime(pb.time_pos)}</span>
-      <div
-        className="scrub"
-        onClick={(e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
-        }}
-      >
-        <div className="scrub-fill" style={{ width: `${pct ?? 0}%` }} />
+    <div className="bottom-controls">
+      {/* 1. Scrub Container */}
+      <div className="scrub-container">
+        <span className="time-display">{pb ? fmtTime(pb.time_pos) : '--:--'}</span>
+        <div
+          className={`scrub-bar${!pb ? ' disabled' : ''}`}
+          onClick={(e) => {
+            if (!pb) return;
+            const r = e.currentTarget.getBoundingClientRect();
+            seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
+          }}
+        >
+          <div className="scrub-fill" style={{ width: `${pct}%` }} />
+          <div className="scrub-handle" style={{ left: `${pct}%` }} />
+        </div>
+        <span className="time-display">{pb ? fmtTime(pb.duration) : '--:--'}</span>
       </div>
-      <span className="time">{fmtTime(pb.duration)}</span>
-      <label className="vol" title="volume (up / down)">
-        vol
-        <input
-          type="range"
-          min={0}
-          max={130}
-          value={Math.round(pb.volume ?? 100)}
-          onChange={(e) => setVolume(Number(e.currentTarget.value))}
-        />
-      </label>
-      {pb.sub_tracks.length > 0 && (
-        <select
-          className="trk"
-          title="subtitles"
-          value={String(pb.sid ?? 'no')}
-          onChange={(e) =>
-            setSub(e.currentTarget.value === 'no' ? 'no' : Number(e.currentTarget.value))
-          }
-        >
-          <option value="no">subs: off</option>
-          {pb.sub_tracks.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.title}
-            </option>
-          ))}
-        </select>
-      )}
-      {pb.audio_tracks.length > 1 && (
-        <select
-          className="trk"
-          title="audio track"
-          value={String(pb.aid ?? '')}
-          onChange={(e) => setAudio(Number(e.currentTarget.value))}
-        >
-          {pb.audio_tracks.map((t) => (
-            <option key={t.id} value={t.id}>
-              {t.title}
-            </option>
-          ))}
-        </select>
-      )}
+
+      {/* 2. Controls Row */}
+      <div className="controls-row">
+        {/* Left: Playback controls */}
+        <div className="controls-group left-controls">
+          <button
+            className="control-btn"
+            onClick={() => previous()}
+            disabled={!playing}
+            title="Previous Show (p)"
+          >
+            <PrevIcon />
+          </button>
+          
+          <button
+            className="control-btn"
+            onClick={() => seekRelative(-10)}
+            disabled={!pb}
+            title="Rewind 10s (j / ←)"
+          >
+            <RewindIcon />
+          </button>
+
+          <button
+            className="control-btn play-pause-btn"
+            onClick={() => pause()}
+            disabled={!playing}
+            title="Play / Pause (Space)"
+          >
+            {pb?.paused ? <PlayIcon /> : <PauseIcon />}
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={() => seekRelative(10)}
+            disabled={!pb}
+            title="Forward 10s (l / →)"
+          >
+            <ForwardIcon />
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={() => skip()}
+            disabled={!playing}
+            title="Skip Show (n)"
+          >
+            <NextIcon />
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={() => defer()}
+            disabled={!playing}
+            title="Defer Episode (d)"
+          >
+            <DeferIcon />
+          </button>
+
+          {pb && pb.sub_tracks.length > 0 && (
+            <button
+              className={`control-btn cc-btn${ccActive ? ' active' : ''}`}
+              onClick={handleToggleCc}
+              title="Toggle Captions (c)"
+            >
+              <CcIcon />
+            </button>
+          )}
+        </div>
+
+        {/* Center: Info digital display */}
+        <div className="controls-group center-display">
+          <div className="display-now-playing" title={nowPlayingText}>
+            {nowPlayingText}
+          </div>
+        </div>
+
+        {/* Right: Sound, Selectors, Sync, Fullscreen, View, Hide */}
+        <div className="controls-group right-controls">
+          <div className="volume-control-group">
+            <button
+              className="control-btn volume-btn"
+              onClick={handleToggleMute}
+              disabled={!pb}
+              title="Mute / Unmute (Up/Down Arrows to adjust)"
+            >
+              {isMuted ? <VolumeMuteIcon /> : <VolumeIcon />}
+            </button>
+            <input
+              type="range"
+              min={0}
+              max={130}
+              value={Math.round(pb?.volume ?? 100)}
+              disabled={!pb}
+              className="volume-slider"
+              title="Volume (Up/Down Arrows)"
+              onChange={(e) => setVolume(Number(e.currentTarget.value))}
+            />
+          </div>
+
+          {pb && pb.sub_tracks.length > 0 && (
+            <select
+              className="track-select"
+              title="Subtitle Track"
+              value={String(pb.sid ?? 'no')}
+              onChange={(e) =>
+                setSub(e.currentTarget.value === 'no' ? 'no' : Number(e.currentTarget.value))
+              }
+            >
+              <option value="no">subs: off</option>
+              {pb.sub_tracks.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.title}
+                </option>
+              ))}
+            </select>
+          )}
+
+          {pb && pb.audio_tracks.length > 1 && (
+            <select
+              className="track-select"
+              title="Audio Track"
+              value={String(pb.aid ?? '')}
+              onChange={(e) => setAudio(Number(e.currentTarget.value))}
+            >
+              {pb.audio_tracks.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.title}
+                </option>
+              ))}
+            </select>
+          )}
+
+          <button
+            className="control-btn"
+            onClick={() => syncNow()}
+            title="Sync Now"
+          >
+            <SyncIcon />
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={() => setChromeHidden(true)}
+            title="Hide Interface (h)"
+          >
+            <HideUiIcon />
+          </button>
+
+          {playing && (
+            <button
+              className={`control-btn${viewing ? ' active' : ''}`}
+              onClick={onToggleView}
+              title="Toggle Playlist (v / Tab)"
+            >
+              <PlaylistIcon />
+            </button>
+          )}
+
+          <button
+            className="control-btn"
+            onClick={() => toggleFullscreen()}
+            title="Fullscreen (f)"
+          >
+            <FullscreenIcon />
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -732,7 +949,7 @@ function ShowHistory({
     <div className="section">
       <h3>
         history — {show.name}
-        <button className="gb" style={{ marginLeft: 12 }} onClick={onClose}>
+        <button className="gb" style={{ marginLeft: 12 }} onClick={onClose} title="Back (Escape)">
           back
         </button>
         <button className="gb" style={{ marginLeft: 8 }} onClick={onPlay}>
