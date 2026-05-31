@@ -428,6 +428,10 @@ ul.queue li {
   padding: 6px 10px;
   font-size: 13px;
   border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+ul.queue li:hover {
+  background: var(--surface);
 }
 ul.queue li .q-mark {
   width: 14px;

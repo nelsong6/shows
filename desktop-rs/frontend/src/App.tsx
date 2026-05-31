@@ -345,7 +345,7 @@ function App() {
               />
             ) : (
               <>
-                <Queue round={round} pos={pos} />
+                <Queue round={round} pos={pos} onSelectShow={setSelected} />
                 {round.length === 0 && (
                   <div className="section">
                     <h3>status</h3>
@@ -576,7 +576,7 @@ function PlaybackBar({ pb }: { pb?: Playback }) {
 
 // Flat "now playing / up next" queue. Entries are in play order; the current
 // one is marked, earlier ones are done, later ones are what's next.
-function Queue({ round, pos }: { round: Status['round']; pos: number }) {
+function Queue({ round, pos, onSelectShow }: { round: Status['round']; pos: number; onSelectShow: (showId: string) => void }) {
   const entries = round ?? [];
   if (entries.length === 0) return null;
   // Show the playlist tag only when the round interleaves more than one
@@ -588,7 +588,11 @@ function Queue({ round, pos }: { round: Status['round']; pos: number }) {
       <h3>queue</h3>
       <ul className="queue">
         {entries.map((r, i) => (
-          <li key={r.episode_id} className={i === pos ? 'now' : i < pos ? 'done' : 'next'}>
+          <li
+            key={r.episode_id}
+            className={i === pos ? 'now' : i < pos ? 'done' : 'next'}
+            onClick={() => onSelectShow(r.show_id)}
+          >
             <span className="q-mark">{i === pos ? '▶' : i < pos ? '✓' : ''}</span>
             {multiPlaylist && r.playlist && <span className="q-pl">{r.playlist}</span>}
             <span className="q-show">{r.show_name}</span>
