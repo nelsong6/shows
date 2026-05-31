@@ -744,11 +744,8 @@ function BottomControlBar({
         <div className="controls-group left-display">
           <div className="hud-display">
             <div className="hud-status">
-              <span className={`pill ${pillClass(pb?.paused ? 'initializing' : status.phase)}`} style={{ fontSize: '9px', height: '14px', padding: '0 4px', textTransform: 'uppercase' }}>
-                {pb?.paused ? 'paused' : status.phase}
-              </span>
               {status.playlist && (
-                <span className="hud-playlist" style={{ fontSize: '10px', color: 'var(--fg-dim)', marginLeft: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                <span className="hud-playlist" style={{ fontSize: '10px', color: 'var(--fg-dim)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
                   {status.playlist}
                 </span>
               )}
