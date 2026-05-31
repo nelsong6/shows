@@ -322,7 +322,6 @@ impl Runner {
     pub fn previous(&self) {
         self.player.previous();
     }
-    }
 
     /// Defer the current show's pick: bump it locally (D1-D3, not watched), push,
     /// and jump forward.

@@ -252,7 +252,6 @@ impl PlayerOps for Player {
         // first entry is a no-op rather than terminating playback.
         self.handle.command(&["playlist-prev", "weak"]);
     }
-    }
     fn time_pos(&self) -> Option<f64> {
         self.prop_f64("time-pos")
     }
