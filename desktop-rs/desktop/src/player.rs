@@ -229,6 +229,9 @@ impl PlayerOps for Player {
         // Force-advance to the next queued entry (its end-file counts like any).
         self.handle.command(&["playlist-next", "force"]);
     }
+    fn prev(&self) {
+        self.handle.command(&["playlist-prev", "force"]);
+    }
     fn time_pos(&self) -> Option<f64> {
         self.prop_f64("time-pos")
     }

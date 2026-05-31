@@ -36,7 +36,9 @@ fn to_err(e: String) -> Box<dyn std::error::Error> {
 
 /// Open a URL in the default browser (the oauth login flow).
 fn open_browser(url: &str) {
-    let _ = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn();
+    let _ = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
+        .spawn();
 }
 
 /// `%APPDATA%\shows\replica.db`.

@@ -7,15 +7,14 @@ Replaces a set of PowerShell + JSON scripts from [nelsong6/play_show](https://gi
 ## Components
 
 - **`cmd/shows-api`** — HTTP API deployed to AKS at `shows.romaine.life`. Owns playlist state, computes round ordering, records watch history. Backed by Cosmos DB on the shared `infra-cosmos-serverless` account. JWT auth via auth.romaine.life. Prometheus-instrumented.
-- **`desktop-qt/`** — PySide6 + libmpv desktop app. One composited window — mpv video renders into the Qt scene graph under a transparent React overlay. First launch opens a browser for the normal auth.romaine.life Microsoft/Google sign-in; the resulting user JWT caches at `%APPDATA%\shows\token.json`. Runs forever until you close it.
-- **`cmd/shows-migrate`** — one-shot CLI that imports the legacy `nelson.json` + per-show JSONs into the API. Deleted in a future phase when the desktop grows an in-app import surface.
+- **`desktop-rs/`** — Rust + libmpv desktop app (located at `D:\Downloads\shows\shows-desktop.exe`). One DirectComposition window — mpv video renders under a transparent WebView2/React overlay. First launch opens a browser for the normal auth.romaine.life sign-in; the resulting user JWT caches at `%APPDATA%\shows\token.json`. Runs forever until you close it.
 
 ## Architecture
 
 ```
 PC (D:\Downloads\Group-Nelson\*.mkv)
-└─ desktop-qt\ → shows-qt.exe        (PySide6 + libmpv, one composited window)
-    ├─ mpv video composited under a transparent React overlay (Qt scene graph)
+└─ desktop-rs\ → D:\Downloads\shows\shows-desktop.exe   (Rust + WebView2 + libmpv, one composition window)
+    ├─ mpv video composited under a transparent React overlay (DirectComposition)
     ├─ Microsoft/Google sign-in via auth.romaine.life (PKCE + loopback)
     │  └─ Token cached at %APPDATA%\shows\token.json
     └─ HTTPS ──► shows.romaine.life

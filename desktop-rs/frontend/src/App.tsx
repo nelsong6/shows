@@ -6,6 +6,7 @@ import {
   getStats,
   pause,
   skip,
+  prev,
   defer,
   toggleFullscreen,
   seekPercent,
@@ -111,8 +112,10 @@ function App() {
           pause();
           break;
         case 'n':
-        case 'ArrowRight':
           skip();
+          break;
+        case 'p':
+          prev();
           break;
         case 'd':
           defer();
@@ -123,9 +126,11 @@ function App() {
         case 'h':
           setChromeHidden((v) => !v);
           break;
+        case 'ArrowLeft':
         case 'j':
           seekRelative(-10);
           break;
+        case 'ArrowRight':
         case 'l':
           seekRelative(10);
           break;
@@ -443,6 +448,9 @@ function ControlBar({
       <button className="gb" onClick={() => pause()} title="space">
         pause / play
       </button>
+      <button className="gb" onClick={() => prev()} title="p — previous show">
+        prev
+      </button>
       <button className="gb" onClick={() => skip()} title="n — mark watched, next">
         skip
       </button>
@@ -469,7 +477,7 @@ function ControlBar({
       <button className="gb" onClick={() => syncNow()} title="push queued changes + pull">
         sync
       </button>
-      <span className="keys">space · n · d · f · h · j/l · ↑↓ · v · esc</span>
+      <span className="keys">space · n/p · d · f · h · j/l · ←→ · ↑↓ · v · esc</span>
     </div>
   );
 }

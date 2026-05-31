@@ -73,6 +73,7 @@ pub trait PlayerOps: Send + Sync {
     fn playlist_clear(&self);
     fn show_text(&self, text: &str, duration_ms: i64);
     fn skip(&self);
+    fn prev(&self);
     fn time_pos(&self) -> Option<f64>;
     fn seek_absolute(&self, seconds: f64);
     /// Block until `n` more end-file events arrive (or stop/shutdown).
@@ -265,6 +266,11 @@ impl Runner {
         }
     }
 
+    /// Go to the previous episode in the round playlist (without changing watched state).
+    pub fn prev(&self) {
+        self.player.prev();
+    }
+
     /// Defer the current show's pick: bump it locally (D1-D3, not watched), push,
     /// and jump forward.
     pub fn defer(&self) {
@@ -408,6 +414,7 @@ mod tests {
         fn skip(&self) {
             self.skips.fetch_add(1, Ordering::SeqCst);
         }
+        fn prev(&self) {}
         fn time_pos(&self) -> Option<f64> {
             *self.time.lock().unwrap()
         }

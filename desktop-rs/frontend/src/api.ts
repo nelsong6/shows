@@ -147,6 +147,10 @@ export function skip(): void {
   void fetch('/skip', {method: 'POST'});
 }
 
+export function prev(): void {
+  void fetch('/prev', {method: 'POST'});
+}
+
 // Re-roll the current show's next-round pick without marking it watched
 // (server contract D1-D3). The runner jumps to the next entry too.
 export function defer(): void {

@@ -131,6 +131,10 @@ impl ControlServer {
                 self.with_runner(|r| r.skip());
                 respond(request, 204, vec![], "text/plain");
             }
+            "/prev" => {
+                self.with_runner(|r| r.prev());
+                respond(request, 204, vec![], "text/plain");
+            }
             "/defer" => {
                 self.with_runner(|r| r.defer());
                 respond(request, 204, vec![], "text/plain");
