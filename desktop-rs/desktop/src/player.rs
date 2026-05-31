@@ -32,6 +32,7 @@ type PosCb = Box<dyn Fn(usize) + Send + Sync>;
 struct Shared {
     end_files: u64,
     shutdown: bool,
+    interrupted: bool,
 }
 
 pub struct Player {
@@ -50,7 +51,7 @@ impl Player {
         let player = Arc::new(Player {
             handle,
             cv: Condvar::new(),
-            shared: Mutex::new(Shared { end_files: 0, shutdown: false }),
+            shared: Mutex::new(Shared { end_files: 0, shutdown: false, interrupted: false }),
             on_natural_end: Mutex::new(None),
             on_file_loaded: Mutex::new(None),
             on_pos: Mutex::new(None),
@@ -220,6 +221,11 @@ impl PlayerOps for Player {
         self.handle.command(&["loadfile", path, mode]);
     }
     fn playlist_clear(&self) {
+        {
+            let mut s = self.shared.lock().unwrap();
+            s.interrupted = true;
+        }
+        self.cv.notify_all();
         self.handle.command(&["playlist-clear"]);
     }
     fn show_text(&self, text: &str, duration_ms: i64) {
@@ -238,8 +244,12 @@ impl PlayerOps for Player {
     fn seek_absolute(&self, seconds: f64) {
         self.handle.command(&["seek", &seconds.to_string(), "absolute"]);
     }
+    fn set_playlist_pos(&self, idx: usize) {
+        self.handle.set_property("playlist-pos", &idx.to_string());
+    }
     fn wait_for_round(&self, n: usize, stop: &StopFlag) -> Result<(), PlayerShutdown> {
         let mut s = self.shared.lock().unwrap();
+        s.interrupted = false; // Reset interrupted status before waiting
         let target = s.end_files + n as u64;
         while s.end_files < target {
             if s.shutdown {
@@ -247,6 +257,9 @@ impl PlayerOps for Player {
             }
             if stop.is_set() {
                 return Err(PlayerShutdown("runner stopped".into()));
+            }
+            if s.interrupted {
+                return Err(PlayerShutdown("interrupted".into()));
             }
             let (guard, _) = self.cv.wait_timeout(s, Duration::from_millis(500)).unwrap();
             s = guard;

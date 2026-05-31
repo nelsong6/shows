@@ -132,12 +132,12 @@ func (s *Server) handleLibrary(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "playlists query param is required (comma-separated)")
 		return
 	}
-	shows, err := s.Store.FullLibrary(r.Context(), playlists)
+	shows, queues, err := s.Store.FullLibrary(r.Context(), playlists)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"shows": shows})
+	writeJSON(w, http.StatusOK, map[string]any{"shows": shows, "queues": queues})
 }
 
 // handleSync is the client's push: a batch of locally-changed shows/episodes/

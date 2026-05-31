@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::engine::{self, Episode, Show};
-use crate::model::{LibraryEpisode, LibraryShow};
+use crate::model::{LibraryEpisode, LibraryShow, LibraryQueue};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS shows (
@@ -53,6 +53,15 @@ CREATE TABLE IF NOT EXISTS watch_history (
   dirty         INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS round_queue (
+  episode_id     TEXT PRIMARY KEY,
+  show_id        TEXT NOT NULL,
+  play_order     INTEGER NOT NULL,
+  state          TEXT NOT NULL, -- 'pending', 'playing', 'watched', 'deferred'
+  playlist       TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  dirty          INTEGER NOT NULL DEFAULT 0
+);
 ";
 
 fn now() -> String {
@@ -422,6 +431,13 @@ impl Replica {
         }
     }
 
+    pub fn merge_queues(&self, queues: &[LibraryQueue]) {
+        let conn = self.db.lock().unwrap();
+        for q in queues {
+            merge_queue_impl(&conn, q);
+        }
+    }
+
     // ── sync push: dirty rows out, then clear ────────────────────────────
     /// Count of unpushed local changes — the git "ahead" number.
     pub fn pending(&self) -> Pending {
@@ -455,6 +471,102 @@ impl Replica {
             params_from_iter(ids.iter()),
         )
         .expect("mark synced");
+    }
+
+    pub fn get_round_queue(&self) -> Vec<(String, String, i32, String, String, String, i32)> {
+        let conn = self.db.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT episode_id, show_id, play_order, state, playlist, updated_at, dirty FROM round_queue ORDER BY play_order")
+            .expect("prep get_round_queue");
+        stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i32>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, String>(5)?,
+                r.get::<_, i32>(6)?,
+            ))
+        })
+        .expect("query round_queue")
+        .filter_map(Result::ok)
+        .collect()
+    }
+
+    pub fn save_round_queue(&self, entries: &[(String, String, i32, String, String)], updated_at: &str, dirty: bool) {
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn.transaction().expect("begin save_round_queue tx");
+        tx.execute("DELETE FROM round_queue", []).expect("delete round_queue");
+        let dirty_val = if dirty { 1 } else { 0 };
+        for entry in entries {
+            tx.execute(
+                "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![entry.0, entry.1, entry.2, entry.3, entry.4, updated_at, dirty_val],
+            )
+            .expect("insert round_queue entry");
+        }
+        tx.commit().expect("commit save_round_queue tx");
+    }
+
+    pub fn update_round_entry_state(&self, episode_id: &str, state: &str, playlist: &str) {
+        let now = now();
+        let conn = self.db.lock().unwrap();
+        conn.execute(
+            "UPDATE round_queue SET state=?1, updated_at=?2, dirty=1 WHERE episode_id=?3",
+            params![state, now, episode_id],
+        )
+        .expect("update round entry state");
+        conn.execute(
+            "UPDATE round_queue SET updated_at=?1, dirty=1 WHERE playlist=?2",
+            params![now, playlist],
+        )
+        .expect("mark other playlist entries dirty");
+    }
+
+    pub fn dirty_queue(&self) -> Option<Value> {
+        let conn = self.db.lock().unwrap();
+        let dirty_pl: Option<(String, String)> = conn
+            .query_row(
+                "SELECT playlist, updated_at FROM round_queue WHERE dirty=1 LIMIT 1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+            .expect("lookup dirty playlist");
+        let (playlist, updated_at) = dirty_pl?;
+        
+        let mut stmt = conn
+            .prepare("SELECT episode_id, show_id, play_order, state FROM round_queue WHERE playlist=?1 ORDER BY play_order")
+            .expect("prep dirty_queue query");
+        let entries: Vec<Value> = stmt
+            .query_map(params![playlist], |r| {
+                Ok(json!({
+                    "episode_id": r.get::<_, String>(0)?,
+                    "show_id": r.get::<_, String>(1)?,
+                    "play_order": r.get::<_, i32>(2)?,
+                    "state": r.get::<_, String>(3)?,
+                }))
+            })
+            .expect("query dirty queue entries")
+            .filter_map(Result::ok)
+            .collect();
+        
+        Some(json!({
+            "playlist": playlist,
+            "updated_at": updated_at,
+            "entries": entries,
+        }))
+    }
+
+    pub fn mark_queue_synced(&self, playlist: &str) {
+        let conn = self.db.lock().unwrap();
+        conn.execute(
+            "UPDATE round_queue SET dirty=0 WHERE playlist=?1",
+            params![playlist],
+        )
+        .expect("mark queue synced");
     }
 
     // ── dashboard payloads (read-only, offline-capable) ──────────────────
@@ -717,6 +829,37 @@ fn merge_episode(conn: &Connection, show_id: &str, e: &LibraryEpisode) {
                 )
                 .expect("update merged episode");
             }
+        }
+    }
+}
+
+fn merge_queue_impl(conn: &Connection, q: &LibraryQueue) {
+    let local: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT COALESCE(MAX(updated_at), ''), COALESCE(SUM(dirty), 0) FROM round_queue WHERE playlist=?1",
+            params![q.playlist],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .expect("lookup local queue stats");
+        
+    let should_overwrite = match local {
+        None => true,
+        Some((cur_updated, dirty_count)) => {
+            dirty_count == 0 && newer(Some(&q.updated_at), Some(cur_updated.as_str()))
+        }
+    };
+    
+    if should_overwrite {
+        conn.execute("DELETE FROM round_queue WHERE playlist=?1", params![q.playlist])
+            .expect("delete old round_queue");
+        for entry in &q.entries {
+            conn.execute(
+                "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                params![entry.episode_id, entry.show_id, entry.play_order, entry.state, q.playlist, q.updated_at],
+            )
+            .expect("insert round_queue entry");
         }
     }
 }
@@ -1003,5 +1146,64 @@ mod tests {
         assert_eq!(pa["total"], 2);
         let pb = per.iter().find(|p| p["name"] == "B").unwrap();
         assert_eq!(pb["removed"], true);
+    }
+
+    #[test]
+    fn round_queue_helpers_and_merge() {
+        let r = Replica::new(":memory:");
+        
+        // Initially empty
+        assert!(r.get_round_queue().is_empty());
+        assert!(r.dirty_queue().is_none());
+        
+        // Save queue
+        let entries = vec![
+            ("ep1".to_string(), "show1".to_string(), 0, "pending".to_string(), "nelson".to_string()),
+            ("ep2".to_string(), "show2".to_string(), 1, "pending".to_string(), "nelson".to_string()),
+        ];
+        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", true);
+        
+        let q = r.get_round_queue();
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].0, "ep1");
+        assert_eq!(q[1].0, "ep2");
+        assert_eq!(q[0].6, 1); // dirty = 1
+        
+        // Check dirty queue serializes correctly
+        let dq = r.dirty_queue().unwrap();
+        assert_eq!(dq["playlist"], "nelson");
+        assert_eq!(dq["entries"].as_array().unwrap().len(), 2);
+        
+        // Mark synced
+        r.mark_queue_synced("nelson");
+        assert!(r.dirty_queue().is_none());
+        
+        // Update entry state
+        r.update_round_entry_state("ep1", "playing", "nelson");
+        let q2 = r.get_round_queue();
+        assert_eq!(q2[0].3, "playing");
+        assert_eq!(q2[0].6, 1); // dirty = 1 again
+        assert_eq!(q2[1].6, 1); // whole playlist queue marked dirty
+        
+        // Merge queue (should win if newer/clean)
+        use crate::model::RoundQueueEntry;
+        r.mark_queue_synced("nelson");
+        let incoming = LibraryQueue {
+            playlist: "nelson".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
+            entries: vec![
+                RoundQueueEntry {
+                    episode_id: "ep1".to_string(),
+                    show_id: "show1".to_string(),
+                    play_order: 0,
+                    state: "watched".to_string(),
+                }
+            ],
+        };
+        r.merge_queues(&[incoming]);
+        let q3 = r.get_round_queue();
+        assert_eq!(q3.len(), 1);
+        assert_eq!(q3[0].3, "watched");
+        assert_eq!(q3[0].6, 0); // dirty = 0
     }
 }

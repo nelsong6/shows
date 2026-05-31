@@ -236,20 +236,35 @@ function App() {
       .then((s) => setShows(s ?? []))
       .catch(() => {});
 
+  const refreshHistory = (showId: string) =>
+    listHistory(showId)
+      .then((h) => setHistory(h ?? []))
+      .catch(() => setHistory([]));
+
   const handlePlayShow = (showId: string) => {
     playShow(showId);
   };
 
-  const handleToggleWatched = (showId: string, watched: boolean) => {
-    if (watched) {
-      markShowWatched(showId);
-    } else {
-      markShowUnwatched(showId);
+  const handleMarkWatched = async (showId: string) => {
+    try {
+      await markShowWatched(showId);
+      await refreshShows();
+      await refreshHistory(showId);
+      getStats().then(setStats).catch(() => {});
+    } catch (e) {
+      console.error(e);
     }
-    setTimeout(() => {
-      refreshShows();
-      setSelected(null);
-    }, 250);
+  };
+
+  const handleMarkUnwatched = async (showId: string) => {
+    try {
+      await markShowUnwatched(showId);
+      await refreshShows();
+      await refreshHistory(showId);
+      getStats().then(setStats).catch(() => {});
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   // `h` hides ALL overlay chrome (control bar, scrub, dashboard) for an
@@ -349,6 +364,18 @@ function App() {
                 <div className="kpi-key">last advance</div>
                 <div className="kpi-val">{status.last_advance?.advanced_count ?? 0}</div>
               </div>
+              <div className="kpi-cell">
+                <div className="kpi-key">watched</div>
+                <div className="kpi-val">
+                  {selectedShow ? (
+                    <span className={`pill ${selectedShow.removed_at ? 'drain' : 'busy'}`}>
+                      {selectedShow.removed_at ? 'yes' : 'no'}
+                    </span>
+                  ) : (
+                    '—'
+                  )}
+                </div>
+              </div>
             </div>
 
             {selectedShow ? (
@@ -357,7 +384,8 @@ function App() {
                 events={history}
                 onClose={() => setSelected(null)}
                 onPlay={() => handlePlayShow(selectedShow.id)}
-                onToggleWatched={() => handleToggleWatched(selectedShow.id, !selectedShow.removed_at)}
+                onMarkWatched={() => handleMarkWatched(selectedShow.id)}
+                onMarkUnwatched={() => handleMarkUnwatched(selectedShow.id)}
                 onRemove={() => {
                   removeShow(selectedShow.id);
                   setSelected(null);
@@ -630,14 +658,16 @@ function ShowHistory({
   events,
   onClose,
   onPlay,
-  onToggleWatched,
+  onMarkWatched,
+  onMarkUnwatched,
   onRemove,
 }: {
   show: Show;
   events: HistoryEvent[];
   onClose: () => void;
   onPlay: () => void;
-  onToggleWatched: () => void;
+  onMarkWatched: () => void;
+  onMarkUnwatched: () => void;
   onRemove: () => void;
 }) {
   return (
@@ -650,8 +680,21 @@ function ShowHistory({
         <button className="gb" style={{ marginLeft: 8 }} onClick={onPlay}>
           play show
         </button>
-        <button className="gb" style={{ marginLeft: 8 }} onClick={onToggleWatched}>
-          {show.removed_at ? 'mark unwatched' : 'mark watched'}
+        <button
+          className="gb"
+          style={{ marginLeft: 8 }}
+          onClick={onMarkWatched}
+          disabled={!!show.removed_at}
+        >
+          mark watched
+        </button>
+        <button
+          className="gb"
+          style={{ marginLeft: 8 }}
+          onClick={onMarkUnwatched}
+          disabled={!show.removed_at}
+        >
+          mark unwatched
         </button>
         <button className="gb danger" style={{ marginLeft: 8 }} onClick={onRemove}>
           remove show

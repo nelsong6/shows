@@ -207,10 +207,38 @@ type SyncHistory struct {
 	PlayedAt     time.Time `json:"played_at"`
 }
 
+type RoundQueueEntry struct {
+	EpisodeID string `json:"episode_id"`
+	ShowID    string `json:"show_id"`
+	PlayOrder int    `json:"play_order"`
+	State     string `json:"state"`
+}
+
+type roundQueueDoc struct {
+	ID        string            `json:"id"` // queue_<playlist>
+	Playlist  string            `json:"playlist"`
+	Type      string            `json:"type"` // "round_queue"
+	UpdatedAt time.Time         `json:"updated_at"`
+	Entries   []RoundQueueEntry `json:"entries"`
+}
+
+type LibraryQueue struct {
+	Playlist  string            `json:"playlist"`
+	UpdatedAt time.Time         `json:"updated_at"`
+	Entries   []RoundQueueEntry `json:"entries"`
+}
+
+type SyncQueue struct {
+	Playlist  string            `json:"playlist"`
+	UpdatedAt time.Time         `json:"updated_at"`
+	Entries   []RoundQueueEntry `json:"entries"`
+}
+
 type SyncRequest struct {
 	Shows    []SyncShow    `json:"shows"`
 	Episodes []SyncEpisode `json:"episodes"`
 	History  []SyncHistory `json:"history"`
+	Queue    *SyncQueue    `json:"queue,omitempty"`
 }
 
 // ─── errors ────────────────────────────────────────────────────────
@@ -507,31 +535,78 @@ func (s *Store) writeShow(ctx context.Context, d *showDoc) error {
 // ─── offline sync (library pull + record push) ─────────────────────
 
 // FullLibrary returns every show (including removed/tombstoned, so the client
-// learns of tombstones) in the named playlists, episodes embedded — the
-// client's seed/reconcile pull. Queried per-playlist (partition-scoped).
-func (s *Store) FullLibrary(ctx context.Context, playlists []string) ([]LibraryShow, error) {
-	out := make([]LibraryShow, 0)
+// learns of tombstones) in the named playlists, episodes embedded, and also
+// returns the current round queues — the client's seed/reconcile pull.
+func (s *Store) FullLibrary(ctx context.Context, playlists []string) ([]LibraryShow, []LibraryQueue, error) {
+	shows := make([]LibraryShow, 0)
+	queues := make([]LibraryQueue, 0)
 	for _, pl := range playlists {
 		pager := s.shows.NewQueryItemsPager(
-			"SELECT * FROM c WHERE c.playlist = @pl",
+			"SELECT * FROM c WHERE c.playlist = @pl AND (NOT IS_DEFINED(c.type) OR c.type != 'round_queue')",
 			azcosmos.NewPartitionKeyString(pl),
 			&azcosmos.QueryOptions{QueryParameters: []azcosmos.QueryParameter{{Name: "@pl", Value: pl}}},
 		)
 		for pager.More() {
 			page, err := pager.NextPage(ctx)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			for _, raw := range page.Items {
 				var d showDoc
 				if err := json.Unmarshal(raw, &d); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
-				out = append(out, libraryShowFromDoc(d))
+				shows = append(shows, libraryShowFromDoc(d))
 			}
 		}
+
+		q, err := s.readRoundQueue(ctx, pl)
+		if err == nil {
+			queues = append(queues, LibraryQueue{
+				Playlist:  q.Playlist,
+				UpdatedAt: q.UpdatedAt,
+				Entries:   q.Entries,
+			})
+		} else if !errors.Is(err, ErrQueueNotFound) {
+			return nil, nil, err
+		}
 	}
-	return out, nil
+	return shows, queues, nil
+}
+
+var ErrQueueNotFound = errors.New("round queue not found")
+
+func (s *Store) readRoundQueue(ctx context.Context, playlist string) (*roundQueueDoc, error) {
+	resp, err := s.shows.ReadItem(ctx, azcosmos.NewPartitionKeyString(playlist), "queue_"+playlist, nil)
+	if err != nil {
+		if isCosmosNotFound(err) {
+			return nil, ErrQueueNotFound
+		}
+		return nil, err
+	}
+	var d roundQueueDoc
+	if err := json.Unmarshal(resp.Value, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
+}
+
+func (s *Store) writeRoundQueue(ctx context.Context, d *roundQueueDoc) error {
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	_, err = s.shows.ReplaceItem(ctx, azcosmos.NewPartitionKeyString(d.Playlist), d.ID, raw, nil)
+	return err
+}
+
+func (s *Store) createRoundQueue(ctx context.Context, d *roundQueueDoc) error {
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	_, err = s.shows.CreateItem(ctx, azcosmos.NewPartitionKeyString(d.Playlist), raw, nil)
+	return err
 }
 
 func libraryShowFromDoc(d showDoc) LibraryShow {
@@ -619,6 +694,31 @@ func (s *Store) SyncUpsert(ctx context.Context, req SyncRequest) error {
 			return fmt.Errorf("sync history %s: %w", h.ID, err)
 		}
 	}
+
+	if req.Queue != nil {
+		qdoc := roundQueueDoc{
+			ID:        "queue_" + req.Queue.Playlist,
+			Playlist:  req.Queue.Playlist,
+			Type:      "round_queue",
+			UpdatedAt: req.Queue.UpdatedAt,
+			Entries:   req.Queue.Entries,
+		}
+		existingQueue, err := s.readRoundQueue(ctx, req.Queue.Playlist)
+		if err == nil {
+			if qdoc.UpdatedAt.After(existingQueue.UpdatedAt) {
+				if err := s.writeRoundQueue(ctx, &qdoc); err != nil {
+					return fmt.Errorf("sync write queue %s: %w", qdoc.Playlist, err)
+				}
+			}
+		} else if errors.Is(err, ErrQueueNotFound) {
+			if err := s.createRoundQueue(ctx, &qdoc); err != nil {
+				return fmt.Errorf("sync create queue %s: %w", qdoc.Playlist, err)
+			}
+		} else {
+			return err
+		}
+	}
+
 	return nil
 }
 

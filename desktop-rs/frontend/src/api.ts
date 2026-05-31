@@ -155,12 +155,14 @@ export function playShow(showId: string): void {
   void fetch('/play-show', {method: 'POST', body: JSON.stringify({show_id: showId})});
 }
 
-export function markShowWatched(showId: string): void {
-  void fetch('/library/mark-watched', {method: 'POST', body: JSON.stringify({show_id: showId})});
+export async function markShowWatched(showId: string): Promise<void> {
+  const r = await fetch('/library/mark-watched', {method: 'POST', body: JSON.stringify({show_id: showId})});
+  if (!r.ok) throw new Error(`Failed to mark watched: ${r.status}`);
 }
 
-export function markShowUnwatched(showId: string): void {
-  void fetch('/library/mark-unwatched', {method: 'POST', body: JSON.stringify({show_id: showId})});
+export async function markShowUnwatched(showId: string): Promise<void> {
+  const r = await fetch('/library/mark-unwatched', {method: 'POST', body: JSON.stringify({show_id: showId})});
+  if (!r.ok) throw new Error(`Failed to mark unwatched: ${r.status}`);
 }
 
 // Re-roll the current show's next-round pick without marking it watched

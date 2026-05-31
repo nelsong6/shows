@@ -56,8 +56,9 @@ impl Syncer {
     /// pulls). Returns the resulting online state.
     pub fn seed(&self) -> bool {
         match self.client.get_library(&self.playlists) {
-            Ok(shows) => {
+            Ok((shows, queues)) => {
                 self.replica.merge_shows(&shows);
+                self.replica.merge_queues(&queues);
                 self.online.store(true, Ordering::Relaxed);
             }
             Err(e) => {
@@ -72,17 +73,23 @@ impl Syncer {
     /// nothing is pending. Returns the resulting online state.
     pub fn push(&self) -> bool {
         let d = self.replica.dirty();
-        if d.shows.is_empty() && d.episodes.is_empty() && d.history.is_empty() {
+        let q = self.replica.dirty_queue();
+        if d.shows.is_empty() && d.episodes.is_empty() && d.history.is_empty() && q.is_none() {
             return self.online();
         }
         let shows: Vec<Value> = d.shows.iter().map(wire).collect();
         let episodes: Vec<Value> = d.episodes.iter().map(wire).collect();
         let history: Vec<Value> = d.history.iter().map(wire).collect();
-        match self.client.post_sync(shows, episodes, history) {
+        match self.client.post_sync(shows, episodes, history, q.clone()) {
             Ok(()) => {
                 self.replica.mark_synced("shows", &ids(&d.shows));
                 self.replica.mark_synced("episodes", &ids(&d.episodes));
                 self.replica.mark_synced("watch_history", &ids(&d.history));
+                if let Some(ref q_val) = q {
+                    if let Some(pl) = q_val.get("playlist").and_then(Value::as_str) {
+                        self.replica.mark_queue_synced(pl);
+                    }
+                }
                 self.online.store(true, Ordering::Relaxed);
             }
             Err(e) => {
@@ -212,5 +219,60 @@ mod tests {
         assert!(s.push());
         assert!(s.online());
         assert_eq!(s.pending(), 0);
+    }
+
+    #[test]
+    fn seed_and_push_round_queue() {
+        let r = Arc::new(Replica::new(":memory:"));
+        let seen_sync: Arc<Mutex<Option<Value>>> = Default::default();
+        let seen_sync2 = seen_sync.clone();
+        
+        let s = syncer(r.clone(), move |_method, url, _token, body| {
+            if url.contains("/api/library") {
+                return (
+                    200,
+                    json!({
+                        "shows": lib(),
+                        "queues": [
+                            {
+                                "playlist": "nelson",
+                                "updated_at": T0,
+                                "entries": [
+                                    {"episode_id": "a", "show_id": "s1", "play_order": 0, "state": "pending"}
+                                ]
+                            }
+                        ]
+                    })
+                    .to_string(),
+                );
+            }
+            if url.contains("/api/sync") {
+                *seen_sync2.lock().unwrap() = body.cloned();
+                return (204, String::new());
+            }
+            (404, String::new())
+        });
+        
+        // Pull library -> seeds both shows and queues
+        assert!(s.seed());
+        let q = r.get_round_queue();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].0, "a");
+        assert_eq!(q[0].6, 0); // dirty = 0
+        
+        // Modify state locally -> marks queue dirty
+        r.update_round_entry_state("a", "playing", "nelson");
+        let q_dirty = r.dirty_queue();
+        assert!(q_dirty.is_some());
+        
+        // Push -> pushes dirty queue
+        assert!(s.push());
+        let body = seen_sync.lock().unwrap().clone().unwrap();
+        assert_eq!(body["queue"]["playlist"], "nelson");
+        assert_eq!(body["queue"]["entries"][0]["episode_id"], "a");
+        assert_eq!(body["queue"]["entries"][0]["state"], "playing");
+        
+        // Pushed queue marked clean
+        assert!(r.dirty_queue().is_none());
     }
 }

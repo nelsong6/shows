@@ -30,3 +30,19 @@ pub struct LibraryShow {
     #[serde(default)]
     pub episodes: Vec<LibraryEpisode>,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RoundQueueEntry {
+    pub episode_id: String,
+    pub show_id: String,
+    pub play_order: i32,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LibraryQueue {
+    pub playlist: String,
+    pub updated_at: String,
+    pub entries: Vec<RoundQueueEntry>,
+}
+

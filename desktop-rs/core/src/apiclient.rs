@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
-use crate::model::LibraryShow;
+use crate::model::{LibraryShow, LibraryQueue};
 
 pub const DEFAULT_BASE_URL: &str = "https://shows.romaine.life";
 
@@ -98,22 +98,34 @@ impl Client {
 
     /// Pull the full library (shows + embedded episodes, incl. removed) for
     /// seeding/reconciling the local replica.
-    pub fn get_library(&self, playlists: &[String]) -> Result<Vec<LibraryShow>, ApiError> {
+    pub fn get_library(&self, playlists: &[String]) -> Result<(Vec<LibraryShow>, Vec<LibraryQueue>), ApiError> {
         let q = urlencoding::encode(&playlists.join(",")).into_owned();
         let text = self.do_req("GET", &format!("/api/library?playlists={q}"), None)?;
         let data: Value = serde_json::from_str(&text).map_err(|e| ApiError(e.to_string()))?;
-        match data.get("shows") {
+        let shows = match data.get("shows") {
             Some(shows) if !shows.is_null() => {
-                serde_json::from_value(shows.clone()).map_err(|e| ApiError(e.to_string()))
+                serde_json::from_value(shows.clone()).map_err(|e| ApiError(e.to_string()))?
             }
-            _ => Ok(vec![]),
-        }
+            _ => vec![],
+        };
+        let queues = match data.get("queues") {
+            Some(queues) if !queues.is_null() => {
+                serde_json::from_value(queues.clone()).map_err(|e| ApiError(e.to_string()))?
+            }
+            _ => vec![],
+        };
+        Ok((shows, queues))
     }
 
     /// Push locally-changed records; the server upserts last-write-wins. Caller
     /// passes the replica's dirty rows (already shaped to the wire contract).
-    pub fn post_sync(&self, shows: Vec<Value>, episodes: Vec<Value>, history: Vec<Value>) -> Result<(), ApiError> {
-        let body = json!({ "shows": shows, "episodes": episodes, "history": history });
+    pub fn post_sync(&self, shows: Vec<Value>, episodes: Vec<Value>, history: Vec<Value>, queue: Option<Value>) -> Result<(), ApiError> {
+        let mut body = json!({ "shows": shows, "episodes": episodes, "history": history });
+        if let Some(q) = queue {
+            if let Some(map) = body.as_object_mut() {
+                map.insert("queue".to_string(), q);
+            }
+        }
         self.do_req("POST", "/api/sync", Some(&body))?;
         Ok(())
     }
@@ -193,14 +205,15 @@ mod tests {
             },
             None,
         );
-        let out = c.get_library(&["nelson".into(), "couple".into()]).unwrap();
+        let (out, _queues) = c.get_library(&["nelson".into(), "couple".into()]).unwrap();
         assert_eq!(out.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
     }
 
     #[test]
     fn get_library_missing_key_is_empty() {
         let c = client(|_, _, _, _| (200, "{}".into()), None);
-        assert!(c.get_library(&["nelson".into()]).unwrap().is_empty());
+        let (out, _queues) = c.get_library(&["nelson".into()]).unwrap();
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -216,7 +229,7 @@ mod tests {
             },
             None,
         );
-        c.post_sync(vec![json!({"id":"s1"})], vec![json!({"id":"e1"})], vec![json!({"id":"h1"})])
+        c.post_sync(vec![json!({"id":"s1"})], vec![json!({"id":"e1"})], vec![json!({"id":"h1"})], None)
             .unwrap();
         assert_eq!(
             seen.lock().unwrap().clone().unwrap(),
@@ -241,7 +254,7 @@ mod tests {
             },
             Some(Box::new(|| "tok2".to_string())),
         );
-        c.get_library(&["nelson".into()]).unwrap();
+        let _ = c.get_library(&["nelson".into()]).unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(c.token(), "tok2");
     }

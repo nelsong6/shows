@@ -76,6 +76,7 @@ pub trait PlayerOps: Send + Sync {
     fn prev(&self);
     fn time_pos(&self) -> Option<f64>;
     fn seek_absolute(&self, seconds: f64);
+    fn set_playlist_pos(&self, idx: usize);
     /// Block until `n` more end-file events arrive (or stop/shutdown).
     fn wait_for_round(&self, n: usize, stop: &StopFlag) -> Result<(), PlayerShutdown>;
 }
@@ -191,7 +192,11 @@ impl Runner {
 
     fn run_loop(&self) {
         while !self.stop.is_set() {
-            let round = self.fetch_round();
+            let (mut round, mut pos) = self.load_round_from_db();
+            if round.is_empty() {
+                round = self.compute_and_save_new_round();
+                pos = 0;
+            }
             if round.is_empty() {
                 log::info!("playlists drained: {}", self.playlists.join(","));
                 if let Some(cb) = &self.cb.on_drained {
@@ -203,22 +208,31 @@ impl Runner {
             {
                 let mut inner = self.inner.lock().unwrap();
                 inner.round = Some(round.clone());
-                inner.pos = 0;
+                inner.pos = pos;
                 inner.deferred.clear();
                 inner.playing = None;
                 inner.loaded_any = false;
             }
-            log::info!("round queued: {} episodes", round.len());
+            log::info!("round loaded/queued: {} episodes, starting at pos {}", round.len(), pos);
             self.queue_round(&round);
+            self.player.set_playlist_pos(pos);
             if let Some(cb) = &self.cb.on_round {
                 cb(&round);
             }
-            // Episodes advance one-by-one as they finish (on_natural_end); this
-            // just blocks until every queued entry has ended (by any reason).
-            if self.player.wait_for_round(round.len(), &self.stop).is_err() {
+            if pos < round.len() {
+                let active = &round[pos];
+                self.player.show_text(&format!("{}   ({}/{})", active.show_name, pos + 1, round.len()), 4000);
+            }
+            let remaining = round.len() - pos;
+            let wait_res = self.player.wait_for_round(remaining, &self.stop);
+            if self.stop.is_set() {
                 return;
             }
-            if self.stop.is_set() {
+            if let Err(PlayerShutdown(ref reason)) = wait_res {
+                if reason == "interrupted" {
+                    log::info!("runner wait interrupted, reloading round from db");
+                    continue;
+                }
                 return;
             }
             self.player.playlist_clear();
@@ -228,8 +242,6 @@ impl Runner {
                 inner.loaded_any
             };
             if !loaded_any {
-                // Nothing opened — the media is unreachable. Re-fetching would
-                // queue the same unplayable round and spin, so surface + park.
                 log::error!("round produced no playable media; parking until restart");
                 if let Some(cb) = &self.cb.on_error {
                     cb("no playable media — check that the show files are reachable");
@@ -282,30 +294,33 @@ impl Runner {
             return;
         }
         self.inner.lock().unwrap().deferred.insert(cur.episode_id.clone());
+        self.replica.update_round_entry_state(&cur.episode_id, "deferred", &cur.playlist);
         self.syncer.push();
         self.player.skip();
     }
 
     /// Play a specific show's episode immediately, replacing the current round playlist.
     pub fn play_episode(&self, show: &crate::engine::Show, ep: &crate::engine::Episode) {
-        let entry = RoundEntry {
-            show_id: show.id.clone(),
-            show_name: show.name.clone(),
-            episode_id: ep.id.clone(),
-            absolute_path: crate::ordering::join_path(&show.root_path, &ep.relative_path),
-            order_value: 0,
-            playlist: show.playlist.clone(),
-        };
-        {
-            let mut inner = self.inner.lock().unwrap();
-            inner.round = Some(vec![entry.clone()]);
-            inner.pos = 0;
-            inner.deferred.clear();
-            inner.playing = None;
-            inner.loaded_any = false;
+        let raw = self.replica.get_round_queue();
+        let mut entries = Vec::new();
+        for (ep_id, show_id, _play_order, state, playlist, _updated_at, _dirty) in raw {
+            if show_id != show.id {
+                entries.push((ep_id, show_id, state, playlist));
+            }
         }
+        let manual_entry = (ep.id.clone(), show.id.clone(), "pending".to_string(), show.playlist.clone());
+        entries.insert(0, manual_entry);
+        let db_entries: Vec<(String, String, i32, String, String)> = entries
+            .into_iter()
+            .enumerate()
+            .map(|(i, (ep_id, show_id, state, playlist))| {
+                (ep_id, show_id, i as i32, state, playlist)
+            })
+            .collect();
+        let now = chrono::Utc::now().to_rfc3339();
+        self.replica.save_round_queue(&db_entries, &now, true);
+        self.syncer.push();
         self.player.playlist_clear();
-        self.player.play(&entry.absolute_path, "replace");
     }
 
     // ── playback callbacks (mpv event thread; keep fast + local) ─────────
@@ -320,6 +335,7 @@ impl Runner {
             inner.playing = Some(cur.clone());
             inner.loaded_any = true;
         }
+        self.replica.update_round_entry_state(&cur.episode_id, "playing", &cur.playlist);
         if let Some(pos) = self.replica.resume_pos(&cur.episode_id) {
             if pos > 1.0 {
                 self.player.seek_absolute(pos);
@@ -357,6 +373,68 @@ impl Runner {
         }
     }
 
+    fn load_round_from_db(&self) -> (Vec<RoundEntry>, usize) {
+        let raw = self.replica.get_round_queue();
+        let mut round = Vec::new();
+        let mut first_pending_pos = None;
+        
+        for (ep_id, show_id, play_order, state, playlist, _updated_at, _dirty) in raw {
+            if !self.playlists.contains(&playlist) {
+                continue;
+            }
+            let Some(show) = self.replica.show(&show_id) else {
+                continue;
+            };
+            let Some(ep) = show.episodes.iter().find(|e| e.id == ep_id) else {
+                continue;
+            };
+            
+            let entry = RoundEntry {
+                show_id: show.id.clone(),
+                show_name: show.name.clone(),
+                episode_id: ep.id.clone(),
+                absolute_path: crate::ordering::join_path(&show.root_path, &ep.relative_path),
+                order_value: play_order as u32,
+                playlist: show.playlist.clone(),
+            };
+            
+            if state == "pending" || state == "playing" {
+                if first_pending_pos.is_none() {
+                    first_pending_pos = Some(round.len());
+                }
+            }
+            round.push(entry);
+        }
+        
+        match first_pending_pos {
+            Some(pos) => (round, pos),
+            None => (vec![], 0),
+        }
+    }
+
+    fn compute_and_save_new_round(&self) -> Vec<RoundEntry> {
+        let round = self.fetch_round();
+        if !round.is_empty() {
+            let entries: Vec<(String, String, i32, String, String)> = round
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    (
+                        r.episode_id.clone(),
+                        r.show_id.clone(),
+                        i as i32,
+                        "pending".to_string(),
+                        r.playlist.clone(),
+                    )
+                })
+                .collect();
+            let now = chrono::Utc::now().to_rfc3339();
+            self.replica.save_round_queue(&entries, &now, true);
+            self.syncer.push();
+        }
+        round
+    }
+
     // ── round build / advance (all local; sync is best-effort) ───────────
     fn fetch_round(&self) -> Vec<RoundEntry> {
         let shows = self.replica.active_shows(&self.playlists);
@@ -379,6 +457,9 @@ impl Runner {
     }
 
     fn apply_advance(&self, entries: &[RoundEntry]) -> AdvanceResult {
+        for entry in entries {
+            self.replica.update_round_entry_state(&entry.episode_id, "watched", &entry.playlist);
+        }
         let pairs: Vec<(String, String)> =
             entries.iter().map(|e| (e.show_id.clone(), e.episode_id.clone())).collect();
         let (advanced, removed_ids) = self.replica.advance(&pairs);
@@ -401,9 +482,6 @@ impl Runner {
     fn queue_round(&self, round: &[RoundEntry]) {
         for (i, ep) in round.iter().enumerate() {
             self.player.play(&ep.absolute_path, if i == 0 { "replace" } else { "append-play" });
-        }
-        if let Some(first) = round.first() {
-            self.player.show_text(&format!("{}   (1/{})", first.show_name, round.len()), 4000);
         }
     }
 }
@@ -443,6 +521,7 @@ mod tests {
         fn seek_absolute(&self, seconds: f64) {
             *self.seeked.lock().unwrap() = Some(seconds);
         }
+        fn set_playlist_pos(&self, _idx: usize) {}
         fn wait_for_round(&self, _n: usize, _stop: &StopFlag) -> Result<(), PlayerShutdown> {
             if let Some(f) = self.on_wait.lock().unwrap().as_ref() {
                 f();
@@ -739,5 +818,43 @@ mod tests {
         run.on_file_loaded();
         assert_eq!(*p.seeked.lock().unwrap(), Some(200.0));
         assert_eq!(run.inner.lock().unwrap().playing.as_ref().unwrap().episode_id, cur.episode_id);
+    }
+
+    #[test]
+    fn play_episode_injects_and_interrupts() {
+        let r = replica(&[show("s1", "nelson", &["a", "b"]), show("s2", "nelson", &["c"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        
+        // Compute and save a round in the database
+        let round = run.fetch_round();
+        assert_eq!(round.len(), 2);
+        let entries: Vec<(String, String, i32, String, String)> = round
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                (r.episode_id.clone(), r.show_id.clone(), i as i32, "pending".to_string(), r.playlist.clone())
+            })
+            .collect();
+        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", false);
+        
+        // Manual play for s1's "b" (which is not currently the first pick - "a" is first pick)
+        let s1 = r.show("s1").unwrap();
+        let ep_b = s1.episodes.iter().find(|e| e.id == "b").unwrap();
+        
+        // Run play_episode
+        run.play_episode(&s1, &ep_b);
+        
+        // Verify database: "b" must be prepended (play_order = 0), and duplicate "s1" entry "a" must be removed.
+        let q = r.get_round_queue();
+        // Since s1's "a" was removed, the queue should have "b" at 0, and "c" at 1.
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].0, "b");
+        assert_eq!(q[0].2, 0); // play_order = 0
+        assert_eq!(q[1].0, "c");
+        assert_eq!(q[1].2, 1); // play_order = 1
+        
+        // Check that dirty flag is set on the queue
+        assert_eq!(q[0].6, 1);
     }
 }

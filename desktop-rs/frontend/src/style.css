@@ -64,6 +64,19 @@ button.gb:hover {
   background: var(--surface-hover);
 }
 
+button.gb:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+button.gb:disabled::after {
+  background: var(--border-strong);
+}
+
+button.gb:disabled:hover {
+  background: var(--surface);
+}
+
 button.gb:focus-visible {
   outline: none;
 }
