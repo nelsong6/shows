@@ -698,6 +698,39 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     }
                     None => {}
                 }
+
+                // Force layout recalculation after entering or exiting fullscreen to ensure
+                // the video swapchain, visual offset, and overlay bounds are updated correctly.
+                let mut rc = RECT::default();
+                if GetClientRect(hwnd, &mut rc).is_ok() {
+                    let cw = rc.right - rc.left;
+                    let ch = rc.bottom - rc.top;
+                    if cw > 0 && ch > 0 {
+                        STATE.with(|s| {
+                            if let Some(st) = s.borrow_mut().as_mut() {
+                                let video_top = if st.is_fullscreen { 0 } else { 32 };
+                                let video_h = (ch - video_top).max(1);
+                                let _ = st.swapchain.ResizeBuffers(
+                                    0,
+                                    cw as u32,
+                                    video_h as u32,
+                                    DXGI_FORMAT_UNKNOWN,
+                                    DXGI_SWAP_CHAIN_FLAG(0),
+                                );
+                                let _ = st._bottom.SetOffsetY2(video_top as f32);
+                                let _ = st.base.SetBounds(RECT {
+                                    left: 0,
+                                    top: 0,
+                                    right: cw,
+                                    bottom: ch,
+                                });
+                                let _ = st.gl.resize(&st.device, cw, video_h);
+                                let _ = st.dcomp.Commit();
+                                render(st);
+                            }
+                        });
+                    }
+                }
                 LRESULT(0)
             }
             m if m == WM_WINDOW_MINIMIZE => {
