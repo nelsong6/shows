@@ -112,6 +112,9 @@ function App() {
   // handler can re-arm it without re-binding.
   const volOsdTimer = useRef<number | undefined>(undefined);
 
+  // Last mouse position to prevent synthetic mousemove events from waking up controls.
+  const lastMousePos = useRef({ x: -1, y: -1 });
+
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
   // n=next show, p=previous show, d=defer, f=fullscreen, h=hide all chrome,
@@ -221,7 +224,16 @@ function App() {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setControlsIdle(true), 2000);
     };
-    const onActivity = () => {
+    const onActivity = (e?: KeyboardEvent | MouseEvent) => {
+      if (e && 'key' in e && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'f' || e.key === 'F')) {
+        return;
+      }
+      if (e && 'clientX' in e && 'clientY' in e) {
+        if (e.clientX === lastMousePos.current.x && e.clientY === lastMousePos.current.y) {
+          return;
+        }
+        lastMousePos.current = { x: e.clientX, y: e.clientY };
+      }
       setControlsIdle(false);
       arm();
     };

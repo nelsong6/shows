@@ -57,5 +57,6 @@ To build and test changes locally on Windows:
    cargo build --release -p shows-desktop
    ```
 3. **Deploy for Local Testing**:
-   - Copy the newly compiled binary from `desktop-rs/target/release/shows-desktop.exe` to `D:\Downloads\shows\shows-desktop.exe`.
+   - Close the running app (it is safe to close anytime; watched progress is saved per-episode and resumes cleanly on restart).
+   - Copy the newly compiled binary from `desktop-rs/target/release/shows-desktop.exe` to `D:\Downloads\shows\shows-desktop.exe` to swap the code over.
    - *Note: Since the frontend assets are now embedded directly in the binary, you no longer need to copy the `frontend/` folder to the target directory for release testing.*

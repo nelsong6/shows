@@ -92,9 +92,10 @@
    pointer-events:none, so it can't take a cursor) claims the pointer just long
    enough for `cursor: none` to hit-test, hiding the cursor over the video. The
    next mousemove drops the class, restoring pointer-through and the cursor. */
-.overlay-root.cursor-hidden {
+.overlay-root.cursor-hidden,
+.overlay-root.cursor-hidden * {
   pointer-events: auto;
-  cursor: none;
+  cursor: none !important;
 }
 
 /* Unified bottom controls container. Glassmorphic dark gradient with high quality blur. */
@@ -262,6 +263,7 @@ table.runs th {
   font-size: 12px;
   color: var(--fg);
   animation: vol-osd-in 120ms ease-out;
+  z-index: 2000;
 }
 .vol-osd-label {
   text-transform: uppercase;
