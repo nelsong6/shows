@@ -16,10 +16,14 @@ use shows_core::sync::Syncer;
 
 use crate::player::Player;
 
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../frontend/dist"]
+struct Asset;
+
 type FullscreenCb = Box<dyn Fn() + Send + Sync>;
 
 pub struct ControlServer {
-    dist_dir: PathBuf,
+    dist_dir: Option<PathBuf>,
     playlists: Vec<String>,
     replica: Arc<Replica>,
     status: Mutex<serde_json::Map<String, Value>>,
@@ -30,7 +34,7 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    pub fn new(dist_dir: PathBuf, replica: Arc<Replica>, playlists: Vec<String>) -> Arc<ControlServer> {
+    pub fn new(dist_dir: Option<PathBuf>, replica: Arc<Replica>, playlists: Vec<String>) -> Arc<ControlServer> {
         let mut status = serde_json::Map::new();
         status.insert("phase".into(), json!("initializing"));
         status.insert("message".into(), json!("starting up"));
@@ -74,7 +78,13 @@ impl ControlServer {
     }
 
     pub fn index_html(&self) -> Vec<u8> {
-        std::fs::read(self.dist_dir.join("index.html")).unwrap_or_default()
+        if let Some(ref dist_dir) = self.dist_dir {
+            std::fs::read(dist_dir.join("index.html")).unwrap_or_default()
+        } else {
+            Asset::get("index.html")
+                .map(|file| file.data.into_owned())
+                .unwrap_or_default()
+        }
     }
 
     pub fn start(self: &Arc<Self>) -> u16 {
@@ -317,13 +327,20 @@ impl ControlServer {
 
     fn static_file(&self, rel: &str) -> Option<(Vec<u8>, String)> {
         let rel = rel.trim_start_matches('/');
-        let full = self.dist_dir.join(rel).canonicalize().ok()?;
-        let dist = self.dist_dir.canonicalize().ok()?;
-        if !full.starts_with(&dist) {
-            return None; // traversal guard
+        if let Some(ref dist_dir) = self.dist_dir {
+            let full = dist_dir.join(rel).canonicalize().ok()?;
+            let dist = dist_dir.canonicalize().ok()?;
+            if !full.starts_with(&dist) {
+                return None; // traversal guard
+            }
+            let data = std::fs::read(&full).ok()?;
+            Some((data, content_type(&full)))
+        } else {
+            let file = Asset::get(rel)?;
+            let data = file.data.into_owned();
+            let ctype = content_type(Path::new(rel));
+            Some((data, ctype))
         }
-        let data = std::fs::read(&full).ok()?;
-        Some((data, content_type(&full)))
     }
 }
 

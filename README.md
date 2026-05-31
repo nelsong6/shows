@@ -51,11 +51,11 @@ To build and test changes locally on Windows:
    cd desktop-rs/frontend
    npm run build
    ```
-2. **Build the Desktop App**:
+2. **Build the Desktop App** (which embeds the compiled React frontend):
    ```bash
    cd desktop-rs
    cargo build --release -p shows-desktop
    ```
 3. **Deploy for Local Testing**:
    - Copy the newly compiled binary from `desktop-rs/target/release/shows-desktop.exe` to `D:\Downloads\shows\shows-desktop.exe`.
-   - Copy the compiled frontend folder contents from `desktop-rs/frontend/dist/*` to `D:\Downloads\shows\frontend/` (overwriting the old assets).
+   - *Note: Since the frontend assets are now embedded directly in the binary, you no longer need to copy the `frontend/` folder to the target directory for release testing.*

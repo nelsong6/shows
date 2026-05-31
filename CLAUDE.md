@@ -69,7 +69,7 @@ Per the fleet convention:
 - **`k8s/`** — Helm chart consumed by the ArgoCD `Application` defined in `infra-bootstrap/k8s/apps/shows.yaml`. ArgoCD auto-syncs on push.
 - **`.github/workflows/build-and-deploy.yaml`** — builds `cmd/shows-api`, pushes to `romainecr.azurecr.io/shows:<sha>`, bumps `k8s/values.yaml`, commits. ArgoCD picks up the new tag.
 
-The desktop app (`desktop-rs/`) is **not** deployed to AKS. `.github/workflows/build-desktop.yaml` cargo-builds it on a Windows runner, bundles the React dist + libmpv-2.dll next to the exe, and publishes it as a GitHub Release.
+The desktop app (`desktop-rs/`) is **not** deployed to AKS. `.github/workflows/build-desktop.yaml` cargo-builds it on a Windows runner, embeds the React dist, bundles `libmpv-2.dll` next to the exe, and publishes it as a GitHub Release.
 
 ## Auth
 
@@ -142,7 +142,7 @@ To test desktop changes locally:
    `desktop-rs/target/release/shows-desktop.exe`
    To the testing location:
    `D:\Downloads\shows\shows-desktop.exe`
-2. Copy the compiled frontend folder from `desktop-rs/frontend/dist/*` to `D:\Downloads\shows\frontend/` (overwriting the old assets).
+2. *Note: Since the frontend assets are now embedded directly in the binary, you no longer need to copy the `frontend/` folder to the target directory for release testing.*
 
 ## Related
 

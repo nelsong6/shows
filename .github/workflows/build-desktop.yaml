@@ -138,22 +138,17 @@ jobs:
           SHOWS_BUILD_SHA: ${{ github.sha }}
         run: cargo build --release -p shows-desktop
 
-      # Stage the bundle: shows-desktop.exe + libmpv-2.dll + the React dist
-      # under frontend/, matching the layout main.rs's release-mode fallback
-      # expects (current_exe()/frontend/index.html).
+      # Stage the bundle: shows-desktop.exe + libmpv-2.dll
       - name: Stage release bundle
         if: steps.changes.outputs.skip != 'true'
         shell: pwsh
         run: |
           $out = "desktop-rs/dist/shows-desktop"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          New-Item -ItemType Directory -Force -Path "$out/frontend" | Out-Null
           Copy-Item desktop-rs/target/release/shows-desktop.exe "$out/" -Force
           Copy-Item desktop-rs/desktop/third_party/libmpv/libmpv-2.dll "$out/" -Force
-          Copy-Item desktop-rs/frontend/dist/* "$out/frontend/" -Recurse -Force
           if (-not (Test-Path "$out/shows-desktop.exe")) { throw "build failed: shows-desktop.exe missing" }
           if (-not (Test-Path "$out/libmpv-2.dll"))     { throw "bundle missing libmpv-2.dll" }
-          if (-not (Test-Path "$out/frontend/index.html")) { throw "bundle missing frontend/index.html" }
 
       - name: Zip bundle
         if: steps.changes.outputs.skip != 'true'

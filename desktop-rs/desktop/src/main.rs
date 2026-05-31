@@ -116,18 +116,15 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let syncer = Arc::new(Syncer::new(replica.clone(), client, playlists.clone()));
 
     // Control server serves the React overlay + the control surface. Picking
-    // a dist dir: explicit env override > in-tree source dir (dev) > next to
-    // the exe (release bundle).
+    // a dist dir: explicit env override > in-tree source dir (dev) > embedded (release).
     let dist_dir = std::env::var("SHOWS_DIST_DIR")
+        .ok()
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
+        .or_else(|| {
             if cfg!(debug_assertions) {
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../frontend/dist")
+                Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../frontend/dist"))
             } else {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|e| e.parent().map(|p| p.join("frontend")))
-                    .unwrap_or_default()
+                None
             }
         });
     let server = ControlServer::new(dist_dir, replica.clone(), playlists.clone());
