@@ -20,6 +20,14 @@ use crate::player::Player;
 #[folder = "../frontend/dist"]
 struct Asset;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAction {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+pub type WindowActionCb = Box<dyn Fn(WindowAction) + Send + Sync>;
 type FullscreenCb = Box<dyn Fn() + Send + Sync>;
 
 pub struct ControlServer {
@@ -31,6 +39,7 @@ pub struct ControlServer {
     runner: Mutex<Option<Arc<Runner>>>,
     syncer: Mutex<Option<Arc<Syncer>>>,
     on_fullscreen: Mutex<Option<FullscreenCb>>,
+    on_window_action: Mutex<Option<WindowActionCb>>,
 }
 
 impl ControlServer {
@@ -42,6 +51,8 @@ impl ControlServer {
         status.insert("round".into(), json!([]));
         status.insert("round_pos".into(), json!(0));
         status.insert("round_id".into(), json!(null));
+        status.insert("window_maximized".into(), json!(false));
+        status.insert("window_fullscreen".into(), json!(false));
         Arc::new(ControlServer {
             dist_dir,
             playlists,
@@ -51,6 +62,7 @@ impl ControlServer {
             runner: Mutex::new(None),
             syncer: Mutex::new(None),
             on_fullscreen: Mutex::new(None),
+            on_window_action: Mutex::new(None),
         })
     }
 
@@ -65,6 +77,9 @@ impl ControlServer {
     }
     pub fn set_on_fullscreen(&self, f: FullscreenCb) {
         *self.on_fullscreen.lock().unwrap() = Some(f);
+    }
+    pub fn set_on_window_action(&self, f: WindowActionCb) {
+        *self.on_window_action.lock().unwrap() = Some(f);
     }
 
     /// Merge an object's keys into the live status (what the runner pushes).
@@ -182,6 +197,24 @@ impl ControlServer {
             "/fullscreen" => {
                 if let Some(cb) = self.on_fullscreen.lock().unwrap().as_ref() {
                     cb();
+                }
+                respond(request, 204, vec![], "text/plain");
+            }
+            "/window/minimize" => {
+                if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
+                    cb(WindowAction::Minimize);
+                }
+                respond(request, 204, vec![], "text/plain");
+            }
+            "/window/maximize" => {
+                if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
+                    cb(WindowAction::Maximize);
+                }
+                respond(request, 204, vec![], "text/plain");
+            }
+            "/window/close" => {
+                if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
+                    cb(WindowAction::Close);
                 }
                 respond(request, 204, vec![], "text/plain");
             }

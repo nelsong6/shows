@@ -80,6 +80,8 @@ export type Status = {
   playback?: Playback;
   sync?: SyncState;
   update?: UpdateInfo;
+  window_maximized?: boolean;
+  window_fullscreen?: boolean;
 };
 
 export type Show = {
@@ -258,4 +260,16 @@ export function subscribeStatus(
     stopped = true;
     clearInterval(id);
   };
+}
+
+export function minimizeWindow(): void {
+  void fetch('/window/minimize', {method: 'POST'});
+}
+
+export function maximizeWindow(): void {
+  void fetch('/window/maximize', {method: 'POST'});
+}
+
+export function closeWindow(): void {
+  void fetch('/window/close', {method: 'POST'});
 }

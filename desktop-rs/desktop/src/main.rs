@@ -205,6 +205,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     server.set_runner(runner.clone());
     server.set_syncer(syncer.clone());
     server.set_on_fullscreen(compositor.fullscreen_callback());
+    server.set_on_window_action(compositor.window_action_callback());
+
+    let s_clone = server.clone();
+    compositor.set_status_callback(Box::new(move |updates| {
+        s_clone.push(updates);
+    }));
+
+    // Push initial window states
+    server.push(serde_json::json!({
+        "window_maximized": compositor.maximized(),
+        "window_fullscreen": false,
+    }));
 
     // Player events (mpv's thread) -> runner.
     {

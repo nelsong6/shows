@@ -12,6 +12,9 @@ import {
   markShowUnwatched,
   defer,
   toggleFullscreen,
+  minimizeWindow,
+  maximizeWindow,
+  closeWindow,
   seekPercent,
   seekRelative,
   setVolume,
@@ -307,7 +310,37 @@ function App() {
 
 
   return (
-    <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}`}>
+    <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}${status.window_maximized ? ' window-maximized' : ''}${status.window_fullscreen ? ' window-fullscreen' : ''}`}>
+      {!status.window_fullscreen && (
+        <div className="titlebar">
+          <div className="titlebar-logo">
+            <svg viewBox="0 0 24 24" className="titlebar-logo-svg">
+              <rect x="2" y="6" width="20" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="2"/>
+              <line x1="8" y1="20" x2="6" y2="22" stroke="currentColor" strokeWidth="2"/>
+              <line x1="16" y1="20" x2="18" y2="22" stroke="currentColor" strokeWidth="2"/>
+              <line x1="12" y1="6" x2="9" y2="2" stroke="currentColor" strokeWidth="2"/>
+              <line x1="12" y1="6" x2="15" y2="2" stroke="currentColor" strokeWidth="2"/>
+            </svg>
+            <span>shows</span>
+          </div>
+          <div className="titlebar-title">{status.playlist ? `shows — ${status.playlist}` : 'shows'}</div>
+          <div className="titlebar-actions">
+            <button className="titlebar-btn min-btn" onClick={minimizeWindow} title="Minimize">
+              <svg viewBox="0 0 10 10"><path d="M0 5h10v1H0z" fill="currentColor" /></svg>
+            </button>
+            <button className="titlebar-btn max-btn" onClick={maximizeWindow} title={status.window_maximized ? "Restore" : "Maximize"}>
+              {status.window_maximized ? (
+                <svg viewBox="0 0 10 10"><path d="M2 0v2H0v8h8V8h2V0H2zM7 9H1V3h6v6zm2-2H8V2H3V1h6v6z" fill="currentColor" /></svg>
+              ) : (
+                <svg viewBox="0 0 10 10"><path d="M0 0v10h10V0H0zm9 9H1V1h8v8z" fill="currentColor" /></svg>
+              )}
+            </button>
+            <button className="titlebar-btn close-btn" onClick={closeWindow} title="Close">
+              <svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" strokeWidth="1.2" fill="none" /></svg>
+            </button>
+          </div>
+        </div>
+      )}
       <div
         style={{
           position: 'absolute',

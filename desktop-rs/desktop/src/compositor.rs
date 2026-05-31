@@ -43,6 +43,11 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// the control-server thread when the overlay hits `POST /fullscreen` (or the
 /// `f` keybind), since window styles must be changed on the owning thread.
 const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
+const WM_WINDOW_MINIMIZE: u32 = WM_APP + 2;
+const WM_WINDOW_MAXIMIZE: u32 = WM_APP + 3;
+const WM_WINDOW_CLOSE: u32 = WM_APP + 4;
+
+type StatusUpdateCb = Box<dyn Fn(serde_json::Value) + Send + Sync>;
 
 /// Render state + COM keep-alives the window proc needs for the lifetime of the
 /// message loop.
@@ -52,6 +57,7 @@ struct State {
     dcomp: IDCompositionDevice,
     gl: GlVideo,
     quit: Option<QuitCb>,
+    status_callback: Option<StatusUpdateCb>,
     device: ID3D11Device, // needed by gl.resize on WM_SIZE
     // Cursor the windowless overlay last asked the host to show (NULL =
     // hidden). The host owns the OS cursor; WM_SETCURSOR applies this. `arrow`
@@ -220,6 +226,7 @@ impl Compositor {
                 dcomp,
                 gl,
                 quit: None,
+                status_callback: None,
                 device,
                 cursor: arrow,
                 arrow,
@@ -247,6 +254,35 @@ impl Compositor {
 
     pub fn has_saved(&self) -> bool {
         self.has_saved
+    }
+
+    pub fn maximized(&self) -> bool {
+        self.maximized
+    }
+
+    pub fn set_status_callback(&self, cb: Box<dyn Fn(serde_json::Value) + Send + Sync>) {
+        STATE.with(|s| {
+            if let Some(st) = s.borrow_mut().as_mut() {
+                st.status_callback = Some(cb);
+            }
+        });
+    }
+
+    pub fn window_action_callback(&self) -> Box<dyn Fn(crate::webserver::WindowAction) + Send + Sync> {
+        let raw = self.hwnd.0 as usize;
+        Box::new(move |action| unsafe {
+            let msg = match action {
+                crate::webserver::WindowAction::Minimize => WM_WINDOW_MINIMIZE,
+                crate::webserver::WindowAction::Maximize => WM_WINDOW_MAXIMIZE,
+                crate::webserver::WindowAction::Close => WM_WINDOW_CLOSE,
+            };
+            let _ = PostMessageW(
+                Some(HWND(raw as *mut _)),
+                msg,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        })
     }
 
     pub fn auto_fit(&self, vw: i32, vh: i32) {
@@ -321,6 +357,92 @@ fn render(s: &State) {
 extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
         match msg {
+            WM_NCCALCSIZE => {
+                if w.0 != 0 {
+                    let is_max = IsZoomed(hwnd).as_bool();
+                    if is_max {
+                        let params = &mut *(l.0 as *mut NCCALCSIZE_PARAMS);
+                        let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                        let mut mi = MONITORINFO {
+                            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                            ..Default::default()
+                        };
+                        if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                            params.rgrc[0] = mi.rcWork;
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_NCHITTEST => {
+                let is_fs = STATE.with(|s| {
+                    s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
+                });
+                if is_fs {
+                    return LRESULT(HTCLIENT as isize);
+                }
+
+                let x = (l.0 & 0xFFFF) as i16 as i32;
+                let y = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
+                
+                let mut rect = RECT::default();
+                let _ = GetWindowRect(hwnd, &mut rect);
+                
+                let is_max = IsZoomed(hwnd).as_bool();
+                
+                if is_max {
+                    let client_y = y - rect.top;
+                    if client_y >= 0 && client_y < 32 {
+                        let client_x = x - rect.left;
+                        let width = rect.right - rect.left;
+                        if client_x < width - 140 {
+                            return LRESULT(HTCAPTION as isize);
+                        }
+                    }
+                    return LRESULT(HTCLIENT as isize);
+                }
+                
+                let border_width = 6;
+                let is_top = y < rect.top + border_width;
+                let is_bottom = y >= rect.bottom - border_width;
+                let is_left = x < rect.left + border_width;
+                let is_right = x >= rect.right - border_width;
+                
+                if is_top && is_left {
+                    return LRESULT(HTTOPLEFT as isize);
+                }
+                if is_top && is_right {
+                    return LRESULT(HTTOPRIGHT as isize);
+                }
+                if is_bottom && is_left {
+                    return LRESULT(HTBOTTOMLEFT as isize);
+                }
+                if is_bottom && is_right {
+                    return LRESULT(HTBOTTOMRIGHT as isize);
+                }
+                if is_top {
+                    return LRESULT(HTTOP as isize);
+                }
+                if is_bottom {
+                    return LRESULT(HTBOTTOM as isize);
+                }
+                if is_left {
+                    return LRESULT(HTLEFT as isize);
+                }
+                if is_right {
+                    return LRESULT(HTRIGHT as isize);
+                }
+                
+                let client_y = y - rect.top;
+                if client_y >= 0 && client_y < 32 {
+                    let client_x = x - rect.left;
+                    let width = rect.right - rect.left;
+                    if client_x < width - 140 {
+                        return LRESULT(HTCAPTION as isize);
+                    }
+                }
+                LRESULT(HTCLIENT as isize)
+            }
             WM_TIMER => {
                 STATE.with(|s| {
                     if let Some(state) = s.borrow().as_ref() {
@@ -457,6 +579,14 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 if w.0 as u32 == SIZE_MINIMIZED {
                     return LRESULT(0);
                 }
+                let is_max = w.0 as u32 == SIZE_MAXIMIZED;
+                STATE.with(|s| {
+                    if let Some(st) = s.borrow().as_ref() {
+                        if let Some(cb) = &st.status_callback {
+                            cb(serde_json::json!({ "window_maximized": is_max }));
+                        }
+                    }
+                });
                 let lp = l.0 as u32;
                 let cw = (lp & 0xFFFF) as i32;
                 let ch = (lp >> 16) as i32;
@@ -507,6 +637,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         st.saved_style = saved_style;
                         st.saved_exstyle = saved_exstyle;
                         st.is_fullscreen = true;
+                        if let Some(cb) = &st.status_callback {
+                            cb(serde_json::json!({ "window_fullscreen": true }));
+                        }
                         let new_style =
                             ((saved_style as u32 & !WS_OVERLAPPEDWINDOW.0) | WS_POPUP.0) as isize;
                         let mon: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -523,6 +656,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                             restore_rect: st.saved_rect,
                         };
                         st.is_fullscreen = false;
+                        if let Some(cb) = &st.status_callback {
+                            cb(serde_json::json!({ "window_fullscreen": false }));
+                        }
                         Some(action)
                     }
                 });
@@ -554,6 +690,20 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     }
                     None => {}
                 }
+                LRESULT(0)
+            }
+            m if m == WM_WINDOW_MINIMIZE => {
+                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                LRESULT(0)
+            }
+            m if m == WM_WINDOW_MAXIMIZE => {
+                let is_max = IsZoomed(hwnd).as_bool();
+                let cmd = if is_max { SW_RESTORE } else { SW_MAXIMIZE };
+                let _ = ShowWindow(hwnd, cmd);
+                LRESULT(0)
+            }
+            m if m == WM_WINDOW_CLOSE => {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                 LRESULT(0)
             }
             WM_CLOSE => {
