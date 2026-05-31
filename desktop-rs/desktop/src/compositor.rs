@@ -107,6 +107,9 @@ impl Compositor {
         unsafe { GetClientRect(hwnd, &mut rc)? };
         let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
 
+        let video_top = 32;
+        let video_h = (ch - video_top).max(1);
+
         // D3D11 device + composition swapchain (the video layer).
         let (device, context) = create_d3d_device()?;
         let context: ID3D11DeviceContext1 = context.cast()?;
@@ -115,7 +118,7 @@ impl Compositor {
         let factory: IDXGIFactory2 = unsafe { adapter.GetParent()? };
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: cw as u32,
-            Height: ch as u32,
+            Height: video_h as u32,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
             SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -137,6 +140,7 @@ impl Compositor {
         let sc_unknown: IUnknown = swapchain.cast()?;
         unsafe {
             bottom.SetContent(&sc_unknown)?;
+            bottom.SetOffsetY2(video_top as f32)?;
             root.AddVisual(&bottom, false, None::<&IDCompositionVisual>)?;
             root.AddVisual(&web, true, &bottom)?; // overlay in front of the video
             target.SetRoot(&root)?;
@@ -216,7 +220,7 @@ impl Compositor {
         unsafe { webview.Navigate(*url.as_ref().as_pcwstr())? };
 
         // GPU video: mpv OpenGL render -> shared D3D texture (the production path).
-        let gl = GlVideo::create(&device, handle.clone(), cw, ch)
+        let gl = GlVideo::create(&device, handle.clone(), cw, video_h)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
         STATE.with(|s| {
@@ -593,20 +597,24 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 if cw > 0 && ch > 0 {
                     STATE.with(|s| {
                         if let Some(st) = s.borrow_mut().as_mut() {
+                            let video_top = if st.is_fullscreen { 0 } else { 32 };
+                            let video_h = (ch - video_top).max(1);
+
                             let _ = st.swapchain.ResizeBuffers(
                                 0,
                                 cw as u32,
-                                ch as u32,
+                                video_h as u32,
                                 DXGI_FORMAT_UNKNOWN,
                                 DXGI_SWAP_CHAIN_FLAG(0),
                             );
+                            let _ = st._bottom.SetOffsetY2(video_top as f32);
                             let _ = st.base.SetBounds(RECT {
                                 left: 0,
                                 top: 0,
                                 right: cw,
                                 bottom: ch,
                             });
-                            let _ = st.gl.resize(&st.device, cw, ch);
+                            let _ = st.gl.resize(&st.device, cw, video_h);
                             // The webview's visual-hosting output needs a Commit
                             // to publish the new bounds in the DComp tree.
                             let _ = st.dcomp.Commit();
