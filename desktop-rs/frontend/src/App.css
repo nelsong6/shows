@@ -10,13 +10,7 @@
   display: flex;
   flex-direction: column;
   pointer-events: none;
-  border: 1px solid rgba(255, 255, 255, 0.08);
   box-sizing: border-box;
-}
-
-.overlay-root.window-maximized,
-.overlay-root.window-fullscreen {
-  border: none;
 }
 
 .titlebar {
