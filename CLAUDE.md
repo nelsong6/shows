@@ -120,6 +120,30 @@ Episode paths were relative to the parent directory of the per-show JSON, joined
 
 **Desktop side:** the running app's control server (localhost, ephemeral port logged at startup) serves `GET /status` (current status) + `GET /shows` + `GET /health`, plus the overlay's `POST /pause` `/skip` `/defer` `/fullscreen` controls, and also backs the React overlay's data layer. Dev runs log to stderr; release builds (no console subsystem) append to `%APPDATA%\shows\shows.log`. The control surface lives in `desktop-rs/desktop/src/webserver.rs`.
 
+## Build & Local Testing
+
+### 1. Build the React Frontend
+Navigate to the frontend directory and compile the React production bundle:
+```bash
+cd desktop-rs/frontend
+npm run build
+```
+
+### 2. Build the Desktop App
+Navigate to the cargo workspace root and compile the release binary:
+```bash
+cd desktop-rs
+cargo build --release -p shows-desktop
+```
+
+### 3. Deploy for Local Testing
+To test desktop changes locally:
+1. Copy the newly compiled binary from:
+   `desktop-rs/target/release/shows-desktop.exe`
+   To the testing location:
+   `D:\Downloads\shows\shows-desktop.exe`
+2. Copy the compiled frontend folder from `desktop-rs/frontend/dist/*` to `D:\Downloads\shows\frontend/` (overwriting the old assets).
+
 ## Related
 
 - `nelsong6/auth` — JWT issuer; CLI device flow contract this repo's auth depends on

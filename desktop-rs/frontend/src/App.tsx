@@ -359,7 +359,11 @@ function App() {
                 <div className="kpi-val">{shows.length}</div>
               </div>
               <div className="kpi-cell">
-                <div className="kpi-key">round</div>
+                <div className="kpi-key">round id</div>
+                <div className="kpi-val">{status.round_id ?? '—'}</div>
+              </div>
+              <div className="kpi-cell">
+                <div className="kpi-key">round progress</div>
                 <div className="kpi-val">
                   {round.length ? `${pos + 1}/${round.length}` : '—'}
                 </div>

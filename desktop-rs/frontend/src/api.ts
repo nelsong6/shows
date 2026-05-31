@@ -75,6 +75,7 @@ export type Status = {
   round?: RoundEntry[];
   // Index into `round` of the entry currently playing (mpv playlist-pos).
   round_pos?: number;
+  round_id?: number | null;
   last_advance?: AdvanceResult;
   playback?: Playback;
   sync?: SyncState;

@@ -167,9 +167,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         })
                     })
                     .collect();
+                let round_id = round.iter().map(|e| e.position).min().unwrap_or(0) + 1;
                 s_round.push(serde_json::json!({
                     "phase": "playing", "message": format!("round of {}", round.len()),
-                    "round": entries, "round_pos": 0,
+                    "round": entries, "round_pos": 0, "round_id": round_id,
                 }));
             })),
             on_advance: Some(Box::new(move |res| {
@@ -187,7 +188,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 }));
             })),
             on_drained: Some(Box::new(move || {
-                s_drn.push(serde_json::json!({"phase":"drained","message":"every show finished","round":[]}));
+                s_drn.push(serde_json::json!({"phase":"drained","message":"every show finished","round":[],"round_id":null}));
             })),
             on_error: Some(Box::new(move |e| {
                 s_err.push(serde_json::json!({"phase":"error","message":e}));

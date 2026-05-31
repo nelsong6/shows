@@ -41,3 +41,21 @@ Full contract: [docs/feature-contracts/round-and-advance.md](./docs/feature-cont
 ## Setup
 
 See [CLAUDE.md](./CLAUDE.md) for the per-component layout, build process, and bootstrap order.
+
+## Local Development & Testing
+
+To build and test changes locally on Windows:
+
+1. **Build the React Frontend**:
+   ```bash
+   cd desktop-rs/frontend
+   npm run build
+   ```
+2. **Build the Desktop App**:
+   ```bash
+   cd desktop-rs
+   cargo build --release -p shows-desktop
+   ```
+3. **Deploy for Local Testing**:
+   - Copy the newly compiled binary from `desktop-rs/target/release/shows-desktop.exe` to `D:\Downloads\shows\shows-desktop.exe`.
+   - Copy the compiled frontend folder contents from `desktop-rs/frontend/dist/*` to `D:\Downloads\shows\frontend/` (overwriting the old assets).

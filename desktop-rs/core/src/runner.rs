@@ -149,6 +149,7 @@ pub struct RoundEntry {
     pub absolute_path: String,
     pub order_value: u32,
     pub playlist: String,
+    pub position: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -436,6 +437,7 @@ impl Runner {
                 absolute_path: crate::ordering::join_path(&show.root_path, &ep.relative_path),
                 order_value: play_order as u32,
                 playlist: show.playlist.clone(),
+                position: ep.position,
             };
             
             if state == "pending" || state == "playing" {
@@ -483,15 +485,25 @@ impl Runner {
             shows.iter().map(|s| (s.id.as_str(), s.name.as_str())).collect();
         let pl_by: std::collections::HashMap<&str, &str> =
             shows.iter().map(|s| (s.id.as_str(), s.playlist.as_str())).collect();
+        let mut ep_pos_by = std::collections::HashMap::new();
+        for s in &shows {
+            for ep in &s.episodes {
+                ep_pos_by.insert(ep.id.as_str(), ep.position);
+            }
+        }
         ordered
             .iter()
-            .map(|o| RoundEntry {
-                show_name: name_by.get(o.show_id.as_str()).copied().unwrap_or("").to_string(),
-                playlist: pl_by.get(o.show_id.as_str()).copied().unwrap_or("").to_string(),
-                show_id: o.show_id.clone(),
-                episode_id: o.episode_id.clone(),
-                absolute_path: o.absolute_path.clone(),
-                order_value: o.order_value,
+            .map(|o| {
+                let position = ep_pos_by.get(o.episode_id.as_str()).copied().unwrap_or(0);
+                RoundEntry {
+                    show_name: name_by.get(o.show_id.as_str()).copied().unwrap_or("").to_string(),
+                    playlist: pl_by.get(o.show_id.as_str()).copied().unwrap_or("").to_string(),
+                    show_id: o.show_id.clone(),
+                    episode_id: o.episode_id.clone(),
+                    absolute_path: o.absolute_path.clone(),
+                    order_value: o.order_value,
+                    position,
+                }
             })
             .collect()
     }

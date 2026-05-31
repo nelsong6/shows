@@ -37,6 +37,7 @@ impl ControlServer {
         status.insert("playlist".into(), json!(playlists.join(", ")));
         status.insert("round".into(), json!([]));
         status.insert("round_pos".into(), json!(0));
+        status.insert("round_id".into(), json!(null));
         Arc::new(ControlServer {
             dist_dir,
             playlists,
