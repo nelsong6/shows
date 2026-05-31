@@ -688,6 +688,7 @@ fn create_window() -> Result<(HWND, bool, bool)> {
         lpfnWndProc: Some(wndproc),
         hInstance: hinstance,
         lpszClassName: class,
+        hIcon: unsafe { LoadIconW(Some(hinstance), w!("IDI_ICON1")) }.unwrap_or(HICON(std::ptr::null_mut())),
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or(HCURSOR(std::ptr::null_mut())),
         ..Default::default()
     };
