@@ -218,14 +218,14 @@ table.runs th {
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
-/* Playback bar: scrub + time + volume + track menus, under the control bar. */
+/* Playback bar: scrub + time + volume + track menus, at the bottom of the screen. */
 .playbar {
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 6px 16px;
   background: color-mix(in srgb, var(--bg-deep) 82%, transparent);
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--border);
   pointer-events: auto;
   font-size: 12px;
   color: var(--fg-dim);
@@ -469,4 +469,10 @@ ul.queue li.done {
 }
 ul.queue li.next .q-mark {
   color: transparent;
+}
+
+/* Fixed width on show/hide list button to prevent layout shifts on label change. */
+button.gb.toggle-view-btn {
+  width: 90px;
+  justify-content: center;
 }

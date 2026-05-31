@@ -166,7 +166,7 @@ pub struct AdvanceResult {
     pub removed_shows: Vec<RemovedShow>,
 }
 
-pub type OnRound = Box<dyn Fn(&[RoundEntry]) + Send + Sync>;
+pub type OnRound = Box<dyn Fn(&[RoundEntry], usize) + Send + Sync>;
 pub type OnAdvance = Box<dyn Fn(&AdvanceResult) + Send + Sync>;
 pub type OnDrained = Box<dyn Fn() + Send + Sync>;
 pub type OnError = Box<dyn Fn(&str) + Send + Sync>;
@@ -255,7 +255,7 @@ impl Runner {
             self.queue_round(&round);
             self.player.set_playlist_pos(pos);
             if let Some(cb) = &self.cb.on_round {
-                cb(&round);
+                cb(&round, pos);
             }
             if pos < round.len() {
                 let active = &round[pos];
@@ -494,10 +494,10 @@ impl Runner {
         ordered
             .iter()
             .map(|o| {
-                let position = ep_pos_by.get(o.episode_id.as_str()).copied().unwrap_or(0);
+                let position = ep_pos_by.get(o.episode_id.as_str()).copied().expect("episode position must exist");
                 RoundEntry {
-                    show_name: name_by.get(o.show_id.as_str()).copied().unwrap_or("").to_string(),
-                    playlist: pl_by.get(o.show_id.as_str()).copied().unwrap_or("").to_string(),
+                    show_name: name_by.get(o.show_id.as_str()).copied().expect("show name must exist").to_string(),
+                    playlist: pl_by.get(o.show_id.as_str()).copied().expect("playlist must exist").to_string(),
                     show_id: o.show_id.clone(),
                     episode_id: o.episode_id.clone(),
                     absolute_path: o.absolute_path.clone(),

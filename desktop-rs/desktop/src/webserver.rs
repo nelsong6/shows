@@ -204,14 +204,25 @@ impl ControlServer {
             }
             "/sub" => {
                 let b = read_body(&mut request);
-                let sid = b.get("sid").and_then(Value::as_str).unwrap_or("no").to_string();
+                let sid = if let Some(s) = b.get("sid").and_then(Value::as_str) {
+                    s.to_string()
+                } else if let Some(n) = b.get("sid").and_then(Value::as_i64) {
+                    n.to_string()
+                } else {
+                    "no".to_string()
+                };
                 self.with_player(|p| p.set_sub(&sid));
                 respond(request, 204, vec![], "text/plain");
             }
             "/audio" => {
                 let b = read_body(&mut request);
-                if let Some(aid) = b.get("aid").and_then(Value::as_str) {
-                    self.with_player(|p| p.set_audio(aid));
+                let aid = if let Some(s) = b.get("aid").and_then(Value::as_str) {
+                    Some(s.to_string())
+                } else {
+                    b.get("aid").and_then(Value::as_i64).map(|n| n.to_string())
+                };
+                if let Some(aid) = aid {
+                    self.with_player(|p| p.set_audio(&aid));
                 }
                 respond(request, 204, vec![], "text/plain");
             }

@@ -157,7 +157,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let cb = {
         let (s_round, s_adv, s_drn, s_err) = (server.clone(), server.clone(), server.clone(), server.clone());
         Callbacks {
-            on_round: Some(Box::new(move |round| {
+            on_round: Some(Box::new(move |round, pos| {
                 let entries: Vec<_> = round
                     .iter()
                     .map(|e| {
@@ -167,10 +167,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         })
                     })
                     .collect();
-                let round_id = round.iter().map(|e| e.position).min().unwrap_or(0) + 1;
+                let round_id = round.iter().map(|e| e.position).min().expect("round is not empty") + 1;
                 s_round.push(serde_json::json!({
                     "phase": "playing", "message": format!("round of {}", round.len()),
-                    "round": entries, "round_pos": 0, "round_id": round_id,
+                    "round": entries, "round_pos": pos, "round_id": round_id,
                 }));
             })),
             on_advance: Some(Box::new(move |res| {

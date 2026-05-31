@@ -48,11 +48,25 @@ function relTime(iso: string): string {
   return `${Math.floor(days / 365)}y ago`;
 }
 
-// Index of the entry currently playing, clamped into the round.
+// Index of the entry currently playing. Throws loud errors if invariants are violated.
 function currentPos(status: Status): number {
   const n = status.round?.length ?? 0;
-  if (n === 0) return 0;
-  return Math.min(Math.max(status.round_pos ?? 0, 0), n - 1);
+  if (n === 0) {
+    if (status.phase === 'playing') {
+      throw new Error("Durable contract violation: status.round is empty or missing while playing");
+    }
+    return 0;
+  }
+  if (status.round_pos === undefined || status.round_pos === null) {
+    if (status.phase === 'playing') {
+      throw new Error("Durable contract violation: status.round_pos is missing while playing");
+    }
+    return 0;
+  }
+  if (status.round_pos < 0 || status.round_pos >= n) {
+    throw new Error(`Durable contract violation: status.round_pos (${status.round_pos}) is out of bounds (0-${n - 1})`);
+  }
+  return status.round_pos;
 }
 
 function App() {
@@ -98,7 +112,8 @@ function App() {
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
   // n=next show, p=previous show, d=defer, f=fullscreen, h=hide all chrome,
-  // ←/→ (or j/l)=seek -/+10s, ↑/↓=volume, v/Tab=dashboard, Esc=hide dashboard.
+  // c=toggle closed captions, ←/→ (or j/l)=seek -/+10s, ↑/↓=volume, v/Tab=dashboard,
+  // Esc=hide dashboard.
   useEffect(() => {
     // Flash the transient volume OSD with the new level and re-arm its
     // auto-hide. Defined inside the mount-once effect so it closes over only
@@ -129,15 +144,30 @@ function App() {
         case 'h':
           setChromeHidden((v) => !v);
           break;
+        case 'c': {
+          e.preventDefault();
+          const pb = pbRef.current;
+          if (pb && pb.sub_tracks.length > 0) {
+            const currentSid = pb.sid;
+            const isOff = currentSid === null || currentSid === undefined || currentSid === 'no';
+            if (isOff) {
+              const firstTrack = pb.sub_tracks[0];
+              if (firstTrack) {
+                setSub(firstTrack.id);
+              }
+            } else {
+              setSub('no');
+            }
+          }
+          break;
+        }
         case 'ArrowLeft':
         case 'j':
-        case 'ArrowLeft':
           e.preventDefault();
           seekRelative(-10);
           break;
         case 'ArrowRight':
         case 'l':
-        case 'ArrowRight':
           e.preventDefault();
           seekRelative(10);
           break;
@@ -280,6 +310,15 @@ function App() {
     // feedback left when the window is bare video.
     return (
       <div className={`overlay-root${cursorIdle ? ' cursor-hidden' : ''}`}>
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            pointerEvents: 'auto',
+            zIndex: -1,
+          }}
+          onDoubleClick={() => toggleFullscreen()}
+        />
         <VolumeOsd volume={volOsd} />
       </div>
     );
@@ -287,6 +326,15 @@ function App() {
 
   return (
     <div className="overlay-root">
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          pointerEvents: 'auto',
+          zIndex: -1,
+        }}
+        onDoubleClick={() => toggleFullscreen()}
+      />
       <VolumeOsd volume={volOsd} />
       {status.update?.available && status.update.latest !== updateDismissed && (
         <UpdateBanner
@@ -301,8 +349,7 @@ function App() {
         viewing={showDashboard}
         onToggleView={() => setShowDashboard((v) => !v)}
       />
-      {playing && <PlaybackBar pb={status.playback} />}
-      {dashboardVisible && (
+      {dashboardVisible ? (
         <div className={`layout${playing ? ' over-video' : ''}`}>
           <aside className="sidebar">
             <h2>{status.playlist || 'playlist'}</h2>
@@ -440,7 +487,10 @@ function App() {
             )}
           </main>
         </div>
+      ) : (
+        <div style={{ flex: 1 }} />
       )}
+      {playing && <PlaybackBar pb={status.playback} />}
     </div>
   );
 }
@@ -518,7 +568,7 @@ function ControlBar({
         fullscreen
       </button>
       {playing && (
-        <button className="gb" onClick={onToggleView} title="v / tab">
+        <button className="gb toggle-view-btn" onClick={onToggleView} title="v / tab">
           {viewing ? 'hide list' : 'show list'}
         </button>
       )}
@@ -534,7 +584,7 @@ function ControlBar({
       <button className="gb" onClick={() => syncNow()} title="push queued changes + pull">
         sync
       </button>
-      <span className="keys">space · n/p · d · f · h · j/l · ←→ · ↑↓ · v · esc</span>
+      <span className="keys">space · n/p · d · f · h · c · j/l · ←→ · ↑↓ · v · esc</span>
     </div>
   );
 }
