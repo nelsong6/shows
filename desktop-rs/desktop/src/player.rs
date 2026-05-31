@@ -224,6 +224,17 @@ impl Player {
             "aid": self.handle.get_property("aid"),
         })
     }
+
+    /// Retrieve the width and height of the currently playing video.
+    pub fn video_dimensions(&self) -> Option<(i32, i32)> {
+        let w = self.prop_f64("video-params/w")? as i32;
+        let h = self.prop_f64("video-params/h")? as i32;
+        if w > 0 && h > 0 {
+            Some((w, h))
+        } else {
+            None
+        }
+    }
 }
 
 impl PlayerOps for Player {

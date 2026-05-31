@@ -81,8 +81,8 @@ function App() {
   const [showDashboard, setShowDashboard] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
-  const [chromeHidden, setChromeHidden] = useState(false);
-  const [cursorIdle, setCursorIdle] = useState(false);
+  const [controlsIdle, setControlsIdle] = useState(false);
+  const [controlsHovered, setControlsHovered] = useState(false);
   // Volume to flash in the transient OSD, or null when hidden.
   const [volOsd, setVolOsd] = useState<number | null>(null);
 
@@ -141,9 +141,7 @@ function App() {
         case 'f':
           toggleFullscreen();
           break;
-        case 'h':
-          setChromeHidden((v) => !v);
-          break;
+
         case 'c': {
           e.preventDefault();
           const pb = pbRef.current;
@@ -202,32 +200,37 @@ function App() {
     };
   }, []);
 
-  // With all chrome hidden ('h') the window is just video — no overlay — so
-  // auto-hide the mouse cursor too after a short idle, the way a media player
-  // does, so a stray pointer doesn't mar the unobstructed view. Any movement
-  // brings it back and re-arms the timer. Scoped to the chrome-hidden state:
-  // whenever an overlay (control bar / dashboard) is visible the cursor stays.
+
+
+  // Auto-hide the control bar (and cursor) after a short mouse idle during active
+  // playback. Any movement brings it back and re-arms the timer.
   useEffect(() => {
-    if (!chromeHidden) {
-      setCursorIdle(false);
+    const playing = status.phase === 'playing';
+    if (!playing || showDashboard || controlsHovered) {
+      setControlsIdle(false);
       return;
     }
+    // Default controls to hidden when entering the playback view
+    setControlsIdle(true);
+    
     let timer: number | undefined;
     const arm = () => {
       window.clearTimeout(timer);
-      timer = window.setTimeout(() => setCursorIdle(true), 2000);
+      timer = window.setTimeout(() => setControlsIdle(true), 2000);
     };
-    const onMove = () => {
-      setCursorIdle(false);
+    const onActivity = () => {
+      setControlsIdle(false);
       arm();
     };
-    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mousemove', onActivity);
+    window.addEventListener('keydown', onActivity);
     arm();
     return () => {
       window.clearTimeout(timer);
-      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mousemove', onActivity);
+      window.removeEventListener('keydown', onActivity);
     };
-  }, [chromeHidden]);
+  }, [status.phase, showDashboard, controlsHovered]);
 
   useEffect(() => {
     // Re-fetch shows whenever the playlist gains a round or advance — a
@@ -301,31 +304,10 @@ function App() {
     }
   };
 
-  // `h` hides ALL overlay chrome (control bar, scrub, dashboard) for an
-  // unobstructed view; press `h` again to bring it back. The window key handler
-  // stays mounted while hidden, so the toggle still fires. With nothing drawn,
-  // the cursor auto-hides on idle (cursorIdle) for a fully clean frame.
-  if (chromeHidden) {
-    // Chrome is gone, but the volume OSD still flashes on ↑/↓ — it's the only
-    // feedback left when the window is bare video.
-    return (
-      <div className={`overlay-root${cursorIdle ? ' cursor-hidden' : ''}`}>
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            pointerEvents: 'auto',
-            zIndex: -1,
-          }}
-          onDoubleClick={() => toggleFullscreen()}
-        />
-        <VolumeOsd volume={volOsd} />
-      </div>
-    );
-  }
+
 
   return (
-    <div className="overlay-root">
+    <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}`}>
       <div
         style={{
           position: 'absolute',
@@ -489,7 +471,8 @@ function App() {
         playing={playing}
         viewing={showDashboard}
         onToggleView={() => setShowDashboard((v) => !v)}
-        setChromeHidden={setChromeHidden}
+        controlsIdle={controlsIdle}
+        onHoverChange={setControlsHovered}
       />
     </div>
   );
@@ -600,12 +583,7 @@ const SyncIcon = () => (
   </svg>
 );
 
-const HideUiIcon = () => (
-  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-    <line x1="1" y1="1" x2="23" y2="23" />
-  </svg>
-);
+
 
 const PlaylistIcon = () => (
   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -658,14 +636,16 @@ function BottomControlBar({
   playing,
   viewing,
   onToggleView,
-  setChromeHidden,
+  controlsIdle,
+  onHoverChange,
 }: {
   status: Status;
   pos: number;
   playing: boolean;
   viewing: boolean;
   onToggleView: () => void;
-  setChromeHidden: (hidden: boolean) => void;
+  controlsIdle: boolean;
+  onHoverChange: (hovered: boolean) => void;
 }) {
   const pb = status.playback;
   const pct = pb
@@ -709,7 +689,11 @@ function BottomControlBar({
   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
 
   return (
-    <div className="bottom-controls">
+    <div
+      className={`bottom-controls${controlsIdle ? ' hidden' : ''}`}
+      onMouseEnter={() => onHoverChange(true)}
+      onMouseLeave={() => onHoverChange(false)}
+    >
       {/* 1. Scrub Container */}
       <div className="scrub-container">
         <span className="time-display">{pb ? fmtTime(pb.time_pos) : '--:--'}</span>
@@ -867,13 +851,7 @@ function BottomControlBar({
             <SyncIcon />
           </button>
 
-          <button
-            className="control-btn"
-            onClick={() => setChromeHidden(true)}
-            title="Hide Interface (h)"
-          >
-            <HideUiIcon />
-          </button>
+
 
           {playing && (
             <button

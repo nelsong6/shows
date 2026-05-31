@@ -36,6 +36,13 @@
   padding: 12px 24px 18px 24px;
   pointer-events: auto;
   gap: 12px;
+  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.bottom-controls.hidden {
+  transform: translateY(100%);
+  opacity: 0;
+  pointer-events: none;
 }
 
 .layout {

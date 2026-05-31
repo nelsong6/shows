@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::path::PathBuf;
 
 use webview2_com::{Microsoft::Web::WebView2::Win32::*, *};
 use windows::core::*;
@@ -76,9 +77,15 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
+#[derive(Clone, Copy)]
 pub struct Compositor {
     hwnd: HWND,
+    maximized: bool,
+    has_saved: bool,
 }
+
+unsafe impl Send for Compositor {}
+unsafe impl Sync for Compositor {}
 
 impl Compositor {
     /// Build the window, GPU + DirectComposition tree, the transparent WebView2
@@ -89,7 +96,7 @@ impl Compositor {
         unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
         unsafe { SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE)? };
 
-        let hwnd = create_window()?;
+        let (hwnd, maximized, has_saved) = create_window()?;
         let mut rc = RECT::default();
         unsafe { GetClientRect(hwnd, &mut rc)? };
         let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
@@ -231,11 +238,19 @@ impl Compositor {
             });
         });
 
-        Ok(Compositor { hwnd })
+        Ok(Compositor { hwnd, maximized, has_saved })
     }
 
     pub fn hwnd(&self) -> HWND {
         self.hwnd
+    }
+
+    pub fn has_saved(&self) -> bool {
+        self.has_saved
+    }
+
+    pub fn auto_fit(&self, vw: i32, vh: i32) {
+        auto_fit_window(self.hwnd, vw, vh);
     }
 
     /// A `Send + Sync` closure that posts a fullscreen-toggle message to the UI
@@ -266,7 +281,8 @@ impl Compositor {
     /// Show the window and run the message loop (blocks until the window closes).
     pub fn run(&self) {
         unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOW);
+            let cmd = if self.maximized { SW_SHOWMAXIMIZED } else { SW_SHOW };
+            let _ = ShowWindow(self.hwnd, cmd);
             let _ = SetForegroundWindow(self.hwnd);
             if std::env::var("SHOWS_TOPMOST").is_ok() {
                 // Test-only: float above the IDE so a full-screen capture sees it.
@@ -545,6 +561,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(0)
             }
             WM_DESTROY => {
+                save_window_placement(hwnd);
                 STATE.with(|s| {
                     if let Some(state) = s.borrow().as_ref() {
                         if let Some(cb) = &state.quit {
@@ -561,7 +578,110 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
     }
 }
 
-fn create_window() -> Result<HWND> {
+fn window_config_path() -> PathBuf {
+    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
+    std::path::Path::new(&base).join("shows").join("window.json")
+}
+
+fn load_window_placement() -> Option<(i32, i32, i32, i32, bool)> {
+    let path = window_config_path();
+    if !path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let left = json.get("left")?.as_i64()? as i32;
+    let top = json.get("top")?.as_i64()? as i32;
+    let right = json.get("right")?.as_i64()? as i32;
+    let bottom = json.get("bottom")?.as_i64()? as i32;
+    let maximized = json.get("maximized")?.as_bool().unwrap_or(false);
+    if right - left > 100 && bottom - top > 100 {
+        Some((left, top, right - left, bottom - top, maximized))
+    } else {
+        None
+    }
+}
+
+fn save_window_placement(hwnd: HWND) {
+    unsafe {
+        let mut wp = WINDOWPLACEMENT {
+            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        if GetWindowPlacement(hwnd, &mut wp).is_ok() {
+            let mut maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
+            let mut rect = wp.rcNormalPosition;
+            
+            let is_fs = STATE.with(|s| {
+                s.borrow().as_ref().map(|st| (st.is_fullscreen, st.saved_rect, st.saved_style))
+            });
+            if let Some((true, saved_rect, saved_style)) = is_fs {
+                rect = saved_rect;
+                maximized = (saved_style as u32 & WS_MAXIMIZE.0) != 0;
+            }
+            
+            let json = serde_json::json!({
+                "left": rect.left,
+                "top": rect.top,
+                "right": rect.right,
+                "bottom": rect.bottom,
+                "maximized": maximized,
+            });
+            if let Ok(content) = serde_json::to_string(&json) {
+                let path = window_config_path();
+                let _ = std::fs::create_dir_all(path.parent().unwrap());
+                let _ = std::fs::write(path, content);
+            }
+        }
+    }
+}
+
+fn auto_fit_window(hwnd: HWND, vw: i32, vh: i32) {
+    unsafe {
+        let mon: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+            return;
+        }
+        let work = mi.rcWork;
+        let work_w = work.right - work.left;
+        let work_h = work.bottom - work.top;
+
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let mut rc = RECT { left: 0, top: 0, right: vw, bottom: vh };
+        let _ = AdjustWindowRectEx(&mut rc, WINDOW_STYLE(style), false, WINDOW_EX_STYLE(exstyle));
+        
+        let mut win_w = rc.right - rc.left;
+        let mut win_h = rc.bottom - rc.top;
+
+        let max_w = (work_w as f64 * 0.85) as i32;
+        let max_h = (work_h as f64 * 0.85) as i32;
+        if win_w > max_w || win_h > max_h {
+            let scale = (max_w as f64 / win_w as f64).min(max_h as f64 / win_h as f64);
+            win_w = (win_w as f64 * scale) as i32;
+            win_h = (win_h as f64 * scale) as i32;
+        }
+
+        let x = work.left + (work_w - win_w) / 2;
+        let y = work.top + (work_h - win_h) / 2;
+
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            win_w,
+            win_h,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+fn create_window() -> Result<(HWND, bool, bool)> {
     let hinstance = HINSTANCE(unsafe { GetModuleHandleW(None)? }.0);
     let class = w!("shows-desktop");
     let wc = WNDCLASSW {
@@ -572,22 +692,40 @@ fn create_window() -> Result<HWND> {
         ..Default::default()
     };
     unsafe { RegisterClassW(&wc) };
-    unsafe {
+
+    let mut x = CW_USEDEFAULT;
+    let mut y = CW_USEDEFAULT;
+    let mut w = 1280;
+    let mut h = 800;
+    let mut maximized = false;
+    let mut has_saved = false;
+
+    if let Some((saved_x, saved_y, saved_w, saved_h, saved_maximized)) = load_window_placement() {
+        x = saved_x;
+        y = saved_y;
+        w = saved_w;
+        h = saved_h;
+        maximized = saved_maximized;
+        has_saved = true;
+    }
+
+    let hwnd = unsafe {
         CreateWindowExW(
             WS_EX_NOREDIRECTIONBITMAP,
             class,
             w!("shows"),
             WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
-            1280,
-            800,
+            x,
+            y,
+            w,
+            h,
             None,
             None,
             Some(hinstance),
             None,
-        )
-    }
+        )?
+    };
+    Ok((hwnd, maximized, has_saved))
 }
 
 fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {

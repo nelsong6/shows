@@ -213,7 +213,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     {
         let r = runner.clone();
-        player.set_on_file_loaded(Box::new(move || r.on_file_loaded()));
+        let p = player.clone();
+        let c = compositor;
+        let auto_fit_needed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!c.has_saved()));
+        player.set_on_file_loaded(Box::new(move || {
+            r.on_file_loaded();
+            if auto_fit_needed.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                if let Some((vw, vh)) = p.video_dimensions() {
+                    log::info!("Auto-fitting window to video resolution: {vw}x{vh}");
+                    c.auto_fit(vw, vh);
+                }
+            }
+        }));
     }
     {
         let (r, s) = (runner.clone(), server.clone());
