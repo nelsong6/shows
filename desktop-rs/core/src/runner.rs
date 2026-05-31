@@ -257,10 +257,7 @@ impl Runner {
             if let Some(cb) = &self.cb.on_round {
                 cb(&round, pos);
             }
-            if pos < round.len() {
-                let active = &round[pos];
-                self.player.show_text(&format!("{}   ({}/{})", active.show_name, pos + 1, round.len()), 4000);
-            }
+
             let wait_res = self.player.wait_for_round_end(&self.stop);
             if self.stop.is_set() {
                 return;
