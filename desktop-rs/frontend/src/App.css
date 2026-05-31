@@ -39,10 +39,10 @@
   letter-spacing: 0.08em;
 }
 
-.titlebar-logo-svg {
-  width: 13px;
-  height: 13px;
-  color: var(--state-busy-fg);
+.titlebar-logo-img {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
 }
 
 .titlebar-title {
