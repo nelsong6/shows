@@ -224,10 +224,7 @@ function App() {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setControlsIdle(true), 2000);
     };
-    const onActivity = (e?: KeyboardEvent | MouseEvent) => {
-      if (e && 'key' in e && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'f' || e.key === 'F')) {
-        return;
-      }
+    const onActivity = (e?: MouseEvent) => {
       if (e && 'clientX' in e && 'clientY' in e) {
         if (e.clientX === lastMousePos.current.x && e.clientY === lastMousePos.current.y) {
           return;
@@ -238,12 +235,10 @@ function App() {
       arm();
     };
     window.addEventListener('mousemove', onActivity);
-    window.addEventListener('keydown', onActivity);
     arm();
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener('mousemove', onActivity);
-      window.removeEventListener('keydown', onActivity);
     };
   }, [status.phase, showDashboard, controlsHovered]);
 
