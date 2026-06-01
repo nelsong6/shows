@@ -161,6 +161,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         serde_json::json!({
                             "show_id": e.show_id, "show_name": e.show_name, "episode_id": e.episode_id,
                             "playlist": e.playlist, "order_value": e.order_value,
+                            "absolute_path": e.absolute_path,
                         })
                     })
                     .collect();

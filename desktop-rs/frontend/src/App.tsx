@@ -280,6 +280,14 @@ function App() {
   const round = status.round ?? [];
   const pos = currentPos(status);
   const selectedShow = shows.find((s) => s.id === selected) ?? null;
+  const playingShowName = round.length && pos >= 0 && pos < round.length ? round[pos].show_name : null;
+  const activeShowName = selectedShow ? selectedShow.name : playingShowName;
+  const activeShowStats = stats?.per_show.find((s) => s.name === activeShowName) ?? null;
+  const playingEpisodePath = round.length && pos >= 0 && pos < round.length ? round[pos].absolute_path : null;
+  const selectedRoundEntry = round.find((r) => r.show_id === selected);
+  const activeEpisodePath = selectedShow
+    ? (selectedRoundEntry ? selectedRoundEntry.absolute_path : null)
+    : playingEpisodePath;
 
   // Library edits mutate the replica but don't change phase/advance, so re-fetch
   // the sidebar shows explicitly after add/remove/rescan.
@@ -410,17 +418,7 @@ function App() {
           <main className="main">
             <div className="kpi">
               <div className="kpi-cell">
-                <div className="kpi-key">phase</div>
-                <div className="kpi-val">
-                  <span className={`pill ${pillClass(status.phase)}`}>{status.phase}</span>
-                </div>
-              </div>
-              <div className="kpi-cell">
-                <div className="kpi-key">active shows</div>
-                <div className="kpi-val">{shows.length}</div>
-              </div>
-              <div className="kpi-cell">
-                <div className="kpi-key">round id</div>
+                <div className="kpi-key">round #</div>
                 <div className="kpi-val">{status.round_id ?? '—'}</div>
               </div>
               <div className="kpi-cell">
@@ -430,19 +428,43 @@ function App() {
                 </div>
               </div>
               <div className="kpi-cell">
-                <div className="kpi-key">last advance</div>
-                <div className="kpi-val">{status.last_advance?.advanced_count ?? 0}</div>
-              </div>
-              <div className="kpi-cell">
                 <div className="kpi-key">watched</div>
                 <div className="kpi-val">
-                  {selectedShow ? (
-                    <span className={`pill ${selectedShow.removed_at ? 'drain' : 'busy'}`}>
-                      {selectedShow.removed_at ? 'yes' : 'no'}
+                  {activeShowStats ? (
+                    <span
+                      className={`pill ${
+                        activeShowStats.removed || activeShowStats.watched === activeShowStats.total
+                          ? 'drain'
+                          : 'busy'
+                      }`}
+                    >
+                      {activeShowStats.removed || activeShowStats.watched === activeShowStats.total
+                        ? 'yes'
+                        : activeShowName === playingShowName
+                        ? 'in progress'
+                        : 'no'}
                     </span>
                   ) : (
                     '—'
                   )}
+                </div>
+              </div>
+              <div className="kpi-cell" style={{ flex: 1, minWidth: 0 }}>
+                <div className="kpi-key">episode</div>
+                <div
+                  className="kpi-val"
+                  style={{
+                    fontSize: '14.5px',
+                    lineHeight: '24px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    color: 'var(--fg-secondary)',
+                    fontWeight: 400
+                  }}
+                  title={activeEpisodePath ? shortPath(activeEpisodePath) : undefined}
+                >
+                  {activeEpisodePath ? shortPath(activeEpisodePath) : '—'}
                 </div>
               </div>
             </div>
@@ -941,7 +963,7 @@ function Queue({ round, pos, onSelectShow }: { round: Status['round']; pos: numb
             className={i === pos ? 'now' : i < pos ? 'done' : 'next'}
             onClick={() => onSelectShow(r.show_id)}
           >
-            <span className="q-mark">{i === pos ? '▶' : i < pos ? '✓' : ''}</span>
+            <span className="q-mark">{i < pos ? '✓' : ''}</span>
             {multiPlaylist && r.playlist && <span className="q-pl">{r.playlist}</span>}
             <span className="q-show">{r.show_name}</span>
             <span className="q-ep">{shortPath(r.absolute_path)}</span>
@@ -1165,22 +1187,6 @@ function StatsPanel({ stats }: { stats: Stats | null }) {
   );
 }
 
-function pillClass(phase: Status['phase']): string {
-  switch (phase) {
-    case 'playing':
-      return 'busy';
-    case 'drained':
-      return 'drain';
-    case 'error':
-      return 'drain';
-    case 'fetching':
-    case 'auth':
-    case 'initializing':
-      return 'info';
-    default:
-      return 'info';
-  }
-}
 
 function shortPath(p: string): string {
   if (!p) return '';
