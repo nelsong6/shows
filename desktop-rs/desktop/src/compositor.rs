@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::Graphics::DirectComposition::*;
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, ScreenToClient, HMONITOR, MONITORINFO,
+    ClientToScreen, GetMonitorInfoW, MonitorFromWindow, ScreenToClient, HMONITOR, MONITORINFO,
     MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Com::*;
@@ -49,6 +49,51 @@ const WM_WINDOW_CLOSE: u32 = WM_APP + 4;
 
 type StatusUpdateCb = Box<dyn Fn(serde_json::Value) + Send + Sync>;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CursorMotion {
+    last_pos: Option<(i32, i32)>,
+}
+
+impl CursorMotion {
+    fn new(last_pos: Option<POINT>) -> Self {
+        Self { last_pos: last_pos.map(|p| (p.x, p.y)) }
+    }
+
+    fn observe(&mut self, point: POINT) -> bool {
+        let next = (point.x, point.y);
+        let moved = self.last_pos.is_some_and(|last| last != next);
+        self.last_pos = Some(next);
+        moved
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(x: i32, y: i32) -> POINT {
+        POINT { x, y }
+    }
+
+    #[test]
+    fn cursor_motion_ignores_first_unseeded_position() {
+        let mut motion = CursorMotion::new(None);
+
+        assert!(!motion.observe(point(320, 180)));
+        assert!(!motion.observe(point(320, 180)));
+    }
+
+    #[test]
+    fn cursor_motion_reveals_only_after_coordinate_change() {
+        let mut motion = CursorMotion::new(Some(point(320, 180)));
+
+        assert!(!motion.observe(point(320, 180)));
+        assert!(motion.observe(point(321, 180)));
+        assert!(!motion.observe(point(321, 180)));
+        assert!(motion.observe(point(321, 181)));
+    }
+}
+
 /// Render state + COM keep-alives the window proc needs for the lifetime of the
 /// message loop.
 struct State {
@@ -64,6 +109,7 @@ struct State {
     // is the fallback shown the instant the pointer moves while hidden.
     cursor: HCURSOR,
     arrow: HCURSOR,
+    cursor_motion: CursorMotion,
     _target: IDCompositionTarget,
     _root: IDCompositionVisual,
     _bottom: IDCompositionVisual,
@@ -234,6 +280,7 @@ impl Compositor {
                 device,
                 cursor: arrow,
                 arrow,
+                cursor_motion: CursorMotion::new(current_cursor_screen_pos()),
                 _target: target,
                 _root: root,
                 _bottom: bottom,
@@ -344,6 +391,14 @@ impl Compositor {
             }
         }
     }
+}
+
+fn current_cursor_screen_pos() -> Option<POINT> {
+    let mut point = POINT::default();
+    unsafe {
+        GetCursorPos(&mut point).ok()?;
+    }
+    Some(point)
 }
 
 fn render(s: &State) {
@@ -457,16 +512,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             }
             WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
             | WM_MBUTTONDOWN | WM_MBUTTONUP => {
+                let lp = l.0 as u32;
+                let point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
                 if msg == WM_MOUSEMOVE {
-                    // The overlay's idle auto-hide sets `cursor: none`; reveal the
-                    // pointer the instant the mouse moves rather than waiting for
-                    // the overlay's JS to clear idle and round-trip a CursorChanged.
-                    // Updating the cache too stops the very next WM_SETCURSOR from
-                    // re-hiding it mid-move. (Scoped borrow, dropped before the
-                    // SendMouseInput below, so no nested STATE borrow.)
+                    // Keyboard/media input can synthesize a same-position
+                    // WM_MOUSEMOVE. Only real pointer displacement may reveal
+                    // the cursor, otherwise idle-hidden state gets overwritten
+                    // with an arrow and never re-hides while the mouse is still.
                     STATE.with(|s| {
                         if let Some(st) = s.borrow_mut().as_mut() {
-                            if st.cursor.0.is_null() {
+                            let mut screen_point = point;
+                            let _ = ClientToScreen(hwnd, &mut screen_point);
+                            if st.cursor_motion.observe(screen_point) && st.cursor.0.is_null() {
                                 SetCursor(Some(st.arrow));
                                 st.cursor = st.arrow;
                             }
@@ -479,8 +536,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 // client coordinates; wParam's low word holds the MK_* virtual keys.
                 STATE.with(|s| {
                     if let Some(st) = s.borrow().as_ref() {
-                        let lp = l.0 as u32;
-                        let point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
                         if msg == WM_MOUSEMOVE {
                             // Re-arm WM_MOUSELEAVE so CSS :hover clears when the
                             // pointer exits the window (TrackMouseEvent is one-shot).

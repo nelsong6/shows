@@ -112,8 +112,8 @@ function App() {
   // handler can re-arm it without re-binding.
   const volOsdTimer = useRef<number | undefined>(undefined);
 
-  // Last mouse position to prevent synthetic mousemove events from waking up controls.
-  const lastMousePos = useRef({ x: -1, y: -1 });
+  // Last physical mouse position to prevent synthetic mousemove events from waking up controls.
+  const lastMousePos = useRef<{ x: number; y: number } | null>(null);
 
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
@@ -213,11 +213,13 @@ function App() {
   useEffect(() => {
     const playing = status.phase === 'playing';
     if (!playing || showDashboard || controlsHovered) {
+      lastMousePos.current = null;
       setControlsIdle(false);
       return;
     }
     // Default controls to hidden when entering the playback view
     setControlsIdle(true);
+    lastMousePos.current = null;
     
     let timer: number | undefined;
     const arm = () => {
@@ -225,11 +227,13 @@ function App() {
       timer = window.setTimeout(() => setControlsIdle(true), 2000);
     };
     const onActivity = (e?: MouseEvent) => {
-      if (e && 'clientX' in e && 'clientY' in e) {
-        if (e.clientX === lastMousePos.current.x && e.clientY === lastMousePos.current.y) {
+      if (e) {
+        const previous = lastMousePos.current;
+        const current = { x: e.screenX, y: e.screenY };
+        lastMousePos.current = current;
+        if (!previous || (current.x === previous.x && current.y === previous.y)) {
           return;
         }
-        lastMousePos.current = { x: e.clientX, y: e.clientY };
       }
       setControlsIdle(false);
       arm();
