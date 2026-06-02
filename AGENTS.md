@@ -123,28 +123,9 @@ Episode paths were relative to the parent directory of the per-show JSON, joined
 
 ## Build & Local Testing
 
-### 1. Build the React Frontend
-Navigate to the frontend directory and compile the React production bundle:
-```bash
-cd desktop-rs/frontend
-npm run build
-```
-
-### 2. Build the Desktop App
-Navigate to the cargo workspace root and compile the release binary:
-```bash
-cd desktop-rs
-cargo build --release -p shows-desktop
-```
-
-### 3. Deploy for Local Testing
-To test desktop changes locally:
-1. Close the running app (it is safe to close anytime; watched progress is saved per-episode and resumes cleanly on restart).
-2. Copy the newly compiled binary from:
-   `desktop-rs/target/release/shows-desktop.exe`
-   To the testing location:
-   `D:\Downloads\shows\shows-desktop.exe` to swap the code over.
-3. *Note: Since the frontend assets are now embedded directly in the binary, you no longer need to copy the `frontend/` folder to the target directory for release testing.*
+The canonical Windows local build and test-install workflow lives in
+[`docs/desktop-local-testing.md`](docs/desktop-local-testing.md). Go read that
+file instead of duplicating the steps here.
 
 ## Related
 

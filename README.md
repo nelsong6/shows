@@ -44,19 +44,5 @@ See [CLAUDE.md](./CLAUDE.md) for the per-component layout, build process, and bo
 
 ## Local Development & Testing
 
-To build and test changes locally on Windows:
-
-1. **Build the React Frontend**:
-   ```bash
-   cd desktop-rs/frontend
-   npm run build
-   ```
-2. **Build the Desktop App** (which embeds the compiled React frontend):
-   ```bash
-   cd desktop-rs
-   cargo build --release -p shows-desktop
-   ```
-3. **Deploy for Local Testing**:
-   - Close the running app (it is safe to close anytime; watched progress is saved per-episode and resumes cleanly on restart).
-   - Copy the newly compiled binary from `desktop-rs/target/release/shows-desktop.exe` to `D:\Downloads\shows\shows-desktop.exe` to swap the code over.
-   - *Note: Since the frontend assets are now embedded directly in the binary, you no longer need to copy the `frontend/` folder to the target directory for release testing.*
+See [docs/desktop-local-testing.md](./docs/desktop-local-testing.md) for the
+canonical Windows local build and test-install workflow.
