@@ -1196,8 +1196,15 @@ mod tests {
         assert_eq!(q2[0].6, 1); // dirty = 1 again
         assert_eq!(q2[1].6, 1); // whole playlist queue marked dirty
         
-        // Merge queue (should win if newer/clean)
+        // Merge queue (should win if newer/clean).
+        // Re-seed the local queue with a FIXED, clean timestamp so this merge
+        // comparison is deterministic and independent of the wall clock. The
+        // earlier update_round_entry_state() stamped every row with now(); once
+        // real time passed the hardcoded incoming date below, the incoming
+        // queue stopped being "newer" and the merge no longer overwrote — a
+        // time-bomb that turned this test red on 2026-06-01.
         use crate::model::RoundQueueEntry;
+        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", false);
         r.mark_queue_synced("nelson");
         let incoming = LibraryQueue {
             playlist: "nelson".to_string(),

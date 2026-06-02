@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   tofu:
-    uses: nelsong6/pipeline-templates/.github/workflows/tofu-plan-apply-template.yml@main
+    uses: romaine-life/pipeline-templates/.github/workflows/tofu-plan-apply-template.yml@main
     with:
       working_directory: tofu
       backend_storage_account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
