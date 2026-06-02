@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type WheelEventHandler } from 'react';
 import {
   subscribeStatus,
   listShows,
@@ -17,7 +17,7 @@ import {
   closeWindow,
   seekPercent,
   seekRelative,
-  setVolume,
+  setVolume as sendVolume,
   setSub,
   setAudio,
   syncNow,
@@ -32,6 +32,26 @@ import {
   type UpdateInfo,
 } from './api';
 import './App.css';
+
+const VOLUME_MIN = 0;
+const VOLUME_MAX = 130;
+const VOLUME_STEP = 5;
+
+function clampVolume(volume: number): number {
+  if (!Number.isFinite(volume)) return VOLUME_MIN;
+  return Math.max(VOLUME_MIN, Math.min(VOLUME_MAX, volume));
+}
+
+function normalizeWheelDelta(delta: number, deltaMode: number): number {
+  switch (deltaMode) {
+    case 1:
+      return delta / 3;
+    case 2:
+      return delta;
+    default:
+      return delta / 100;
+  }
+}
 
 // Qt build: the overlay composites ON TOP of live mpv video. The UI is
 // adaptive — an always-on control bar (phase + now-playing + pause/skip),
@@ -88,6 +108,7 @@ function App() {
   const [controlsHovered, setControlsHovered] = useState(false);
   // Volume to flash in the transient OSD, or null when hidden.
   const [volOsd, setVolOsd] = useState<number | null>(null);
+  const [displayVolume, setDisplayVolume] = useState(100);
 
   useEffect(() => subscribeStatus(setStatus), []);
 
@@ -101,16 +122,93 @@ function App() {
     }
   }, [status.phase, status.last_advance?.advanced_count]);
 
-  // Latest playback, mirrored to a ref so the (mount-once) key handler can read
-  // current volume for relative +/- without re-binding every poll.
+  // Latest playback, mirrored to refs so mount-once handlers can read current
+  // state without re-binding global handlers. volumeRef and displayVolume are
+  // optimistic so rapid controls are not gated by stream delivery latency.
   const pbRef = useRef<Playback | undefined>(undefined);
+  const volumeRef = useRef(100);
+  const volumeSync = useRef<{desired: number | null; inFlight: boolean}>({
+    desired: null,
+    inFlight: false,
+  });
   useEffect(() => {
     pbRef.current = status.playback;
+    if (status.playback?.volume != null) {
+      const currentVolume = clampVolume(status.playback.volume);
+      const desired = volumeSync.current.desired;
+      if (desired === null || Math.abs(currentVolume - desired) < 0.5) {
+        volumeSync.current.desired = null;
+        volumeRef.current = currentVolume;
+        setDisplayVolume(currentVolume);
+      }
+    }
   }, [status.playback]);
 
   // Auto-hide timer for the volume OSD, held in a ref so the mount-once key
   // handler can re-arm it without re-binding.
   const volOsdTimer = useRef<number | undefined>(undefined);
+  const wheelVolumeRemainder = useRef(0);
+
+  const flashVolume = useCallback((volume: number) => {
+    setVolOsd(volume);
+    window.clearTimeout(volOsdTimer.current);
+    volOsdTimer.current = window.setTimeout(() => setVolOsd(null), 1400);
+  }, []);
+
+  const pumpVolumeQueue = useCallback(() => {
+    const sync = volumeSync.current;
+    if (sync.inFlight || sync.desired === null) return;
+
+    const sent = sync.desired;
+    sync.inFlight = true;
+    void sendVolume(sent)
+      .catch(() => {
+        const current = volumeSync.current;
+        if (current.desired !== null && Math.abs(current.desired - sent) < 0.5) {
+          current.desired = null;
+        }
+      })
+      .finally(() => {
+        const current = volumeSync.current;
+        current.inFlight = false;
+        if (current.desired !== null && Math.abs(current.desired - sent) >= 0.5) {
+          pumpVolumeQueue();
+        }
+      });
+  }, []);
+
+  const requestVolume = useCallback((volume: number, flash = false) => {
+    const nextVolume = clampVolume(volume);
+    volumeRef.current = nextVolume;
+    setDisplayVolume(nextVolume);
+    volumeSync.current.desired = nextVolume;
+    pumpVolumeQueue();
+    if (flash) {
+      flashVolume(nextVolume);
+    }
+  }, [flashVolume, pumpVolumeQueue]);
+
+  const adjustVolume = useCallback((delta: number) => {
+    requestVolume(volumeRef.current + delta, true);
+  }, [requestVolume]);
+
+  const handleVolumeWheel: WheelEventHandler<HTMLDivElement> = (event) => {
+    if (!pbRef.current) return;
+
+    const rawDelta =
+      Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+    if (rawDelta === 0) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    wheelVolumeRemainder.current += normalizeWheelDelta(rawDelta, event.deltaMode);
+    const steps = Math.trunc(wheelVolumeRemainder.current);
+    if (steps === 0) return;
+
+    wheelVolumeRemainder.current -= steps;
+    adjustVolume(-steps * VOLUME_STEP);
+  };
 
   // Last physical mouse position to prevent synthetic mousemove events from waking up controls.
   const lastMousePos = useRef<{ x: number; y: number } | null>(null);
@@ -121,14 +219,6 @@ function App() {
   // c=toggle closed captions, ←/→ (or j/l)=seek -/+10s, ↑/↓=volume, v/Tab=dashboard,
   // Esc=hide dashboard.
   useEffect(() => {
-    // Flash the transient volume OSD with the new level and re-arm its
-    // auto-hide. Defined inside the mount-once effect so it closes over only
-    // the stable state setter + timer ref (no exhaustive-deps churn).
-    const flashVol = (v: number) => {
-      setVolOsd(v);
-      window.clearTimeout(volOsdTimer.current);
-      volOsdTimer.current = window.setTimeout(() => setVolOsd(null), 1400);
-    };
     const onKey = (e: KeyboardEvent) => {
       switch (e.key) {
         case ' ':
@@ -177,16 +267,12 @@ function App() {
           break;
         case 'ArrowUp': {
           e.preventDefault();
-          const nv = Math.min(130, (pbRef.current?.volume ?? 100) + 5);
-          setVolume(nv);
-          flashVol(nv);
+          adjustVolume(VOLUME_STEP);
           break;
         }
         case 'ArrowDown': {
           e.preventDefault();
-          const nv = Math.max(0, (pbRef.current?.volume ?? 100) - 5);
-          setVolume(nv);
-          flashVol(nv);
+          adjustVolume(-VOLUME_STEP);
           break;
         }
         case 'v':
@@ -204,7 +290,7 @@ function App() {
       window.removeEventListener('keydown', onKey);
       window.clearTimeout(volOsdTimer.current);
     };
-  }, []);
+  }, [adjustVolume]);
 
 
 
@@ -249,8 +335,7 @@ function App() {
   useEffect(() => {
     // Re-fetch shows whenever the playlist gains a round or advance — a
     // finished show drops out of the active list after advance. Keyed on
-    // advanced_count (a primitive) so polling's fresh Status objects don't
-    // retrigger this every tick.
+    // advanced_count so unrelated status stream updates don't reload the list.
     if (status.phase === 'playing' || status.phase === 'fetching' || status.phase === 'drained') {
       listShows()
         .then((s) => setShows(s ?? []))
@@ -362,6 +447,7 @@ function App() {
           zIndex: -1,
         }}
         onDoubleClick={() => toggleFullscreen()}
+        onWheel={handleVolumeWheel}
       />
       <VolumeOsd volume={volOsd} />
       {status.update?.available && status.update.latest !== updateDismissed && (
@@ -523,7 +609,11 @@ function App() {
           </main>
         </div>
       ) : (
-        <div style={{ flex: 1 }} />
+        <div
+          style={{ flex: 1 }}
+          onDoubleClick={() => toggleFullscreen()}
+          onWheel={handleVolumeWheel}
+        />
       )}
       <BottomControlBar
         status={status}
@@ -533,6 +623,9 @@ function App() {
         onToggleView={() => setShowDashboard((v) => !v)}
         controlsIdle={controlsIdle}
         onHoverChange={setControlsHovered}
+        volume={displayVolume}
+        onVolumeChange={requestVolume}
+        onVolumeWheel={handleVolumeWheel}
       />
     </div>
   );
@@ -698,6 +791,9 @@ function BottomControlBar({
   onToggleView,
   controlsIdle,
   onHoverChange,
+  volume,
+  onVolumeChange,
+  onVolumeWheel,
 }: {
   status: Status;
   pos: number;
@@ -706,6 +802,9 @@ function BottomControlBar({
   onToggleView: () => void;
   controlsIdle: boolean;
   onHoverChange: (hovered: boolean) => void;
+  volume: number;
+  onVolumeChange: (volume: number, flash?: boolean) => void;
+  onVolumeWheel: WheelEventHandler<HTMLDivElement>;
 }) {
   const pb = status.playback;
   const pct = pb
@@ -716,12 +815,12 @@ function BottomControlBar({
 
   const handleToggleMute = () => {
     if (!pb) return;
-    const currentVol = pb.volume ?? 100;
+    const currentVol = volume;
     if (currentVol > 0) {
       setLastVolume(currentVol);
-      setVolume(0);
+      onVolumeChange(0, true);
     } else {
-      setVolume(lastVolume);
+      onVolumeChange(lastVolume, true);
     }
   };
 
@@ -745,7 +844,7 @@ function BottomControlBar({
     ? `${round[pos].show_name}   (${pos + 1}/${round.length})`
     : status.message || '—';
 
-  const isMuted = pb ? (pb.volume ?? 100) === 0 : false;
+  const isMuted = pb ? volume === 0 : false;
   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
 
   return (
@@ -753,6 +852,7 @@ function BottomControlBar({
       className={`bottom-controls${controlsIdle ? ' hidden' : ''}`}
       onMouseEnter={() => onHoverChange(true)}
       onMouseLeave={() => onHoverChange(false)}
+      onWheel={onVolumeWheel}
     >
       {/* 1. Scrub Container */}
       <div className="scrub-container">
@@ -863,7 +963,7 @@ function BottomControlBar({
               className="control-btn volume-btn"
               onClick={handleToggleMute}
               disabled={!pb}
-              title="Mute / Unmute (Up/Down Arrows to adjust)"
+              title="Mute / Unmute (Up/Down Arrows or mouse wheel to adjust)"
             >
               {isMuted ? <VolumeMuteIcon /> : <VolumeIcon />}
             </button>
@@ -871,11 +971,11 @@ function BottomControlBar({
               type="range"
               min={0}
               max={130}
-              value={Math.round(pb?.volume ?? 100)}
+              value={Math.round(volume)}
               disabled={!pb}
               className="volume-slider"
-              title="Volume (Up/Down Arrows)"
-              onChange={(e) => setVolume(Number(e.currentTarget.value))}
+              title="Volume (Up/Down Arrows or mouse wheel)"
+              onChange={(e) => onVolumeChange(Number(e.currentTarget.value))}
             />
           </div>
 

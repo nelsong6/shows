@@ -16,8 +16,8 @@ mod mpv;
 mod player;
 mod webserver;
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, mpsc::sync_channel};
+use std::time::{Duration, Instant};
 
 use shows_core::apiclient::{Client, RefreshFn};
 use shows_core::oauth;
@@ -29,6 +29,69 @@ use shows_core::sync::Syncer;
 use compositor::Compositor;
 use player::Player;
 use webserver::ControlServer;
+
+struct NotifyingSyncer {
+    inner: Arc<Syncer>,
+    notify: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl NotifyingSyncer {
+    fn new(inner: Arc<Syncer>, notify: Arc<dyn Fn() + Send + Sync>) -> NotifyingSyncer {
+        NotifyingSyncer { inner, notify }
+    }
+
+    fn notify(&self) {
+        (self.notify)();
+    }
+}
+
+impl SyncOps for NotifyingSyncer {
+    fn seed(&self) -> bool {
+        let online = self.inner.seed();
+        self.notify();
+        online
+    }
+
+    fn push(&self) -> bool {
+        let online = self.inner.push();
+        self.notify();
+        online
+    }
+
+    fn pending(&self) -> i64 {
+        self.inner.pending()
+    }
+
+    fn online(&self) -> bool {
+        self.inner.online()
+    }
+}
+
+fn start_status_waker(
+    server: Arc<ControlServer>,
+    min_interval: Duration,
+) -> Arc<dyn Fn() + Send + Sync> {
+    let (tx, rx) = sync_channel::<()>(1);
+    std::thread::Builder::new()
+        .name("status-waker".into())
+        .spawn(move || {
+            let mut last_emit = Instant::now() - min_interval;
+            while rx.recv().is_ok() {
+                let elapsed = last_emit.elapsed();
+                if elapsed < min_interval {
+                    std::thread::sleep(min_interval - elapsed);
+                }
+                while rx.try_recv().is_ok() {}
+                server.notify();
+                last_emit = Instant::now();
+            }
+        })
+        .expect("spawn status waker");
+
+    Arc::new(move || {
+        let _ = tx.try_send(());
+    })
+}
 
 fn to_err(e: String) -> Box<dyn std::error::Error> {
     e.into()
@@ -65,7 +128,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     if cfg!(not(debug_assertions)) {
-        if let Ok(file) = std::fs::OpenOptions::new().create(true).append(true).open(log_path()) {
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path())
+        {
             builder.target(env_logger::Target::Pipe(Box::new(file)));
         }
     }
@@ -75,13 +142,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // server and silently drop watch updates; refuse and focus the running one.
     // (Kernel cleans up the mutex on process exit; no CloseHandle needed.)
     {
-        use windows::core::w;
-        use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
         use windows::Win32::System::Threading::CreateMutexW;
         use windows::Win32::UI::WindowsAndMessaging::{
-            FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+            FindWindowW, SW_RESTORE, SetForegroundWindow, ShowWindow,
         };
-        let _singleton = unsafe { CreateMutexW(None, false, w!("Local\\shows-desktop-singleton"))? };
+        use windows::core::w;
+        let _singleton =
+            unsafe { CreateMutexW(None, false, w!("Local\\shows-desktop-singleton"))? };
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             log::warn!("another shows-desktop is already running — focusing it and exiting");
             if let Ok(existing) = unsafe { FindWindowW(w!("shows-desktop"), None) } {
@@ -94,18 +162,29 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let playlists = parse_playlists(&std::env::var("SHOWS_PLAYLISTS").unwrap_or_default(), &["nelson"]);
-    let base_url = std::env::var("SHOWS_BASE_URL").unwrap_or_else(|_| shows_core::apiclient::DEFAULT_BASE_URL.to_string());
-    let auth_base = std::env::var("SHOWS_AUTH_BASE").unwrap_or_else(|_| oauth::DEFAULT_AUTH_BASE_URL.to_string());
+    let playlists = parse_playlists(
+        &std::env::var("SHOWS_PLAYLISTS").unwrap_or_default(),
+        &["nelson"],
+    );
+    let base_url = std::env::var("SHOWS_BASE_URL")
+        .unwrap_or_else(|_| shows_core::apiclient::DEFAULT_BASE_URL.to_string());
+    let auth_base = std::env::var("SHOWS_AUTH_BASE")
+        .unwrap_or_else(|_| oauth::DEFAULT_AUTH_BASE_URL.to_string());
 
     // Token: a SHOWS_TOKEN env override (offline / testing) or the PKCE login flow.
     let token = match std::env::var("SHOWS_TOKEN") {
         Ok(t) if !t.is_empty() => t,
-        _ => oauth::ensure_token(&auth_base, open_browser).map_err(to_err)?.token,
+        _ => {
+            oauth::ensure_token(&auth_base, open_browser)
+                .map_err(to_err)?
+                .token
+        }
     };
     let auth_base2 = auth_base.clone();
     let refresh: RefreshFn = Box::new(move || {
-        oauth::ensure_token(&auth_base2, open_browser).map(|t| t.token).unwrap_or_default()
+        oauth::ensure_token(&auth_base2, open_browser)
+            .map(|t| t.token)
+            .unwrap_or_default()
     });
     let client = Arc::new(Client::new(token, base_url, Some(refresh)));
 
@@ -152,7 +231,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Runner pushes phase/round/advance into the control server's status.
     let stop = StopFlag::new();
     let cb = {
-        let (s_round, s_adv, s_drn, s_err) = (server.clone(), server.clone(), server.clone(), server.clone());
+        let (s_round, s_adv, s_drn, s_err) = (
+            server.clone(),
+            server.clone(),
+            server.clone(),
+            server.clone(),
+        );
         Callbacks {
             on_round: Some(Box::new(move |round, pos| {
                 let entries: Vec<_> = round
@@ -165,7 +249,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         })
                     })
                     .collect();
-                let round_id = round.iter().map(|e| e.position).min().expect("round is not empty") + 1;
+                let round_id = round
+                    .iter()
+                    .map(|e| e.position)
+                    .min()
+                    .expect("round is not empty")
+                    + 1;
                 s_round.push(serde_json::json!({
                     "phase": "playing", "message": format!("round of {}", round.len()),
                     "round": entries, "round_pos": pos, "round_id": round_id,
@@ -193,9 +282,13 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             })),
         }
     };
+    let runner_syncer = Arc::new(NotifyingSyncer::new(syncer.clone(), {
+        let s = server.clone();
+        Arc::new(move || s.notify())
+    }));
     let runner = Arc::new(Runner::new(
         replica.clone(),
-        syncer.clone() as Arc<dyn SyncOps>,
+        runner_syncer as Arc<dyn SyncOps>,
         player.clone() as Arc<dyn PlayerOps>,
         playlists.clone(),
         stop.clone(),
@@ -228,7 +321,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let r = runner.clone();
         let p = player.clone();
         let c = compositor;
-        let auto_fit_needed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!c.has_saved()));
+        let auto_fit_needed =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!c.has_saved()));
         player.set_on_file_loaded(Box::new(move || {
             r.on_file_loaded();
             if auto_fit_needed.swap(false, std::sync::atomic::Ordering::Relaxed) {
@@ -246,11 +340,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             s.push(serde_json::json!({"round_pos": i}));
         }));
     }
+    {
+        let wake_status = start_status_waker(server.clone(), Duration::from_millis(100));
+        player.set_on_playback_change(Box::new(move || wake_status()));
+    }
 
     // Round-robin runner.
     {
         let r = runner.clone();
-        std::thread::Builder::new().name("runner".into()).spawn(move || r.run()).expect("spawn runner");
+        std::thread::Builder::new()
+            .name("runner".into())
+            .spawn(move || r.run())
+            .expect("spawn runner");
     }
     // Resume-saver: persist position periodically so a crash keeps your place.
     {

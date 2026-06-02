@@ -1,13 +1,17 @@
 //! Localhost control server backing the web overlay. Serves the built React
-//! bundle and a same-origin control surface: the overlay polls `/status`,
-//! `/shows`, `/stats`, `/history`, and POSTs `/pause` `/skip` `/prev` `/defer`
-//! `/seek` `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/library/*`.
+//! bundle and a same-origin control surface: the overlay subscribes to
+//! `/status/stream`, can read a one-shot `/status` snapshot, reads `/shows`,
+//! `/stats`, `/history`, and POSTs `/pause` `/skip` `/prev` `/defer` `/seek`
+//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/library/*`.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::Duration;
 
-use serde_json::{json, Value};
-use tiny_http::{Header, Method, Request, Response, Server};
+use serde_json::{Value, json};
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use shows_core::replica::Replica;
 use shows_core::runner::Runner;
@@ -35,6 +39,8 @@ pub struct ControlServer {
     playlists: Vec<String>,
     replica: Arc<Replica>,
     status: Mutex<serde_json::Map<String, Value>>,
+    status_events: StatusBroadcaster,
+    status_seq: AtomicU64,
     player: Mutex<Option<Arc<Player>>>,
     runner: Mutex<Option<Arc<Runner>>>,
     syncer: Mutex<Option<Arc<Syncer>>>,
@@ -43,7 +49,11 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    pub fn new(dist_dir: Option<PathBuf>, replica: Arc<Replica>, playlists: Vec<String>) -> Arc<ControlServer> {
+    pub fn new(
+        dist_dir: Option<PathBuf>,
+        replica: Arc<Replica>,
+        playlists: Vec<String>,
+    ) -> Arc<ControlServer> {
         let mut status = serde_json::Map::new();
         status.insert("phase".into(), json!("initializing"));
         status.insert("message".into(), json!("starting up"));
@@ -58,6 +68,8 @@ impl ControlServer {
             playlists,
             replica,
             status: Mutex::new(status),
+            status_events: StatusBroadcaster::default(),
+            status_seq: AtomicU64::new(0),
             player: Mutex::new(None),
             runner: Mutex::new(None),
             syncer: Mutex::new(None),
@@ -68,12 +80,14 @@ impl ControlServer {
 
     pub fn set_player(&self, p: Arc<Player>) {
         *self.player.lock().unwrap() = Some(p);
+        self.notify();
     }
     pub fn set_runner(&self, r: Arc<Runner>) {
         *self.runner.lock().unwrap() = Some(r);
     }
     pub fn set_syncer(&self, s: Arc<Syncer>) {
         *self.syncer.lock().unwrap() = Some(s);
+        self.notify();
     }
     pub fn set_on_fullscreen(&self, f: FullscreenCb) {
         *self.on_fullscreen.lock().unwrap() = Some(f);
@@ -84,12 +98,23 @@ impl ControlServer {
 
     /// Merge an object's keys into the live status (what the runner pushes).
     pub fn push(&self, updates: Value) {
+        let mut changed = false;
         if let Value::Object(map) = updates {
             let mut s = self.status.lock().unwrap();
             for (k, v) in map {
                 s.insert(k, v);
             }
+            changed = true;
         }
+        if changed {
+            self.notify();
+        }
+    }
+
+    /// Broadcast the current status projection to open `/status/stream` clients.
+    pub fn notify(&self) {
+        let frame = self.status_frame(&self.status_json());
+        self.status_events.broadcast(frame);
     }
 
     pub fn index_html(&self) -> Vec<u8> {
@@ -110,7 +135,11 @@ impl ControlServer {
             .name("control-server".into())
             .spawn(move || {
                 for request in server.incoming_requests() {
-                    this.handle(request);
+                    let req_server = this.clone();
+                    std::thread::Builder::new()
+                        .name("control-request".into())
+                        .spawn(move || req_server.handle(request))
+                        .expect("spawn control request");
                 }
             })
             .expect("spawn control server");
@@ -122,16 +151,21 @@ impl ControlServer {
         let url = request.url().to_string();
         let path = url.split('?').next().unwrap_or("").to_string();
         match (&method, path.as_str()) {
-            (Method::Get, "/") => respond(request, 200, self.index_html(), "text/html; charset=utf-8"),
+            (Method::Get, "/") => {
+                respond(request, 200, self.index_html(), "text/html; charset=utf-8")
+            }
             (Method::Get, p) if p.starts_with("/index") => {
                 respond(request, 200, self.index_html(), "text/html; charset=utf-8")
             }
             (Method::Get, "/status") => respond_json(request, 200, &self.status_json()),
+            (Method::Get, "/status/stream") => self.status_stream(request),
             (Method::Get, "/shows") => {
                 let v = json!(self.replica.overlay_shows(&self.playlists));
                 respond_json(request, 200, &v)
             }
-            (Method::Get, "/stats") => respond_json(request, 200, &self.replica.stats(&self.playlists)),
+            (Method::Get, "/stats") => {
+                respond_json(request, 200, &self.replica.stats(&self.playlists))
+            }
             (Method::Get, "/history") => {
                 let show = query_param(&url, "show").unwrap_or_default();
                 let v = json!(self.replica.show_history(&show));
@@ -221,8 +255,10 @@ impl ControlServer {
             "/sync-now" => {
                 // Manual reconcile, off-thread so the response is instant.
                 if let Some(s) = self.syncer.lock().unwrap().clone() {
+                    let srv = self.clone();
                     std::thread::spawn(move || {
                         s.sync();
+                        srv.notify();
                     });
                 }
                 respond(request, 204, vec![], "text/plain");
@@ -298,15 +334,38 @@ impl ControlServer {
 
     fn library_add(self: &Arc<Self>, mut request: Request) {
         let b = read_body(&mut request);
-        let name = b.get("name").and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let root = b.get("root_path").and_then(Value::as_str).unwrap_or("").trim().to_string();
-        let playlist = b.get("playlist").and_then(Value::as_str).unwrap_or("nelson").trim().to_string();
+        let name = b
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let root = b
+            .get("root_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let playlist = b
+            .get("playlist")
+            .and_then(Value::as_str)
+            .unwrap_or("nelson")
+            .trim()
+            .to_string();
         if name.is_empty() || root.is_empty() {
-            return respond_json(request, 400, &json!({"error":"name and root_path are required"}));
+            return respond_json(
+                request,
+                400,
+                &json!({"error":"name and root_path are required"}),
+            );
         }
         let eps = scan::scan_episodes(&root);
         if eps.is_empty() {
-            return respond_json(request, 400, &json!({"error":"no video files found under root_path"}));
+            return respond_json(
+                request,
+                400,
+                &json!({"error":"no video files found under root_path"}),
+            );
         }
         let sid = self.replica.create_show(&playlist, &name, &root, &eps);
         self.push_sync();
@@ -315,7 +374,11 @@ impl ControlServer {
 
     fn library_rescan(self: &Arc<Self>, mut request: Request) {
         let b = read_body(&mut request);
-        let sid = b.get("show_id").and_then(Value::as_str).unwrap_or("").to_string();
+        let sid = b
+            .get("show_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let mut added = 0usize;
         if let Some(show) = self.replica.show(&sid) {
             let known = self.replica.episode_paths(&sid);
@@ -337,9 +400,31 @@ impl ControlServer {
             status.insert("playback".into(), p.playback_state());
         }
         if let Some(s) = self.syncer.lock().unwrap().as_ref() {
-            status.insert("sync".into(), json!({"online": s.online(), "pending": s.pending()}));
+            status.insert(
+                "sync".into(),
+                json!({"online": s.online(), "pending": s.pending()}),
+            );
         }
         Value::Object(status)
+    }
+
+    fn status_frame(&self, status: &Value) -> String {
+        let id = self.status_seq.fetch_add(1, Ordering::Relaxed) + 1;
+        sse_frame(id, "status", status)
+    }
+
+    fn status_stream(&self, request: Request) {
+        let reader = self
+            .status_events
+            .subscribe(self.status_frame(&self.status_json()));
+        let headers = vec![
+            header("Content-Type", "text/event-stream; charset=utf-8"),
+            header("Cache-Control", "no-store"),
+            header("X-Accel-Buffering", "no"),
+        ];
+        let response =
+            Response::new(StatusCode(200), headers, reader, None, None).with_chunked_threshold(0);
+        let _ = request.respond(response);
     }
 
     fn with_player(&self, f: impl FnOnce(&Player)) {
@@ -356,6 +441,7 @@ impl ControlServer {
         if let Some(s) = self.syncer.lock().unwrap().clone() {
             s.push();
         }
+        self.notify();
     }
 
     fn static_file(&self, rel: &str) -> Option<(Vec<u8>, String)> {
@@ -375,6 +461,109 @@ impl ControlServer {
             Some((data, ctype))
         }
     }
+}
+
+#[derive(Default)]
+struct StatusBroadcaster {
+    subscribers: Mutex<Vec<Weak<StatusSubscriber>>>,
+}
+
+impl StatusBroadcaster {
+    fn subscribe(&self, initial: String) -> StatusStream {
+        let subscriber = Arc::new(StatusSubscriber {
+            state: Mutex::new(StatusSubscriberState {
+                next: Some(initial),
+            }),
+            cv: Condvar::new(),
+        });
+        self.subscribers
+            .lock()
+            .unwrap()
+            .push(Arc::downgrade(&subscriber));
+        StatusStream {
+            subscriber,
+            buffer: Vec::new(),
+            offset: 0,
+        }
+    }
+
+    fn broadcast(&self, frame: String) {
+        let live = {
+            let mut subscribers = self.subscribers.lock().unwrap();
+            let mut live = Vec::new();
+            subscribers.retain(|weak| {
+                if let Some(subscriber) = weak.upgrade() {
+                    live.push(subscriber);
+                    true
+                } else {
+                    false
+                }
+            });
+            live
+        };
+
+        for subscriber in live {
+            subscriber.replace(frame.clone());
+        }
+    }
+}
+
+struct StatusSubscriber {
+    state: Mutex<StatusSubscriberState>,
+    cv: Condvar,
+}
+
+impl StatusSubscriber {
+    fn replace(&self, frame: String) {
+        self.state.lock().unwrap().next = Some(frame);
+        self.cv.notify_one();
+    }
+}
+
+struct StatusSubscriberState {
+    next: Option<String>,
+}
+
+struct StatusStream {
+    subscriber: Arc<StatusSubscriber>,
+    buffer: Vec<u8>,
+    offset: usize,
+}
+
+impl Read for StatusStream {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+
+        while self.offset >= self.buffer.len() {
+            let mut state = self.subscriber.state.lock().unwrap();
+            while state.next.is_none() {
+                let (guard, timeout) = self
+                    .subscriber
+                    .cv
+                    .wait_timeout(state, Duration::from_secs(30))
+                    .unwrap();
+                state = guard;
+                if timeout.timed_out() && state.next.is_none() {
+                    state.next = Some(": keepalive\n\n".to_string());
+                }
+            }
+            self.buffer = state.next.take().unwrap_or_default().into_bytes();
+            self.offset = 0;
+        }
+
+        let n = out.len().min(self.buffer.len() - self.offset);
+        out[..n].copy_from_slice(&self.buffer[self.offset..self.offset + n]);
+        self.offset += n;
+        Ok(n)
+    }
+}
+
+fn sse_frame(id: u64, event: &str, value: &Value) -> String {
+    let data = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    let data = data.replace('\n', "\ndata: ");
+    format!("id: {id}\nevent: {event}\ndata: {data}\n\n")
 }
 
 fn content_type(p: &Path) -> String {
@@ -434,5 +623,55 @@ fn respond(request: Request, code: u16, body: Vec<u8>, ctype: &str) {
 }
 
 fn respond_json(request: Request, code: u16, v: &Value) {
-    respond(request, code, serde_json::to_vec(v).unwrap_or_default(), "application/json");
+    respond(
+        request,
+        code,
+        serde_json::to_vec(v).unwrap_or_default(),
+        "application/json",
+    );
+}
+
+fn header(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static response header")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn sse_frame_names_status_event_with_json_payload() {
+        let frame = sse_frame(7, "status", &json!({"phase": "playing", "round_pos": 2}));
+
+        assert!(frame.starts_with("id: 7\nevent: status\n"));
+        assert!(frame.contains("data: {\"phase\":\"playing\",\"round_pos\":2}\n\n"));
+    }
+
+    #[test]
+    fn status_stream_starts_with_initial_snapshot() {
+        let hub = StatusBroadcaster::default();
+        let mut stream = hub.subscribe("initial".to_string());
+        let mut buf = [0; 7];
+
+        stream.read_exact(&mut buf).unwrap();
+
+        assert_eq!(&buf, b"initial");
+    }
+
+    #[test]
+    fn status_stream_coalesces_pending_updates_to_latest() {
+        let hub = StatusBroadcaster::default();
+        let mut stream = hub.subscribe("first".to_string());
+        let mut initial = [0; 5];
+        stream.read_exact(&mut initial).unwrap();
+
+        hub.broadcast("stale".to_string());
+        hub.broadcast("latest".to_string());
+
+        let mut buf = [0; 6];
+        stream.read_exact(&mut buf).unwrap();
+
+        assert_eq!(&buf, b"latest");
+    }
 }

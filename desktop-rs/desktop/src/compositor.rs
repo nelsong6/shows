@@ -261,7 +261,7 @@ impl Compositor {
         unsafe { controller.add_CursorChanged(&cursor_handler, &mut cursor_token)? };
 
         let webview = unsafe { base.CoreWebView2()? };
-        // Same-origin to the control server so the overlay's fetch('/status') works.
+        // Same-origin to the control server so the overlay's EventSource/fetch calls work.
         let url = CoTaskMemPWSTR::from(overlay_url);
         unsafe { webview.Navigate(*url.as_ref().as_pcwstr())? };
 

@@ -132,4 +132,4 @@ Adding anything here is a contract amendment — write a new section above first
 
 The PodMonitor at `k8s/templates/podmonitor.yaml` exposes these to the kube-prometheus-stack.
 
-**Desktop** — the engine's live state is the control server's `GET /status` (current round, now-playing/up-next, playback, and sync online/pending), with `/health` + `/shows`; logs go to stdout. See `desktop-qt/README.md`.
+**Desktop** — the engine's live state is the control server's `GET /status/stream` Server-Sent Events feed (current round, now-playing/up-next, playback, and sync online/pending), with `GET /status` retained as an on-demand snapshot and `/health` + `/shows` for explicit reads. The overlay's normal live path is event-driven from runner/window/mpv/sync notifications, not browser polling. Logs go to stdout. See `desktop-rs/desktop/src/webserver.rs`.

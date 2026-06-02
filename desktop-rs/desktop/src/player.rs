@@ -3,17 +3,17 @@
 //! seek/volume/track controls the control server needs. An event-pump thread
 //! turns libmpv's C events into the runner's callbacks.
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use shows_core::runner::{PlayerOps, PlayerShutdown, RoundEndTracker, StopFlag};
 
 use crate::mpv::{
-    Handle, MpvEventEndFile, MPV_END_FILE_REASON_EOF, MPV_EVENT_END_FILE, MPV_EVENT_FILE_LOADED,
-    MPV_EVENT_SHUTDOWN,
+    Handle, MPV_END_FILE_REASON_EOF, MPV_EVENT_END_FILE, MPV_EVENT_FILE_LOADED, MPV_EVENT_SHUTDOWN,
+    MpvEventEndFile,
 };
 
 const MPV_EVENT_PROPERTY_CHANGE: c_int = 22;
@@ -28,6 +28,17 @@ struct MpvEventProperty {
 
 type Cb = Box<dyn Fn() + Send + Sync>;
 type PosCb = Box<dyn Fn(usize) + Send + Sync>;
+
+const PLAYBACK_OBSERVED_PROPERTIES: &[&str] = &[
+    "time-pos",
+    "duration",
+    "percent-pos",
+    "volume",
+    "pause",
+    "sid",
+    "aid",
+    "track-list/count",
+];
 
 struct Shared {
     // Round boundary, driven by playlist-pos (-1 == exhausted). The tracker
@@ -44,6 +55,7 @@ pub struct Player {
     shared: Mutex<Shared>,
     on_natural_end: Mutex<Option<Cb>>,
     on_file_loaded: Mutex<Option<Cb>>,
+    on_playback_change: Mutex<Option<Cb>>,
     on_pos: Mutex<Option<PosCb>>,
 }
 
@@ -54,14 +66,22 @@ impl Player {
         let player = Arc::new(Player {
             handle,
             cv: Condvar::new(),
-            shared: Mutex::new(Shared { round: RoundEndTracker::default(), shutdown: false, interrupted: false }),
+            shared: Mutex::new(Shared {
+                round: RoundEndTracker::default(),
+                shutdown: false,
+                interrupted: false,
+            }),
             on_natural_end: Mutex::new(None),
             on_file_loaded: Mutex::new(None),
+            on_playback_change: Mutex::new(None),
             on_pos: Mutex::new(None),
         });
         // Report which queued entry is playing so the runner routes skip/defer to
         // it and the overlay shows now-playing.
         player.handle.observe_property_string(1, "playlist-pos");
+        for (i, name) in PLAYBACK_OBSERVED_PROPERTIES.iter().enumerate() {
+            player.handle.observe_property_string(10 + i as u64, name);
+        }
         let pump = player.clone();
         std::thread::Builder::new()
             .name("mpv-events".into())
@@ -76,8 +96,17 @@ impl Player {
     pub fn set_on_file_loaded(&self, f: Cb) {
         *self.on_file_loaded.lock().unwrap() = Some(f);
     }
+    pub fn set_on_playback_change(&self, f: Cb) {
+        *self.on_playback_change.lock().unwrap() = Some(f);
+    }
     pub fn set_on_pos(&self, f: PosCb) {
         *self.on_pos.lock().unwrap() = Some(f);
+    }
+
+    fn notify_playback_change(&self) {
+        if let Some(cb) = self.on_playback_change.lock().unwrap().as_ref() {
+            cb();
+        }
     }
 
     fn event_loop(self: Arc<Self>) {
@@ -115,6 +144,7 @@ impl Player {
                     if let Some(cb) = self.on_file_loaded.lock().unwrap().as_ref() {
                         cb();
                     }
+                    self.notify_playback_change();
                 }
                 MPV_EVENT_PROPERTY_CHANGE => unsafe {
                     let prop = (*ev).data as *const MpvEventProperty;
@@ -151,6 +181,9 @@ impl Player {
                             }
                         }
                     }
+                    if PLAYBACK_OBSERVED_PROPERTIES.contains(&name) {
+                        self.notify_playback_change();
+                    }
                 },
                 _ => {}
             }
@@ -162,13 +195,19 @@ impl Player {
         self.handle.command(&["cycle", "pause"]);
     }
     pub fn seek_relative(&self, seconds: f64) {
-        self.handle.command(&["seek", &seconds.to_string(), "relative"]);
+        self.handle
+            .command(&["seek", &seconds.to_string(), "relative"]);
     }
     pub fn seek_percent(&self, pct: f64) {
-        self.handle.command(&["seek", &pct.clamp(0.0, 100.0).to_string(), "absolute-percent"]);
+        self.handle.command(&[
+            "seek",
+            &pct.clamp(0.0, 100.0).to_string(),
+            "absolute-percent",
+        ]);
     }
     pub fn set_volume(&self, vol: f64) {
-        self.handle.set_property("volume", &vol.clamp(0.0, 130.0).to_string());
+        self.handle
+            .set_property("volume", &vol.clamp(0.0, 130.0).to_string());
     }
     pub fn set_sub(&self, sid: &str) {
         self.handle.set_property("sid", sid); // an id, or "no" to disable
@@ -178,7 +217,9 @@ impl Player {
     }
 
     fn prop_f64(&self, name: &str) -> Option<f64> {
-        self.handle.get_property(name).and_then(|s| s.parse::<f64>().ok())
+        self.handle
+            .get_property(name)
+            .and_then(|s| s.parse::<f64>().ok())
     }
 
     fn tracks(&self, kind: &str) -> Vec<Value> {
@@ -189,10 +230,18 @@ impl Player {
             .unwrap_or(0);
         let mut out = Vec::new();
         for i in 0..count {
-            if self.handle.get_property(&format!("track-list/{i}/type")).as_deref() != Some(kind) {
+            if self
+                .handle
+                .get_property(&format!("track-list/{i}/type"))
+                .as_deref()
+                != Some(kind)
+            {
                 continue;
             }
-            let id = self.handle.get_property(&format!("track-list/{i}/id")).unwrap_or_default();
+            let id = self
+                .handle
+                .get_property(&format!("track-list/{i}/id"))
+                .unwrap_or_default();
             let title = self.handle.get_property(&format!("track-list/{i}/title"));
             let lang = self.handle.get_property(&format!("track-list/{i}/lang"));
             let selected = self
@@ -229,11 +278,7 @@ impl Player {
     pub fn video_dimensions(&self) -> Option<(i32, i32)> {
         let w = self.prop_f64("video-params/w")? as i32;
         let h = self.prop_f64("video-params/h")? as i32;
-        if w > 0 && h > 0 {
-            Some((w, h))
-        } else {
-            None
-        }
+        if w > 0 && h > 0 { Some((w, h)) } else { None }
     }
 }
 
@@ -251,7 +296,8 @@ impl PlayerOps for Player {
         self.handle.command(&["playlist-clear"]);
     }
     fn show_text(&self, text: &str, duration_ms: i64) {
-        self.handle.command(&["show-text", text, &duration_ms.to_string()]);
+        self.handle
+            .command(&["show-text", text, &duration_ms.to_string()]);
     }
     fn skip(&self) {
         // Force-advance to the next queued entry. At the last entry this
@@ -267,7 +313,8 @@ impl PlayerOps for Player {
         self.prop_f64("time-pos")
     }
     fn seek_absolute(&self, seconds: f64) {
-        self.handle.command(&["seek", &seconds.to_string(), "absolute"]);
+        self.handle
+            .command(&["seek", &seconds.to_string(), "absolute"]);
     }
     fn set_playlist_pos(&self, idx: usize) {
         self.handle.set_property("playlist-pos", &idx.to_string());

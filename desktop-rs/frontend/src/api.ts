@@ -1,7 +1,8 @@
 // Data layer. The desktop client's control server exposes a same-origin HTTP
-// surface — GET /status, GET /shows, GET /history?show=<id>, POST /pause,
-// POST /skip, POST /defer — and serves this page, so all of these are relative
-// to its origin.
+// surface. Live state arrives over GET /status/stream; one-shot reads use
+// GET /status, GET /shows, GET /history?show=<id>, while controls POST to
+// /pause, /skip, /defer, etc. The server serves this page, so all URLs are
+// relative to its origin.
 
 export type RoundEntry = {
   show_id: string;
@@ -40,7 +41,7 @@ export type Track = {
   selected: boolean;
 };
 
-// Live mpv playback state, read fresh on each /status poll.
+// Live mpv playback state, pushed by the desktop status stream.
 export type Playback = {
   time_pos: number | null;
   duration: number | null;
@@ -188,8 +189,9 @@ export function seekRelative(seconds: number): void {
   void fetch('/seek', {method: 'POST', body: JSON.stringify({seconds})});
 }
 
-export function setVolume(volume: number): void {
-  void fetch('/volume', {method: 'POST', body: JSON.stringify({volume})});
+export async function setVolume(volume: number): Promise<void> {
+  const r = await fetch('/volume', {method: 'POST', body: JSON.stringify({volume})});
+  if (!r.ok) throw new Error(`/volume ${r.status}`);
 }
 
 export function setSub(sid: number | string): void {
@@ -238,27 +240,24 @@ export async function rescanShow(show_id: string): Promise<{added: number}> {
   return r.json();
 }
 
-// Poll /status on an interval, invoking `onStatus` with each successful
-// read. Returns an unsubscribe that stops the polling — same lifecycle
-// contract as the old EventsOn('status', …) subscription.
-export function subscribeStatus(
-  onStatus: (s: Status) => void,
-  intervalMs = 700,
-): () => void {
+// Subscribe to the desktop status stream. The control server sends an initial
+// snapshot immediately, then publishes runner/window/mpv updates as they occur.
+export function subscribeStatus(onStatus: (s: Status) => void): () => void {
   let stopped = false;
-  const tick = async () => {
+  const events = new EventSource('/status/stream');
+
+  events.addEventListener('status', (event) => {
+    if (stopped) return;
     try {
-      const s = await getStatus();
-      if (!stopped) onStatus(s);
+      onStatus(JSON.parse((event as MessageEvent<string>).data) as Status);
     } catch {
-      // transient (server still coming up / between requests) — keep polling
+      // Ignore malformed frames; EventSource will keep the stream alive.
     }
-  };
-  void tick();
-  const id = setInterval(tick, intervalMs);
+  });
+
   return () => {
     stopped = true;
-    clearInterval(id);
+    events.close();
   };
 }
 
