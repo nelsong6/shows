@@ -22,8 +22,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/nelsong6/shows/internal/auth"
-	"github.com/nelsong6/shows/internal/store"
+	"github.com/romaine-life/shows/internal/auth"
+	"github.com/romaine-life/shows/internal/store"
 )
 
 type Server struct {

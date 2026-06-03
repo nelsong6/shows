@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nelsong6/shows/internal/api"
-	"github.com/nelsong6/shows/internal/auth"
-	"github.com/nelsong6/shows/internal/store"
+	"github.com/romaine-life/shows/internal/api"
+	"github.com/romaine-life/shows/internal/auth"
+	"github.com/romaine-life/shows/internal/store"
 )
 
 func main() {

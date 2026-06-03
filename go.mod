@@ -1,4 +1,4 @@
-module github.com/nelsong6/shows
+module github.com/romaine-life/shows
 
 go 1.25.0
 

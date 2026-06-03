@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/nelsong6/shows/internal/auth"
+	"github.com/romaine-life/shows/internal/auth"
 )
 
 func TestParsePlaylists(t *testing.T) {
