@@ -4,7 +4,7 @@ App repo on the romaine.life AKS cluster. Cosmos-backed playlist API at `shows.r
 
 ## Quality timeframe
 
-This repo follows the long-term, heavy-solution operating mode codified in `nelsong6/glimmung/docs/quality-timeframes.md`. Compatibility layers are prohibited per `nelsong6/tank-operator/docs/migration-policy.md` — `legacy`, `compatibility`, `fallback`, `temporary`, and `exception` are deletion targets, not design options.
+This repo follows the long-term, heavy-solution operating mode codified in `romaine-life/glimmung/docs/quality-timeframes.md`. Compatibility layers are prohibited per `romaine-life/tank-operator/docs/migration-policy.md` — `legacy`, `compatibility`, `fallback`, `temporary`, and `exception` are deletion targets, not design options.
 
 When extending a feature documented at `docs/feature-contracts/`, name the affected contract in the PR and explain how the implementation proves the invariants still hold.
 
@@ -129,9 +129,9 @@ file instead of duplicating the steps here.
 
 ## Related
 
-- `nelsong6/auth` — JWT issuer; CLI device flow contract this repo's auth depends on
+- `romaine-life/auth` — JWT issuer; CLI device flow contract this repo's auth depends on
 - `nelsong6/romaine-auth-py` — canonical JWT verifier (this repo's `internal/auth` is the Go port)
-- `nelsong6/glimmung` — design system reference (`design-system/colors_and_type.css`) + quality-timeframes / migration-policy / feature-contract patterns
-- `nelsong6/tank-operator` — PodMonitor + observability pattern
-- `nelsong6/infra-bootstrap` — the cluster + per-app Azure identity provisioning
+- `romaine-life/glimmung` — design system reference (`design-system/colors_and_type.css`) + quality-timeframes / migration-policy / feature-contract patterns
+- `romaine-life/tank-operator` — PodMonitor + observability pattern
+- `romaine-life/infra-bootstrap` — the cluster + per-app Azure identity provisioning
 - `nelsong6/play_show` — the deprecated PowerShell predecessor this repo replaces

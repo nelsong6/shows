@@ -4,7 +4,7 @@ The round-robin playback loop is implemented by the **desktop engine** (`desktop
 
 Advance *timing* — when an episode becomes watched — is governed by [Advance timing (per-episode)](#advance-timing-per-episode) below.
 
-The shape comes from glimmung's pattern of [feature contracts as durable artifacts](https://github.com/nelsong6/glimmung/blob/main/docs/feature-contracts) — a future agent (or future-you) should be able to reason about the system from this doc without re-reading the implementation.
+The shape comes from glimmung's pattern of [feature contracts as durable artifacts](https://github.com/romaine-life/glimmung/blob/main/docs/feature-contracts) — a future agent (or future-you) should be able to reason about the system from this doc without re-reading the implementation.
 
 ## Invariants
 
