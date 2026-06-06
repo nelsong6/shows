@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+mod audio_monitor;
 mod compositor;
 mod gl;
 mod mpv;
@@ -217,6 +218,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let handle = Arc::new(mpv::Handle::create(api).map_err(to_err)?);
     let player = Player::new(handle.clone());
     let compositor = Compositor::create(handle.clone(), &overlay_url)?;
+    let _audio_monitor = audio_monitor::AudioMonitor::start(Arc::downgrade(&player))?;
     log::info!("compositor + render context ready");
 
     // Test hook: play a file directly to verify the GPU video path (the runner

@@ -215,6 +215,21 @@ impl Player {
     pub fn set_audio(&self, aid: &str) {
         self.handle.set_property("aid", aid);
     }
+    pub fn reload_audio_output(&self) {
+        use std::sync::Mutex;
+        use std::time::{Instant, Duration};
+
+        static LAST_RELOAD: Mutex<Option<Instant>> = Mutex::new(None);
+
+        let mut last = LAST_RELOAD.lock().unwrap();
+        if let Some(last_time) = *last {
+            if last_time.elapsed() < Duration::from_millis(500) {
+                return;
+            }
+        }
+        *last = Some(Instant::now());
+        self.handle.command(&["ao-reload"]);
+    }
 
     fn prop_f64(&self, name: &str) -> Option<f64> {
         self.handle

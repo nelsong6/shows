@@ -1013,6 +1013,7 @@ dependencies = [
  "tiny_http",
  "webview2-com",
  "windows",
+ "windows-core",
 ]
 
 [[package]]
