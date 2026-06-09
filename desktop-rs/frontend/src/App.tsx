@@ -547,7 +547,7 @@ function App() {
                     color: 'var(--fg-secondary)',
                     fontWeight: 400
                   }}
-                  title={activeEpisodePath ? shortPath(activeEpisodePath) : undefined}
+                  title={activeEpisodePath || undefined}
                 >
                   {activeEpisodePath ? shortPath(activeEpisodePath) : '—'}
                 </div>

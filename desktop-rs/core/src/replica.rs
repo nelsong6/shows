@@ -1208,7 +1208,7 @@ mod tests {
         r.mark_queue_synced("nelson");
         let incoming = LibraryQueue {
             playlist: "nelson".to_string(),
-            updated_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2035-06-01T00:00:00Z".to_string(),
             entries: vec![
                 RoundQueueEntry {
                     episode_id: "ep1".to_string(),

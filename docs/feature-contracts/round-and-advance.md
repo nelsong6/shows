@@ -85,6 +85,18 @@ Invariants:
 
 Previous is navigation; skip (I7) and defer (D1–D3) are the operations that change watched/queue state.
 
+## Play Show: manual playback override
+
+The desktop application is not a general-purpose media player; it is integrated with the round-robin playlist system from the ground up and never plays videos out of band. Because a round queue contains exactly one unwatched episode for every active show, any show eligible for playback is guaranteed to have its current episode present in the active round queue at a stable, fixed index.
+
+Manual playback (`runner.play_episode`, triggered by the "Play Show" button in the frontend overlay) is strictly an in-playlist navigation shortcut.
+
+Invariants:
+
+- **M1. Round queue contents are immutable once decided.** The list of shows and episodes in a round, along with their relative play positions, is fixed at the start of the round. Clicking "Play Show" never prepends, inserts, or restructures the database queue.
+- **M2. Manual play is pure navigation.** Selecting a show to play simply moves the player's active playlist position directly to the show's stable index in the player (`playlist-pos`).
+- **M3. State resetting on navigation.** To prevent state inconsistencies, when the player jumps to the new episode's index, the database state of the previously playing episode is reset from `"playing"` to `"pending"` (so that the app does not incorrectly resume from the interrupted episode upon restart).
+
 ## Cross-playlist rounds
 
 Single-playlist is the primary path; cross-playlist is purely additive — set `SHOWS_PLAYLISTS=a,b,c` to interleave several playlists in one rotation.

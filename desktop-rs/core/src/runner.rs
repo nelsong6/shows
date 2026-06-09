@@ -147,9 +147,24 @@ pub struct RoundEntry {
     pub show_name: String,
     pub episode_id: String,
     pub absolute_path: String,
+    pub nas_absolute_path: String,
+    pub relative_path: String,
     pub order_value: u32,
     pub playlist: String,
     pub position: i64,
+}
+
+pub fn get_local_path(show_name: &str, relative_path: &str) -> std::path::PathBuf {
+    let base = std::env::var("SHOWS_LOCAL_WATCHING_DIR")
+        .unwrap_or_else(|_| r"d:\downloads\Watching".to_string());
+    let mut path = std::path::PathBuf::from(base);
+    path.push(show_name);
+    for part in relative_path.split(|c| c == '\\' || c == '/') {
+        if !part.is_empty() {
+            path.push(part);
+        }
+    }
+    path
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +267,7 @@ impl Runner {
                 inner.loaded_any = false;
             }
             log::info!("round loaded/queued: {} episodes, starting at pos {}", round.len(), pos);
+            self.pull_and_prune_files(&round);
             self.queue_round(&round);
             self.player.set_playlist_pos(pos);
             if let Some(cb) = &self.cb.on_round {
@@ -337,28 +353,36 @@ impl Runner {
         self.player.skip();
     }
 
-    /// Play a specific show's episode immediately, replacing the current round playlist.
-    pub fn play_episode(&self, show: &crate::engine::Show, ep: &crate::engine::Episode) {
+    /// Play a specific show's episode immediately by navigating to it in the current round playlist.
+    pub fn play_episode(&self, _show: &crate::engine::Show, ep: &crate::engine::Episode) {
         let raw = self.replica.get_round_queue();
-        let mut entries = Vec::new();
-        for (ep_id, show_id, _play_order, state, playlist, _updated_at, _dirty) in raw {
-            if show_id != show.id {
-                entries.push((ep_id, show_id, state, playlist));
-            }
-        }
-        let manual_entry = (ep.id.clone(), show.id.clone(), "pending".to_string(), show.playlist.clone());
-        entries.insert(0, manual_entry);
-        let db_entries: Vec<(String, String, i32, String, String)> = entries
-            .into_iter()
-            .enumerate()
-            .map(|(i, (ep_id, show_id, state, playlist))| {
-                (ep_id, show_id, i as i32, state, playlist)
-            })
+        let filtered_raw: Vec<_> = raw
+            .iter()
+            .filter(|(_, _, _, _, playlist, _, _)| self.playlists.contains(playlist))
             .collect();
-        let now = chrono::Utc::now().to_rfc3339();
-        self.replica.save_round_queue(&db_entries, &now, true);
-        self.syncer.push();
-        self.player.playlist_clear();
+
+        let existing_pos = filtered_raw.iter().position(|(ep_id, _, _, _, _, _, _)| ep_id == &ep.id);
+
+        if let Some(idx) = existing_pos {
+            // Reset previous playing episode to pending if it was playing in the DB
+            let old_pos = self.inner.lock().unwrap().pos;
+            if old_pos < filtered_raw.len() && old_pos != idx {
+                let (old_ep_id, _, _, old_state, old_playlist, _, _) = filtered_raw[old_pos];
+                if old_state == "playing" {
+                    self.replica.update_round_entry_state(old_ep_id, "pending", old_playlist);
+                }
+            }
+
+            // Update local state and tell the player to navigate
+            {
+                let mut inner = self.inner.lock().unwrap();
+                inner.pos = idx;
+            }
+            self.player.set_playlist_pos(idx);
+            self.syncer.push();
+        } else {
+            log::warn!("Manual play ignored: episode {} is not in the current round queue", ep.id);
+        }
     }
 
     // ── playback callbacks (mpv event thread; keep fast + local) ─────────
@@ -426,12 +450,18 @@ impl Runner {
             let Some(ep) = show.episodes.iter().find(|e| e.id == ep_id) else {
                 continue;
             };
-            
+            let nas_absolute_path = crate::ordering::join_path(&show.root_path, &ep.relative_path);
+            let absolute_path = get_local_path(&show.name, &ep.relative_path)
+                .to_string_lossy()
+                .into_owned();
+
             let entry = RoundEntry {
                 show_id: show.id.clone(),
                 show_name: show.name.clone(),
                 episode_id: ep.id.clone(),
-                absolute_path: crate::ordering::join_path(&show.root_path, &ep.relative_path),
+                absolute_path,
+                nas_absolute_path,
+                relative_path: ep.relative_path.clone(),
                 order_value: play_order as u32,
                 playlist: show.playlist.clone(),
                 position: ep.position,
@@ -483,21 +513,31 @@ impl Runner {
         let pl_by: std::collections::HashMap<&str, &str> =
             shows.iter().map(|s| (s.id.as_str(), s.playlist.as_str())).collect();
         let mut ep_pos_by = std::collections::HashMap::new();
+        let mut ep_rel_path_by = std::collections::HashMap::new();
         for s in &shows {
             for ep in &s.episodes {
                 ep_pos_by.insert(ep.id.as_str(), ep.position);
+                ep_rel_path_by.insert(ep.id.as_str(), ep.relative_path.as_str());
             }
         }
         ordered
             .iter()
             .map(|o| {
                 let position = ep_pos_by.get(o.episode_id.as_str()).copied().expect("episode position must exist");
+                let relative_path = ep_rel_path_by.get(o.episode_id.as_str()).copied().expect("relative path must exist").to_string();
+                let nas_absolute_path = o.absolute_path.clone();
+                let show_name = name_by.get(o.show_id.as_str()).copied().expect("show name must exist").to_string();
+                let absolute_path = get_local_path(&show_name, &relative_path)
+                    .to_string_lossy()
+                    .into_owned();
                 RoundEntry {
-                    show_name: name_by.get(o.show_id.as_str()).copied().expect("show name must exist").to_string(),
+                    show_name,
                     playlist: pl_by.get(o.show_id.as_str()).copied().expect("playlist must exist").to_string(),
                     show_id: o.show_id.clone(),
                     episode_id: o.episode_id.clone(),
-                    absolute_path: o.absolute_path.clone(),
+                    absolute_path,
+                    nas_absolute_path,
+                    relative_path,
                     order_value: o.order_value,
                     position,
                 }
@@ -528,9 +568,113 @@ impl Runner {
         AdvanceResult { advanced_count: advanced, removed_shows }
     }
 
+    fn pull_and_prune_files(&self, round: &[RoundEntry]) {
+        if cfg!(test) {
+            return;
+        }
+
+        let base_dir = std::env::var("SHOWS_LOCAL_WATCHING_DIR")
+            .unwrap_or_else(|_| r"d:\downloads\Watching".to_string());
+        let base_path = std::path::Path::new(&base_dir);
+
+        // Canonicalize base path if it exists to make canonicalization comparisons exact
+        let canonical_base = if base_path.exists() {
+            base_path.canonicalize().unwrap_or_else(|_| base_path.to_path_buf())
+        } else {
+            base_path.to_path_buf()
+        };
+
+        log::info!("Starting file sync for new round to {:?}", canonical_base);
+        self.player.show_text("Syncing new round files to SSD...", 10000);
+
+        let mut active_local_paths = std::collections::HashSet::new();
+
+        for entry in round {
+            // Build the local path starting from canonical_base if possible
+            let mut local_path = canonical_base.clone();
+            local_path.push(&entry.show_name);
+            for part in entry.relative_path.split(|c| c == '\\' || c == '/') {
+                if !part.is_empty() {
+                    local_path.push(part);
+                }
+            }
+
+            // Canonicalize the local path if it already exists, so our active set comparison matches perfectly
+            let cmp_path = if local_path.exists() {
+                local_path.canonicalize().unwrap_or_else(|_| local_path.clone())
+            } else {
+                local_path.clone()
+            };
+            active_local_paths.insert(cmp_path);
+
+            // Check if source file exists before trying to copy
+            let nas_path = std::path::Path::new(&entry.nas_absolute_path);
+            if !nas_path.exists() {
+                log::warn!("Source file does not exist or NAS is offline: {:?}", nas_path);
+                continue;
+            }
+
+            if local_path.exists() {
+                let src_metadata = std::fs::metadata(nas_path);
+                let dst_metadata = std::fs::metadata(&local_path);
+                if let (Ok(src_m), Ok(dst_m)) = (src_metadata, dst_metadata) {
+                    if src_m.len() == dst_m.len() {
+                        log::info!("File already exists and size matches, skipping copy: {:?}", local_path);
+                        continue;
+                    }
+                }
+            }
+
+            log::info!("Copying from NAS: {:?} -> {:?}", nas_path, local_path);
+            if let Some(parent) = local_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    log::error!("Failed to create directory {:?}: {}", parent, e);
+                    continue;
+                }
+            }
+
+            self.player.show_text(&format!("Copying {}...", entry.show_name), 5000);
+            if let Err(e) = std::fs::copy(nas_path, &local_path) {
+                log::error!("Failed to copy file from {:?} to {:?}: {}", nas_path, local_path, e);
+            }
+        }
+
+        // Prune unused files in the watching directory
+        if base_path.exists() && base_path.is_dir() {
+            prune_unused_files(base_path, &active_local_paths);
+        }
+
+        self.player.show_text("Round files sync complete!", 3000);
+    }
+
     fn queue_round(&self, round: &[RoundEntry]) {
         for (i, ep) in round.iter().enumerate() {
             self.player.play(&ep.absolute_path, if i == 0 { "replace" } else { "append-play" });
+        }
+    }
+}
+
+fn prune_unused_files(dir: &std::path::Path, active_paths: &std::collections::HashSet<std::path::PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            prune_unused_files(&path, active_paths);
+            // If directory is now empty, delete it
+            if let Ok(mut rd) = std::fs::read_dir(&path) {
+                if rd.next().is_none() {
+                    let _ = std::fs::remove_dir(&path);
+                }
+            }
+        } else if path.is_file() {
+            let cmp_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if !active_paths.contains(&cmp_path) {
+                log::info!("Pruning old show file: {:?}", cmp_path);
+                let _ = std::fs::remove_file(&cmp_path);
+            }
         }
     }
 }
@@ -550,6 +694,7 @@ mod tests {
         prevs: AtomicUsize,
         time: Mutex<Option<f64>>,
         seeked: Mutex<Option<f64>>,
+        playlist_pos: Mutex<Option<usize>>,
         on_wait: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     }
     impl FakePlayer {
@@ -573,7 +718,9 @@ mod tests {
         fn seek_absolute(&self, seconds: f64) {
             *self.seeked.lock().unwrap() = Some(seconds);
         }
-        fn set_playlist_pos(&self, _idx: usize) {}
+        fn set_playlist_pos(&self, idx: usize) {
+            *self.playlist_pos.lock().unwrap() = Some(idx);
+        }
         fn wait_for_round_end(&self, _stop: &StopFlag) -> Result<(), PlayerShutdown> {
             if let Some(f) = self.on_wait.lock().unwrap().as_ref() {
                 f();
@@ -714,6 +861,32 @@ mod tests {
         assert_eq!(p.prevs.load(Ordering::SeqCst), 1);
         // navigation only — stepping back marks nothing watched
         assert!(watched(&r, &cur.episode_id).is_none());
+    }
+
+    #[test]
+    fn local_path_mapping_matches_env_or_default() {
+        let show_name = "Dr. Katz";
+        let relative_path = "S01\\E01.mkv";
+        
+        let path = get_local_path(show_name, relative_path);
+        assert!(path.ends_with(std::path::Path::new("Dr. Katz").join("S01").join("E01.mkv")));
+    }
+
+    #[test]
+    fn round_entry_contains_nas_and_relative_paths() {
+        let r = replica(&[show("s1", "nelson", &["ep-a"])]);
+        let p = Arc::new(FakePlayer::default());
+        
+        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let round = run.fetch_round();
+        
+        assert_eq!(round.len(), 1);
+        let entry = &round[0];
+        assert_eq!(entry.show_name, "s1");
+        assert_eq!(entry.relative_path, "ep-a.mkv");
+        assert_eq!(entry.nas_absolute_path, r"D:\s1\ep-a.mkv");
+        let expected_suffix = std::path::Path::new("s1").join("ep-a.mkv").to_string_lossy().into_owned();
+        assert!(entry.absolute_path.ends_with(&expected_suffix));
     }
 
     #[test]
@@ -886,44 +1059,6 @@ mod tests {
         assert_eq!(run.inner.lock().unwrap().playing.as_ref().unwrap().episode_id, cur.episode_id);
     }
 
-    #[test]
-    fn play_episode_injects_and_interrupts() {
-        let r = replica(&[show("s1", "nelson", &["a", "b"]), show("s2", "nelson", &["c"])]);
-        let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
-        
-        // Compute and save a round in the database
-        let round = run.fetch_round();
-        assert_eq!(round.len(), 2);
-        let entries: Vec<(String, String, i32, String, String)> = round
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                (r.episode_id.clone(), r.show_id.clone(), i as i32, "pending".to_string(), r.playlist.clone())
-            })
-            .collect();
-        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", false);
-        
-        // Manual play for s1's "b" (which is not currently the first pick - "a" is first pick)
-        let s1 = r.show("s1").unwrap();
-        let ep_b = s1.episodes.iter().find(|e| e.id == "b").unwrap();
-        
-        // Run play_episode
-        run.play_episode(&s1, &ep_b);
-        
-        // Verify database: "b" must be prepended (play_order = 0), and duplicate "s1" entry "a" must be removed.
-        let q = r.get_round_queue();
-        // Since s1's "a" was removed, the queue should have "b" at 0, and "c" at 1.
-        assert_eq!(q.len(), 2);
-        assert_eq!(q[0].0, "b");
-        assert_eq!(q[0].2, 0); // play_order = 0
-        assert_eq!(q[1].0, "c");
-        assert_eq!(q[1].2, 1); // play_order = 1
-        
-        // Check that dirty flag is set on the queue
-        assert_eq!(q[0].6, 1);
-    }
-
     // ── round-end detection (playlist-pos -> -1) ───────────────────────
     #[test]
     fn startup_idle_minus_one_is_not_a_round_end() {
@@ -975,5 +1110,60 @@ mod tests {
         assert!(!t.observe(0)); // next round starts
         assert!(t.observe(-1));
         assert_eq!(t.ended_count(), 2);
+    }
+
+    #[test]
+    fn play_episode_navigates_within_existing_round() {
+        let r = replica(&[show("s1", "nelson", &["a", "b"]), show("s2", "nelson", &["c"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+
+        // Compute and save round
+        let round = run.fetch_round();
+        assert_eq!(round.len(), 2);
+
+        let idx_c = round.iter().position(|r| r.episode_id == "c").unwrap();
+        let idx_a = round.iter().position(|r| r.episode_id == "a").unwrap();
+        
+        let entries: Vec<(String, String, i32, String, String)> = round
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                (
+                    r.episode_id.clone(),
+                    r.show_id.clone(),
+                    i as i32,
+                    if i == idx_a { "playing".to_string() } else { "pending".to_string() },
+                    r.playlist.clone(),
+                )
+            })
+            .collect();
+        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", false);
+
+        // Populate inner.round and inner.pos (start playing "a")
+        {
+            let mut inner = run.inner.lock().unwrap();
+            inner.round = Some(round.clone());
+            inner.pos = idx_a;
+        }
+
+        // Manual play for s2's "c" (which is in the existing queue at idx_c)
+        let s2 = r.show("s2").unwrap();
+        let ep_c = s2.episodes.iter().find(|e| e.id == "c").unwrap();
+
+        run.play_episode(&s2, &ep_c);
+
+        // Verify that:
+        // 1. inner.pos is now idx_c
+        assert_eq!(run.inner.lock().unwrap().pos, idx_c);
+        // 2. FakePlayer received set_playlist_pos(idx_c)
+        assert_eq!(*p.playlist_pos.lock().unwrap(), Some(idx_c));
+        // 3. Database queue was NOT modified (order matches the round computed)
+        let q = r.get_round_queue();
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].0, round[0].episode_id);
+        assert_eq!(q[1].0, round[1].episode_id);
+        // 4. s1's "a" state was reset from "playing" to "pending"
+        assert_eq!(q[idx_a].3, "pending");
     }
 }
