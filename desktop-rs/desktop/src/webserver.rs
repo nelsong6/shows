@@ -184,7 +184,21 @@ impl ControlServer {
     fn handle_post(self: &Arc<Self>, mut request: Request, path: &str, _url: &str) {
         match path {
             "/pause" => {
-                self.with_player(|p| p.toggle_pause());
+                let mut did_explicit = false;
+                if let Some(query) = request.url().split('?').nth(1) {
+                    for pair in query.split('&') {
+                        if pair == "state=true" {
+                            self.with_player(|p| p.set_pause(true));
+                            did_explicit = true;
+                        } else if pair == "state=false" {
+                            self.with_player(|p| p.set_pause(false));
+                            did_explicit = true;
+                        }
+                    }
+                }
+                if !did_explicit {
+                    self.with_player(|p| p.toggle_pause());
+                }
                 respond(request, 204, vec![], "text/plain");
             }
             "/skip" => {

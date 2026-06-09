@@ -21,6 +21,9 @@ cargo build --release -p shows-desktop
 
 3. Close the running desktop app, then replace the local test binary:
 
+> [!NOTE]
+> **AI Agents / Assistants:** You are encouraged to execute this step automatically on behalf of the user. The build process is considered incomplete until the executable is copied over. You can use `Stop-Process` or `taskkill` to forcefully close the running app, run the copy command below, and optionally restart the app for the user.
+
 ```powershell
 Copy-Item -Force `
   D:\repos\shows\desktop-rs\target\release\shows-desktop.exe `

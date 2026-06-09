@@ -109,6 +109,7 @@ function App() {
   // Volume to flash in the transient OSD, or null when hidden.
   const [volOsd, setVolOsd] = useState<number | null>(null);
   const [displayVolume, setDisplayVolume] = useState(100);
+  const [displayPaused, setDisplayPaused] = useState(false);
 
   useEffect(() => subscribeStatus(setStatus), []);
 
@@ -127,7 +128,12 @@ function App() {
   // optimistic so rapid controls are not gated by stream delivery latency.
   const pbRef = useRef<Playback | undefined>(undefined);
   const volumeRef = useRef(100);
+  const pauseRef = useRef(false);
   const volumeSync = useRef<{desired: number | null; inFlight: boolean}>({
+    desired: null,
+    inFlight: false,
+  });
+  const pauseSync = useRef<{desired: boolean | null; inFlight: boolean}>({
     desired: null,
     inFlight: false,
   });
@@ -140,6 +146,15 @@ function App() {
         volumeSync.current.desired = null;
         volumeRef.current = currentVolume;
         setDisplayVolume(currentVolume);
+      }
+    }
+    if (status.playback?.paused != null) {
+      const currentPaused = status.playback.paused;
+      const desired = pauseSync.current.desired;
+      if (desired === null || currentPaused === desired) {
+        pauseSync.current.desired = null;
+        pauseRef.current = currentPaused;
+        setDisplayPaused(currentPaused);
       }
     }
   }, [status.playback]);
@@ -188,6 +203,35 @@ function App() {
     }
   }, [flashVolume, pumpVolumeQueue]);
 
+  const pumpPauseQueue = useCallback(() => {
+    const sync = pauseSync.current;
+    if (sync.inFlight || sync.desired === null) return;
+
+    const sent = sync.desired;
+    sync.inFlight = true;
+    pause(sent)
+      .catch(() => {
+        const current = pauseSync.current;
+        if (current.desired !== null && current.desired === sent) {
+          current.desired = null;
+        }
+      })
+      .finally(() => {
+        const current = pauseSync.current;
+        current.inFlight = false;
+        if (current.desired !== null && current.desired !== sent) {
+          pumpPauseQueue();
+        }
+      });
+  }, []);
+
+  const requestPause = useCallback((paused: boolean) => {
+    pauseRef.current = paused;
+    setDisplayPaused(paused);
+    pauseSync.current.desired = paused;
+    pumpPauseQueue();
+  }, [pumpPauseQueue]);
+
   const adjustVolume = useCallback((delta: number) => {
     requestVolume(volumeRef.current + delta, true);
   }, [requestVolume]);
@@ -223,7 +267,7 @@ function App() {
       switch (e.key) {
         case ' ':
           e.preventDefault();
-          pause();
+          requestPause(!pauseRef.current);
           break;
         case 'n':
           skip();
@@ -626,6 +670,8 @@ function App() {
         volume={displayVolume}
         onVolumeChange={requestVolume}
         onVolumeWheel={handleVolumeWheel}
+        displayPaused={displayPaused}
+        onRequestPause={requestPause}
       />
     </div>
   );
@@ -794,6 +840,8 @@ function BottomControlBar({
   volume,
   onVolumeChange,
   onVolumeWheel,
+  displayPaused,
+  onRequestPause,
 }: {
   status: Status;
   pos: number;
@@ -805,6 +853,8 @@ function BottomControlBar({
   volume: number;
   onVolumeChange: (volume: number, flash?: boolean) => void;
   onVolumeWheel: WheelEventHandler<HTMLDivElement>;
+  displayPaused: boolean;
+  onRequestPause: (paused: boolean) => void;
 }) {
   const pb = status.playback;
   const pct = pb
@@ -886,6 +936,11 @@ function BottomControlBar({
             <div className="display-now-playing" title={nowPlayingText}>
               {nowPlayingText}
             </div>
+            {pb && !pb.paused && (pb.core_idle || pb.paused_for_cache) && (
+              <div className="hud-buffering" style={{ fontSize: '10px', color: 'var(--fg-dim)', marginLeft: '12px', animation: 'pulse 1s infinite' }}>
+                BUFFERING
+              </div>
+            )}
           </div>
         </div>
 
@@ -911,11 +966,11 @@ function BottomControlBar({
 
           <button
             className="control-btn play-pause-btn"
-            onClick={() => pause()}
+            onClick={() => onRequestPause(!displayPaused)}
             disabled={!playing}
             title="Play / Pause (Space)"
           >
-            {pb?.paused ? <PlayIcon /> : <PauseIcon />}
+            {displayPaused ? <PlayIcon /> : <PauseIcon />}
           </button>
 
           <button

@@ -48,6 +48,8 @@ export type Playback = {
   percent_pos: number | null;
   volume: number | null;
   paused: boolean;
+  core_idle?: boolean;
+  paused_for_cache?: boolean;
   sub_tracks: Track[];
   audio_tracks: Track[];
   sid: number | string | null;
@@ -143,8 +145,13 @@ export async function getStats(): Promise<Stats> {
   return r.json();
 }
 
-export function pause(): void {
-  void fetch('/pause', {method: 'POST'});
+export async function pause(paused?: boolean): Promise<void> {
+  let url = '/pause';
+  if (paused !== undefined) {
+    url += `?state=${paused}`;
+  }
+  const r = await fetch(url, { method: 'POST' });
+  if (!r.ok) throw new Error(`/pause ${r.status}`);
 }
 
 export function skip(): void {

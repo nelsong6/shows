@@ -35,6 +35,8 @@ const PLAYBACK_OBSERVED_PROPERTIES: &[&str] = &[
     "percent-pos",
     "volume",
     "pause",
+    "core-idle",
+    "paused-for-cache",
     "sid",
     "aid",
     "track-list/count",
@@ -194,6 +196,9 @@ impl Player {
     pub fn toggle_pause(&self) {
         self.handle.command(&["cycle", "pause"]);
     }
+    pub fn set_pause(&self, paused: bool) {
+        self.handle.set_property("pause", if paused { "yes" } else { "no" });
+    }
     pub fn seek_relative(&self, seconds: f64) {
         self.handle
             .command(&["seek", &seconds.to_string(), "relative"]);
@@ -282,6 +287,8 @@ impl Player {
             "percent_pos": self.prop_f64("percent-pos"),
             "volume": self.prop_f64("volume"),
             "paused": self.handle.get_property("pause").map(|s| s == "yes").unwrap_or(false),
+            "core_idle": self.handle.get_property("core-idle").map(|s| s == "yes").unwrap_or(false),
+            "paused_for_cache": self.handle.get_property("paused-for-cache").map(|s| s == "yes").unwrap_or(false),
             "sub_tracks": self.tracks("sub"),
             "audio_tracks": self.tracks("audio"),
             "sid": self.handle.get_property("sid"),
