@@ -153,7 +153,7 @@ impl Compositor {
         unsafe { GetClientRect(hwnd, &mut rc)? };
         let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
 
-        let video_top = 32;
+        let video_top = (32 * unsafe { GetDpiForWindow(hwnd) } as i32) / 96;
         let video_h = (ch - video_top).max(1);
 
         // D3D11 device + composition swapchain (the video layer).
@@ -418,8 +418,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
         match msg {
             WM_NCCALCSIZE => {
                 if w.0 != 0 {
+                    let is_fs = STATE.with(|s| {
+                        s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
+                    });
                     let is_max = IsZoomed(hwnd).as_bool();
-                    if is_max {
+                    if is_max && !is_fs {
                         let params = &mut *(l.0 as *mut NCCALCSIZE_PARAMS);
                         let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                         let mut mi = MONITORINFO {
@@ -652,7 +655,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 if cw > 0 && ch > 0 {
                     STATE.with(|s| {
                         if let Some(st) = s.borrow_mut().as_mut() {
-                            let video_top = if st.is_fullscreen { 0 } else { 32 };
+                            let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+                            let video_top = if st.is_fullscreen { 0 } else { (32 * dpi) / 96 };
                             let video_h = (ch - video_top).max(1);
 
                             let _ = st.swapchain.ResizeBuffers(
@@ -741,15 +745,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     Some(Action::Exit { restore_style, restore_exstyle, restore_rect: r }) => {
                         SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
                         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, restore_exstyle);
-                        let _ = SetWindowPos(
-                            hwnd,
-                            Some(HWND_TOP),
-                            r.left,
-                            r.top,
-                            r.right - r.left,
-                            r.bottom - r.top,
-                            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-                        );
+                        if (restore_style as u32 & WS_MAXIMIZE.0) != 0 {
+                            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                        } else {
+                            let _ = SetWindowPos(
+                                hwnd,
+                                Some(HWND_TOP),
+                                r.left,
+                                r.top,
+                                r.right - r.left,
+                                r.bottom - r.top,
+                                SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+                            );
+                        }
                     }
                     None => {}
                 }
@@ -763,7 +771,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     if cw > 0 && ch > 0 {
                         STATE.with(|s| {
                             if let Some(st) = s.borrow_mut().as_mut() {
-                                let video_top = if st.is_fullscreen { 0 } else { 32 };
+                                let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+                                let video_top = if st.is_fullscreen { 0 } else { (32 * dpi) / 96 };
                                 let video_h = (ch - video_top).max(1);
                                 let _ = st.swapchain.ResizeBuffers(
                                     0,
