@@ -183,16 +183,7 @@ impl ControlServer {
                     }
                 }
             }
-            (Method::Get, "/library/pick-folder") => {
-                let folder = rfd::FileDialog::new().pick_folder();
-                match folder {
-                    Some(path) => {
-                        let path_str = path.to_string_lossy().to_string();
-                        respond_json(request, 200, &json!({ "path": path_str }))
-                    }
-                    None => respond_json(request, 200, &json!({ "path": Value::Null })),
-                }
-            }
+            (Method::Get, "/library/next-round") => self.library_next_round(request),
             (Method::Get, _) => match self.static_file(&path) {
                 Some((data, ctype)) => respond(request, 200, data, &ctype),
                 None => respond(request, 404, b"not found".to_vec(), "text/plain"),
@@ -234,11 +225,9 @@ impl ControlServer {
                 let b = read_body(&mut request);
                 if let Some(show_id) = b.get("show_id").and_then(Value::as_str) {
                     if let Some(show) = self.replica.show(show_id) {
-                        if let Some(ep) = shows_core::engine::first_unwatched(&show.episodes) {
-                            self.with_runner(|r| {
-                                r.play_episode(&show, ep);
-                            });
-                        }
+                        self.with_runner(|r| {
+                            r.play_show(&show.id);
+                        });
                     }
                 }
                 respond(request, 204, vec![], "text/plain");
@@ -362,6 +351,8 @@ impl ControlServer {
                 }
                 respond(request, 204, vec![], "text/plain");
             }
+            "/library/remove" => self.library_remove(request),
+            "/library/pick-folder" => self.library_pick_folder(request),
             "/library/preview" => self.library_preview(request),
             "/library/rescan" => self.library_rescan(request),
             _ => respond(request, 404, b"not found".to_vec(), "text/plain"),
@@ -408,6 +399,14 @@ impl ControlServer {
         respond_json(request, 200, &json!({"id": sid, "episodes": eps.len()}));
     }
 
+    fn library_pick_folder(self: &Arc<Self>, request: Request) {
+        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+            respond_json(request, 200, &json!({"path": path.to_string_lossy()}));
+        } else {
+            respond_json(request, 200, &json!({"path": null}));
+        }
+    }
+
     fn library_preview(self: &Arc<Self>, mut request: Request) {
         let b = read_body(&mut request);
         let root = b
@@ -427,6 +426,41 @@ impl ControlServer {
         respond_json(request, 200, &json!({"episodes": eps}));
     }
 
+    fn library_next_round(self: &Arc<Self>, request: Request) {
+        // We assume playlist "nelson" for now, or take it from query params.
+        // Let's just use the active shows for all playlists we know about, or default to nelson.
+        let shows = self.replica.active_shows(&["nelson".to_string()]);
+        let round = shows_core::engine::next_round(&shows);
+        
+        let mut results = Vec::new();
+        for r in round {
+            // Find the show name to return
+            let show_name = shows.iter().find(|s| s.id == r.show_id).map(|s| s.name.clone()).unwrap_or_default();
+            results.push(json!({
+                "show_id": r.show_id,
+                "show_name": show_name,
+                "episode_id": r.episode_id,
+                "relative_path": r.absolute_path,
+            }));
+        }
+        respond_json(request, 200, &json!({"next_round": results}));
+    }
+
+    fn library_remove(self: &Arc<Self>, mut request: Request) {
+        let b = read_body(&mut request);
+        let sid = b
+            .get("show_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !sid.is_empty() {
+            if self.replica.remove_show(&sid) {
+                self.push_sync();
+            }
+        }
+        respond_json(request, 200, &json!({}));
+    }
+
     fn library_rescan(self: &Arc<Self>, mut request: Request) {
         let b = read_body(&mut request);
         let sid = b
@@ -438,7 +472,6 @@ impl ControlServer {
         if let Some(show) = self.replica.show(&sid) {
             let full_sorted: Vec<String> = scan::scan_episodes(&show.root_path);
             added = self.replica.rescan_episodes(&sid, &full_sorted);
-            // We always push sync on rescan if anything was added or if positions were rewritten
             self.push_sync();
         }
         respond_json(request, 200, &json!({"added": added}));

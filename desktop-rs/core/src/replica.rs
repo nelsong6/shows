@@ -355,9 +355,6 @@ impl Replica {
         true
     }
 
-    /// Rescan episodes for a show. Takes the full, natural-sorted list of current
-    /// video files. Inserts any missing ones, and rewrites the `position` of *all*
-    /// episodes to match this sorted order. Returns how many new files were added.
     pub fn rescan_episodes(&self, show_id: &str, sorted_rels: &[String]) -> usize {
         if sorted_rels.is_empty() {
             return 0;
@@ -366,7 +363,6 @@ impl Replica {
         let mut conn = self.db.lock().unwrap();
         let tx = conn.transaction().expect("begin rescan tx");
         
-        // Find existing paths
         let existing: std::collections::HashSet<String> = {
             let mut stmt = tx.prepare("SELECT relative_path FROM episodes WHERE show_id=?1").expect("prep paths");
             stmt.query_map(params![show_id], |r| r.get(0))
@@ -1301,10 +1297,10 @@ mod tests {
     }
 
     #[test]
-    fn rescan_episodes_repositions_all() {
+    fn add_episodes_appends_positions() {
         let r = Replica::new(":memory:");
         let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()]);
-        assert_eq!(r.rescan_episodes(&sid, &["a.mkv".into(), "b.mkv".into(), "c.mkv".into()]), 1);
+        assert_eq!(r.add_episodes(&sid, &["c.mkv".into()]), 1);
         let c = r.show(&sid).unwrap().episodes.into_iter().find(|e| e.relative_path == "c.mkv").unwrap();
         assert_eq!(c.position, 2); // continues after a(0), b(1)
     }

@@ -244,6 +244,28 @@ export async function previewShow(root_path: string): Promise<string[]> {
   return data.episodes;
 }
 
+export async function pickFolder(): Promise<string | null> {
+  const r = await fetch('/library/pick-folder', { method: 'POST' });
+  const data = await r.json();
+  return data.path;
+}
+
+export interface NextRoundEpisode {
+  show_id: string;
+  show_name: string;
+  episode_id: string;
+  relative_path: string;
+}
+
+export async function getNextRound(): Promise<NextRoundEpisode[]> {
+  const r = await fetch('/library/next-round');
+  if (!r.ok) {
+    throw new Error(`failed to get next round (${r.status})`);
+  }
+  const data = await r.json();
+  return data.next_round || [];
+}
+
 export function removeShow(show_id: string): void {
   void fetch('/library/remove', {method: 'POST', body: JSON.stringify({show_id})});
 }
@@ -274,13 +296,6 @@ export async function browseDirectory(path?: string): Promise<BrowseItem[]> {
     throw new Error(msg.error || `browse failed (${r.status})`);
   }
   return r.json();
-}
-
-export async function pickFolder(): Promise<string | null> {
-  const r = await fetch('/library/pick-folder');
-  if (!r.ok) throw new Error(`pick-folder failed (${r.status})`);
-  const data = await r.json();
-  return data.path;
 }
 
 // Subscribe to the desktop status stream. The control server sends an initial

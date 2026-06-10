@@ -354,15 +354,15 @@ impl Runner {
         self.player.skip();
     }
 
-    /// Play a specific show's episode immediately by navigating to it in the current round playlist.
-    pub fn play_episode(&self, _show: &crate::engine::Show, ep: &crate::engine::Episode) {
+    /// Play a specific show immediately by navigating to it in the current round playlist.
+    pub fn play_show(&self, show_id: &str) {
         let raw = self.replica.get_round_queue();
         let filtered_raw: Vec<_> = raw
             .iter()
             .filter(|(_, _, _, _, playlist, _, _)| self.playlists.contains(playlist))
             .collect();
 
-        let existing_pos = filtered_raw.iter().position(|(ep_id, _, _, _, _, _, _)| ep_id == &ep.id);
+        let existing_pos = filtered_raw.iter().position(|(_, s_id, _, _, _, _, _)| s_id == show_id);
 
         if let Some(idx) = existing_pos {
             // Reset previous playing episode to pending if it was playing in the DB
@@ -382,7 +382,7 @@ impl Runner {
             self.player.set_playlist_pos(idx);
             self.syncer.push();
         } else {
-            log::warn!("Manual play ignored: episode {} is not in the current round queue", ep.id);
+            log::warn!("Manual play ignored: show {} is not in the current round queue", show_id);
         }
     }
 
@@ -1150,9 +1150,8 @@ mod tests {
 
         // Manual play for s2's "c" (which is in the existing queue at idx_c)
         let s2 = r.show("s2").unwrap();
-        let ep_c = s2.episodes.iter().find(|e| e.id == "c").unwrap();
 
-        run.play_episode(&s2, &ep_c);
+        run.play_show(&s2.id);
 
         // Verify that:
         // 1. inner.pos is now idx_c
