@@ -355,29 +355,47 @@ impl Replica {
         true
     }
 
-    /// Append new episodes to a show, positions continuing from max+1 (the
-    /// new-episode-detection path). Returns how many were added.
-    pub fn add_episodes(&self, show_id: &str, rels: &[String]) -> usize {
-        if rels.is_empty() {
+    /// Rescan episodes for a show. Takes the full, natural-sorted list of current
+    /// video files. Inserts any missing ones, and rewrites the `position` of *all*
+    /// episodes to match this sorted order. Returns how many new files were added.
+    pub fn rescan_episodes(&self, show_id: &str, sorted_rels: &[String]) -> usize {
+        if sorted_rels.is_empty() {
             return 0;
         }
         let now = now();
-        let conn = self.db.lock().unwrap();
-        let start: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(position), -1) FROM episodes WHERE show_id=?1",
-                params![show_id],
-                |r| r.get(0),
-            )
-            .expect("max position");
-        for (i, rel) in rels.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,NULL,NULL,?5,1)",
-                params![Uuid::new_v4().to_string(), show_id, rel, start + 1 + i as i64, now],
-            )
-            .expect("add episode");
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn.transaction().expect("begin rescan tx");
+        
+        // Find existing paths
+        let existing: std::collections::HashSet<String> = {
+            let mut stmt = tx.prepare("SELECT relative_path FROM episodes WHERE show_id=?1").expect("prep paths");
+            stmt.query_map(params![show_id], |r| r.get(0))
+                .expect("query paths")
+                .filter_map(Result::ok)
+                .collect()
+        };
+            
+        let mut added = 0;
+        
+        for (i, rel) in sorted_rels.iter().enumerate() {
+            if !existing.contains(rel) {
+                tx.execute(
+                    "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,NULL,NULL,?5,1)",
+                    params![Uuid::new_v4().to_string(), show_id, rel, i as i64, now],
+                )
+                .expect("add episode");
+                added += 1;
+            } else {
+                tx.execute(
+                    "UPDATE episodes SET position=?1, updated_at=?2, dirty=1 WHERE show_id=?3 AND relative_path=?4",
+                    params![i as i64, now, show_id, rel],
+                )
+                .expect("update episode position");
+            }
         }
-        rels.len()
+        
+        tx.commit().expect("commit rescan tx");
+        added
     }
 
     /// Relative paths already known for a show — for diffing a rescan.
@@ -1283,10 +1301,10 @@ mod tests {
     }
 
     #[test]
-    fn add_episodes_appends_positions() {
+    fn rescan_episodes_repositions_all() {
         let r = Replica::new(":memory:");
         let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()]);
-        assert_eq!(r.add_episodes(&sid, &["c.mkv".into()]), 1);
+        assert_eq!(r.rescan_episodes(&sid, &["a.mkv".into(), "b.mkv".into(), "c.mkv".into()]), 1);
         let c = r.show(&sid).unwrap().episodes.into_iter().find(|e| e.relative_path == "c.mkv").unwrap();
         assert_eq!(c.position, 2); // continues after a(0), b(1)
     }

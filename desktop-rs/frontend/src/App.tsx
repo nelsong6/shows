@@ -22,8 +22,10 @@ import {
   setAudio,
   syncNow,
   addShow,
+  previewShow,
   removeShow,
   rescanShow,
+  pickFolder,
   type Status,
   type Show,
   type HistoryEvent,
@@ -1214,6 +1216,20 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
   const [pl, setPl] = useState(playlist || 'nelson');
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    if (!path.trim()) {
+      setPreview(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      previewShow(path.trim())
+        .then((eps) => setPreview(eps))
+        .catch(() => setPreview(null));
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [path]);
 
   if (!open) {
     return (
@@ -1235,6 +1251,7 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
         setMsg(`added ${r.episodes} episode${r.episodes === 1 ? '' : 's'}`);
         setName('');
         setPath('');
+        setPreview(null);
         onAdded();
       })
       .catch((e) => setMsg(String(e.message || e)))
@@ -1244,11 +1261,33 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
   return (
     <div className="add-form">
       <input placeholder="show name" value={name} onChange={(e) => setName(e.target.value)} />
-      <input
-        placeholder="folder path"
-        value={path}
-        onChange={(e) => setPath(e.target.value)}
-      />
+      <div style={{ display: 'flex', gap: '8px' }}>
+        <input
+          style={{ flex: 1 }}
+          placeholder="folder path"
+          value={path}
+          onChange={(e) => setPath(e.target.value)}
+        />
+        <button
+          className="gb"
+          onClick={async () => {
+            try {
+              const selected = await pickFolder();
+              if (selected) setPath(selected);
+            } catch (err) {
+              setMsg(String(err));
+            }
+          }}
+        >
+          browse
+        </button>
+      </div>
+      {preview && preview.length > 0 && (
+        <div style={{ maxHeight: '150px', overflowY: 'auto', fontSize: '0.85em', background: 'rgba(0,0,0,0.2)', padding: '8px', borderRadius: '4px', marginBottom: '8px' }}>
+          <div style={{ marginBottom: '4px', opacity: 0.7 }}>Previewing {preview.length} episode{preview.length === 1 ? '' : 's'}:</div>
+          {preview.map(p => <div key={p}>{p}</div>)}
+        </div>
+      )}
       <input placeholder="playlist" value={pl} onChange={(e) => setPl(e.target.value)} />
       <div className="add-actions">
         <button className="gb" disabled={busy} onClick={submit}>
@@ -1259,6 +1298,7 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
           onClick={() => {
             setOpen(false);
             setMsg('');
+            setPreview(null);
           }}
         >
           cancel

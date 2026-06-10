@@ -183,6 +183,16 @@ impl ControlServer {
                     }
                 }
             }
+            (Method::Get, "/library/pick-folder") => {
+                let folder = rfd::FileDialog::new().pick_folder();
+                match folder {
+                    Some(path) => {
+                        let path_str = path.to_string_lossy().to_string();
+                        respond_json(request, 200, &json!({ "path": path_str }))
+                    }
+                    None => respond_json(request, 200, &json!({ "path": Value::Null })),
+                }
+            }
             (Method::Get, _) => match self.static_file(&path) {
                 Some((data, ctype)) => respond(request, 200, data, &ctype),
                 None => respond(request, 404, b"not found".to_vec(), "text/plain"),
@@ -352,6 +362,7 @@ impl ControlServer {
                 }
                 respond(request, 204, vec![], "text/plain");
             }
+            "/library/preview" => self.library_preview(request),
             "/library/rescan" => self.library_rescan(request),
             _ => respond(request, 404, b"not found".to_vec(), "text/plain"),
         }
@@ -397,6 +408,25 @@ impl ControlServer {
         respond_json(request, 200, &json!({"id": sid, "episodes": eps.len()}));
     }
 
+    fn library_preview(self: &Arc<Self>, mut request: Request) {
+        let b = read_body(&mut request);
+        let root = b
+            .get("root_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if root.is_empty() {
+            return respond_json(
+                request,
+                400,
+                &json!({"error":"root_path is required"}),
+            );
+        }
+        let eps = scan::scan_episodes(&root);
+        respond_json(request, 200, &json!({"episodes": eps}));
+    }
+
     fn library_rescan(self: &Arc<Self>, mut request: Request) {
         let b = read_body(&mut request);
         let sid = b
@@ -406,15 +436,10 @@ impl ControlServer {
             .to_string();
         let mut added = 0usize;
         if let Some(show) = self.replica.show(&sid) {
-            let known = self.replica.episode_paths(&sid);
-            let new: Vec<String> = scan::scan_episodes(&show.root_path)
-                .into_iter()
-                .filter(|f| !known.contains(f))
-                .collect();
-            added = self.replica.add_episodes(&sid, &new);
-            if added > 0 {
-                self.push_sync();
-            }
+            let full_sorted: Vec<String> = scan::scan_episodes(&show.root_path);
+            added = self.replica.rescan_episodes(&sid, &full_sorted);
+            // We always push sync on rescan if anything was added or if positions were rewritten
+            self.push_sync();
         }
         respond_json(request, 200, &json!({"added": added}));
     }
