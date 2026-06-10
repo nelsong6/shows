@@ -7,6 +7,7 @@
 # Federated to the `shows` ServiceAccount in the `shows` namespace.
 # Matches the chart's serviceaccount.yaml + deployment.yaml workload-
 # identity annotations.
+/*
 resource "azurerm_user_assigned_identity" "shows" {
   name                = "shows-identity"
   resource_group_name = azurerm_resource_group.shows.name
@@ -21,3 +22,4 @@ resource "azurerm_federated_identity_credential" "shows" {
   issuer              = local.aks_oidc_issuer_url
   subject             = "system:serviceaccount:shows:shows"
 }
+*/

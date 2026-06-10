@@ -1,0 +1,28 @@
+name: Infrastructure
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ['tofu/**']
+  push:
+    branches: [main]
+    paths: ['tofu/**']
+  workflow_dispatch:
+
+concurrency:
+  group: tofu-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  tofu:
+    uses: romaine-life/pipeline-templates/.github/workflows/tofu-plan-apply-template.yml@main
+    with:
+      working_directory: tofu
+      backend_storage_account: ${{ vars.TFSTATE_STORAGE_ACCOUNT }}
+      backend_key: shows.tfstate
+    secrets: inherit

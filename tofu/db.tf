@@ -9,6 +9,7 @@
 # workload — single-partition queries dominate, cross-partition scans
 # are rare and tolerable.
 
+/*
 resource "azurerm_cosmosdb_sql_database" "shows" {
   name                = "shows"
   resource_group_name = local.infra.resource_group_name
@@ -84,3 +85,5 @@ resource "azurerm_cosmosdb_sql_role_assignment" "shows_data_contributor" {
   principal_id        = azurerm_user_assigned_identity.shows.principal_id
   scope               = "${data.azurerm_cosmosdb_account.infra.id}/dbs/${azurerm_cosmosdb_sql_database.shows.name}"
 }
+*/
+

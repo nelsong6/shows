@@ -1,3 +1,4 @@
+/*
 output "resource_group_name" {
   value       = azurerm_resource_group.shows.name
   description = "Name of the shows resource group"
@@ -17,3 +18,4 @@ output "cosmos_database_name" {
   value       = azurerm_cosmosdb_sql_database.shows.name
   description = "Name of the shows Cosmos database. Pin into k8s/values.yaml::cosmos.database."
 }
+*/
