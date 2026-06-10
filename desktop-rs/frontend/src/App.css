@@ -825,8 +825,293 @@ button.gb.toggle-view-btn {
 
 @media (max-width: 580px) {
   /* Completely hide the HUD display on very narrow widths to prioritize playback controls */
+}
+.p-name {
+  min-width: 120px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.p-bar {
+  flex: 1;
+  height: 6px;
+  background: color-mix(in srgb, var(--fg) 12%, transparent);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.p-fill {
+  display: block;
+  height: 100%;
+  background: var(--state-busy-fg);
+}
+.p-num {
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+  min-width: 48px;
+  text-align: right;
+}
+ul.recent li {
+  display: flex;
+  gap: 10px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+.rc-show {
+  min-width: 110px;
+  color: var(--fg);
+}
+.rc-ep {
+  flex: 1;
+  color: var(--fg-dim);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.rc-when {
+  color: var(--fg-dim);
+}
+
+/* Sidebar rows are clickable (select a show -> its watch history). */
+.sidebar li {
+  cursor: pointer;
+}
+
+/* Dashboard toggled on OVER live video: dim the backdrop so the video still
+   reads behind the panels (vs. the opaque between-rounds dashboard). */
+.layout.over-video {
+  background: color-mix(in srgb, var(--bg-deep) 68%, transparent);
+}
+
+/* Flat now-playing / up-next queue. Play order; current marked, earlier
+   done (dimmed), later are what's next. */
+ul.queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+ul.queue li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 10px;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+ul.queue li:hover {
+  background: var(--surface);
+}
+ul.queue li .q-mark {
+  width: 14px;
+  text-align: center;
+  color: var(--fg-dim);
+}
+ul.queue li .q-show {
+  min-width: 120px;
+  color: var(--fg);
+}
+ul.queue li .q-ep {
+  flex: 1;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+ul.queue li .q-pl {
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+ul.queue li.now {
+  background: color-mix(in srgb, var(--state-busy-bg) 40%, transparent);
+}
+ul.queue li.now .q-mark,
+ul.queue li.now .q-show {
+  color: var(--state-busy-fg);
+}
+ul.queue li.done {
+  opacity: 0.5;
+}
+ul.queue li.next .q-mark {
+  color: transparent;
+}
+
+/* Fixed width on show/hide list button to prevent layout shifts on label change. */
+button.gb.toggle-view-btn {
+  width: 90px;
+  justify-content: center;
+}
+
+/* Responsive Media Queries to prevent overlapping of bottom control bar elements */
+
+@media (max-width: 1000px) {
+  .hud-display {
+    max-width: 240px;
+  }
+}
+
+@media (max-width: 900px) {
+  /* Collapse the volume slider range by default, auto-expand on hover or focus */
+  .volume-slider {
+    width: 0px;
+    opacity: 0;
+    pointer-events: none;
+    transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, background 0.15s ease;
+  }
+  
+  .volume-control-group:hover .volume-slider,
+  .volume-control-group:focus-within .volume-slider {
+    width: 80px;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .hud-display {
+    max-width: 180px;
+  }
+}
+
+@media (max-width: 800px) {
+  /* Compact control button sizing & spacing */
+  .control-btn {
+    width: 30px;
+    height: 30px;
+  }
+  
+  .control-btn.play-pause-btn {
+    width: 38px;
+    height: 38px;
+  }
+  
+  .controls-group {
+    gap: 6px;
+  }
+  
+  /* Hide selectors since they take up a lot of space and are rarely used compared to keyboard hotkeys */
+  .track-select {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  /* Simplify the HUD display details */
+  .hud-status {
+    display: none;
+  }
+  .hud-display {
+    height: 36px;
+    padding: 0 10px;
+    max-width: 120px;
+  }
+  .display-now-playing {
+    font-size: 11.5px;
+  }
+  
+  /* Hide Defer and Sync buttons */
+  .defer-btn,
+  .sync-btn {
+    display: none;
+  }
+}
+
+@media (max-width: 580px) {
+  /* Completely hide the HUD display on very narrow widths to prioritize playback controls */
   .left-display {
     display: none;
   }
 }
 
+/* Settings Panel */
+.settings-panel {
+  display: flex;
+  height: 100%;
+}
+
+.settings-sidebar {
+  width: 220px;
+  border-right: 1px solid var(--border);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-sidebar h3 {
+  margin-top: 0;
+  margin-bottom: 24px;
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-secondary);
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-nav .nav-btn {
+  background: transparent;
+  border: none;
+  color: var(--fg-secondary);
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 14px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.settings-nav .nav-btn:hover {
+  background: var(--surface);
+  color: var(--fg);
+}
+
+.settings-nav .nav-btn.active {
+  background: var(--surface);
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.settings-content {
+  flex: 1;
+  padding: 24px 32px 96px 32px;
+  overflow-y: auto;
+}
+
+.settings-shows-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.settings-shows-list li {
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--fg-secondary);
+  cursor: default;
+}
+
+.settings-shows-list li.selected {
+  border-color: var(--state-success-fg);
+  background: color-mix(in srgb, var(--state-success-fg) 10%, var(--surface));
+  color: var(--fg);
+}
+
+.settings-shows-list .row-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.settings-shows-list .meta {
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-top: 4px;
+}

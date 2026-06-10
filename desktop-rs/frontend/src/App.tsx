@@ -102,6 +102,7 @@ function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [history, setHistory] = useState<HistoryEvent[]>([]);
   const [showDashboard, setShowDashboard] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
   const [controlsIdle, setControlsIdle] = useState(false);
@@ -323,9 +324,11 @@ function App() {
         case 'Tab':
           e.preventDefault();
           setShowDashboard((v) => !v);
+          setShowSettings(false);
           break;
         case 'Escape':
           setShowDashboard(false);
+          setShowSettings(false);
           break;
       }
     };
@@ -505,109 +508,122 @@ function App() {
 
 
           <main className="main">
-            <div className="kpi">
-              <div className="kpi-cell">
-                <div className="kpi-key">round #</div>
-                <div className="kpi-val">{status.round_id ?? '—'}</div>
-              </div>
-              <div className="kpi-cell">
-                <div className="kpi-key">round progress</div>
-                <div className="kpi-val">
-                  {round.length ? `${pos + 1}/${round.length}` : '—'}
-                </div>
-              </div>
-              <div className="kpi-cell">
-                <div className="kpi-key">watched</div>
-                <div className="kpi-val">
-                  {activeShowStats ? (
-                    <span
-                      className={`pill ${
-                        activeShowStats.removed || activeShowStats.watched === activeShowStats.total
-                          ? 'drain'
-                          : 'busy'
-                      }`}
-                    >
-                      {activeShowStats.removed || activeShowStats.watched === activeShowStats.total
-                        ? 'yes'
-                        : activeShowName === playingShowName
-                        ? 'in progress'
-                        : 'no'}
-                    </span>
-                  ) : (
-                    '—'
-                  )}
-                </div>
-              </div>
-              <div className="kpi-cell" style={{ flex: 1, minWidth: 0 }}>
-                <div className="kpi-key">episode</div>
-                <div
-                  className="kpi-val"
-                  style={{
-                    fontSize: '14.5px',
-                    lineHeight: '24px',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    color: 'var(--fg-secondary)',
-                    fontWeight: 400
-                  }}
-                  title={activeEpisodePath || undefined}
-                >
-                  {activeEpisodePath ? shortPath(activeEpisodePath) : '—'}
-                </div>
-              </div>
-            </div>
-
-            {selectedShow ? (
-              <ShowHistory
-                show={selectedShow}
-                events={history}
-                onClose={() => setSelected(null)}
-                onPlay={() => handlePlayShow(selectedShow.id)}
-                onMarkWatched={() => handleMarkWatched(selectedShow.id)}
-                onMarkUnwatched={() => handleMarkUnwatched(selectedShow.id)}
-                onRemove={() => {
-                  removeShow(selectedShow.id);
-                  setSelected(null);
-                  setTimeout(refreshShows, 400);
-                }}
+            {showSettings ? (
+              <SettingsPanel
+                status={status}
+                shows={shows}
+                selected={selected}
+                setSelected={setSelected}
+                refreshShows={refreshShows}
+                removeShow={removeShow}
               />
             ) : (
               <>
-                <Queue round={round} pos={pos} onSelectShow={setSelected} />
-                {round.length === 0 && (
-                  <div className="section">
-                    <h3>status</h3>
-                    <div style={{ color: 'var(--fg-secondary)' }}>{status.message || '—'}</div>
-                    {status.phase === 'auth' && (
-                      <p className="filter-hint">a browser tab should be open. approve, then come back.</p>
+                <div className="kpi">
+                  <div className="kpi-cell">
+                    <div className="kpi-key">round #</div>
+                    <div className="kpi-val">{status.round_id ?? '—'}</div>
+                  </div>
+                  <div className="kpi-cell">
+                    <div className="kpi-key">round progress</div>
+                    <div className="kpi-val">
+                      {round.length ? `${pos + 1}/${round.length}` : '—'}
+                    </div>
+                  </div>
+                  <div className="kpi-cell">
+                    <div className="kpi-key">watched</div>
+                    <div className="kpi-val">
+                      {activeShowStats ? (
+                        <span
+                          className={`pill ${
+                            activeShowStats.removed || activeShowStats.watched === activeShowStats.total
+                              ? 'drain'
+                              : 'busy'
+                          }`}
+                        >
+                          {activeShowStats.removed || activeShowStats.watched === activeShowStats.total
+                            ? 'yes'
+                            : activeShowName === playingShowName
+                            ? 'in progress'
+                            : 'no'}
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </div>
+                  </div>
+                  <div className="kpi-cell" style={{ flex: 1, minWidth: 0 }}>
+                    <div className="kpi-key">episode</div>
+                    <div
+                      className="kpi-val"
+                      style={{
+                        fontSize: '14.5px',
+                        lineHeight: '24px',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        color: 'var(--fg-secondary)',
+                        fontWeight: 400
+                      }}
+                      title={activeEpisodePath || undefined}
+                    >
+                      {activeEpisodePath ? shortPath(activeEpisodePath) : '—'}
+                    </div>
+                  </div>
+                </div>
+
+                {selectedShow ? (
+                  <ShowHistory
+                    show={selectedShow}
+                    events={history}
+                    onClose={() => setSelected(null)}
+                    onPlay={() => handlePlayShow(selectedShow.id)}
+                    onMarkWatched={() => handleMarkWatched(selectedShow.id)}
+                    onMarkUnwatched={() => handleMarkUnwatched(selectedShow.id)}
+                    onRemove={() => {
+                      removeShow(selectedShow.id);
+                      setSelected(null);
+                      setTimeout(refreshShows, 400);
+                    }}
+                  />
+                ) : (
+                  <>
+                    <Queue round={round} pos={pos} onSelectShow={setSelected} />
+                    {round.length === 0 && (
+                      <div className="section">
+                        <h3>status</h3>
+                        <div style={{ color: 'var(--fg-secondary)' }}>{status.message || '—'}</div>
+                        {status.phase === 'auth' && (
+                          <p className="filter-hint">a browser tab should be open. approve, then come back.</p>
+                        )}
+                      </div>
                     )}
-                  </div>
+                    {status.last_advance?.removed_shows && status.last_advance.removed_shows.length > 0 && (
+                      <div className="section">
+                        <h3>just finished</h3>
+                        <table className="runs">
+                          <thead>
+                            <tr>
+                              <th>show</th>
+                              <th>added</th>
+                              <th>took</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {status.last_advance.removed_shows.map((r) => (
+                              <tr key={r.id}>
+                                <td>{r.name}</td>
+                                <td style={{ color: 'var(--fg-dim)' }}>{relTime(r.date_added)}</td>
+                                <td style={{ color: 'var(--fg-dim)' }}>{durationDays(r.date_added, r.last_played_at)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    <StatsPanel stats={stats} />
+                  </>
                 )}
-                {status.last_advance?.removed_shows && status.last_advance.removed_shows.length > 0 && (
-                  <div className="section">
-                    <h3>just finished</h3>
-                    <table className="runs">
-                      <thead>
-                        <tr>
-                          <th>show</th>
-                          <th>added</th>
-                          <th>took</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {status.last_advance.removed_shows.map((r) => (
-                          <tr key={r.id}>
-                            <td>{r.name}</td>
-                            <td style={{ color: 'var(--fg-dim)' }}>{relTime(r.date_added)}</td>
-                            <td style={{ color: 'var(--fg-dim)' }}>{durationDays(r.date_added, r.last_played_at)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-                <StatsPanel stats={stats} />
               </>
             )}
           </main>
@@ -624,7 +640,15 @@ function App() {
         pos={pos}
         playing={playing}
         viewing={showDashboard}
-        onToggleView={() => setShowDashboard((v) => !v)}
+        onToggleView={() => {
+          setShowDashboard((v) => !v);
+          setShowSettings(false);
+        }}
+        viewingSettings={showSettings}
+        onToggleSettings={() => {
+          setShowSettings((v) => !v);
+          if (!showDashboard) setShowDashboard(true);
+        }}
         controlsIdle={controlsIdle}
         onHoverChange={setControlsHovered}
         volume={displayVolume}
@@ -761,6 +785,14 @@ const FullscreenIcon = () => (
   </svg>
 );
 
+const SettingsIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+
+
 function fmtTime(s: number | null | undefined): string {
   if (s == null || isNaN(s)) return '--:--';
   const t = Math.max(0, Math.floor(s));
@@ -795,6 +827,8 @@ function BottomControlBar({
   playing,
   viewing,
   onToggleView,
+  viewingSettings,
+  onToggleSettings,
   controlsIdle,
   onHoverChange,
   volume,
@@ -808,6 +842,8 @@ function BottomControlBar({
   playing: boolean;
   viewing: boolean;
   onToggleView: () => void;
+  viewingSettings: boolean;
+  onToggleSettings: () => void;
   controlsIdle: boolean;
   onHoverChange: (hovered: boolean) => void;
   volume: number;
@@ -1037,13 +1073,21 @@ function BottomControlBar({
 
           {playing && (
             <button
-              className={`control-btn playlist-btn${viewing ? ' active' : ''}`}
+              className={`control-btn playlist-btn${viewing && !viewingSettings ? ' active' : ''}`}
               onClick={onToggleView}
               title="Toggle Playlist (v / Tab)"
             >
               <PlaylistIcon />
             </button>
           )}
+
+          <button
+            className={`control-btn settings-btn${viewingSettings ? ' active' : ''}`}
+            onClick={onToggleSettings}
+            title="Settings & Library Management"
+          >
+            <SettingsIcon />
+          </button>
 
           <button
             className="control-btn fullscreen-btn"
@@ -1316,4 +1360,118 @@ function durationDays(start: string, end: string): string {
   return `${days}d`;
 }
 
+function SettingsPanel({
+  status,
+  shows,
+  selected,
+  setSelected,
+  refreshShows,
+  removeShow,
+}: {
+  status: Status;
+  shows: Show[];
+  selected: string | null;
+  setSelected: (id: string | null) => void;
+  refreshShows: () => void;
+  removeShow: (id: string) => void;
+}) {
+  const [activeTab, setActiveTab] = useState<'library' | 'add_show' | 'general' | 'appearance'>('library');
+
+  return (
+    <div className="settings-panel">
+      <div className="settings-sidebar">
+        <h3>settings</h3>
+        <nav className="settings-nav">
+          <button className={`nav-btn${activeTab === 'library' ? ' active' : ''}`} onClick={() => setActiveTab('library')}>library</button>
+          <button className={`nav-btn${activeTab === 'add_show' ? ' active' : ''}`} onClick={() => setActiveTab('add_show')}>add show</button>
+          <button className={`nav-btn${activeTab === 'general' ? ' active' : ''}`} onClick={() => setActiveTab('general')}>general</button>
+          <button className={`nav-btn${activeTab === 'appearance' ? ' active' : ''}`} onClick={() => setActiveTab('appearance')}>appearance</button>
+        </nav>
+      </div>
+
+      <div className="settings-content">
+        {activeTab === 'library' && (
+          <div className="settings-tab">
+            <div className="section">
+              <h3>library ({shows.length} shows)</h3>
+              {shows.length === 0 ? (
+                <div className="empty">no shows yet.</div>
+              ) : (
+                <ul className="settings-shows-list">
+                  {shows.map((sh) => (
+                    <li
+                      key={sh.id}
+                      className={selected === sh.id ? 'selected' : ''}
+                      onClick={() => setSelected(selected === sh.id ? null : sh.id)}
+                    >
+                      <div className="row-top">
+                        <span>{sh.name}</span>
+                        <div className="actions" style={{ display: 'flex', gap: '8px' }}>
+                          <button
+                            className="mini"
+                            title="scan this show's folder for new episodes"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void rescanShow(sh.id).then(refreshShows);
+                            }}
+                          >
+                            rescan
+                          </button>
+                          <button
+                            className="mini danger"
+                            title="remove this show"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeShow(sh.id);
+                              if (selected === sh.id) setSelected(null);
+                              setTimeout(refreshShows, 400);
+                            }}
+                          >
+                            remove
+                          </button>
+                        </div>
+                      </div>
+                      <div className="meta">
+                        added {relTime(sh.date_added)}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'add_show' && (
+          <div className="settings-tab">
+            <div className="section">
+              <h3>add show</h3>
+              <AddShowForm playlist={status.playlist} onAdded={refreshShows} />
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'general' && (
+          <div className="settings-tab">
+            <div className="section">
+              <h3>general</h3>
+              <div className="empty" style={{ padding: '24px 0' }}>general settings coming soon...</div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'appearance' && (
+          <div className="settings-tab">
+            <div className="section">
+              <h3>appearance</h3>
+              <div className="empty" style={{ padding: '24px 0' }}>appearance settings coming soon...</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default App;
+
