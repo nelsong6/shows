@@ -172,6 +172,17 @@ impl ControlServer {
                 respond_json(request, 200, &v)
             }
             (Method::Get, "/health") => respond(request, 200, b"ok".to_vec(), "text/plain"),
+            (Method::Get, "/library/browse") => {
+                let target_path = query_param(&url, "path").unwrap_or_default();
+                if target_path.is_empty() {
+                    respond_json(request, 200, &json!(list_drives()));
+                } else {
+                    match read_directories(&target_path) {
+                        Ok(dirs) => respond_json(request, 200, &json!(dirs)),
+                        Err(e) => respond_json(request, 500, &json!({"error": e.to_string()})),
+                    }
+                }
+            }
             (Method::Get, _) => match self.static_file(&path) {
                 Some((data, ctype)) => respond(request, 200, data, &ctype),
                 None => respond(request, 404, b"not found".to_vec(), "text/plain"),
@@ -610,10 +621,88 @@ fn query_param(url: &str, key: &str) -> Option<String> {
 }
 
 fn urlencoding_decode(s: &str) -> String {
-    // Minimal: the overlay only sends show ids (uuids), so a passthrough with
-    // '+'->space is sufficient; percent-decoding via the std isn't available, so
-    // ids (no special chars) pass through unchanged.
-    s.replace('+', " ")
+    let mut result = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(val) = u8::from_str_radix(hex, 16) {
+                    result.push(val);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        if bytes[i] == b'+' {
+            result.push(b' ');
+        } else {
+            result.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+fn list_drives() -> Vec<Value> {
+    let mut drives = Vec::new();
+    for c in b'A'..=b'Z' {
+        let drive_root = format!("{}:\\", c as char);
+        if Path::new(&drive_root).exists() {
+            drives.push(json!({
+                "name": format!("{}:", c as char),
+                "path": drive_root,
+                "is_drive": true
+            }));
+        }
+    }
+    drives
+}
+
+#[cfg(target_os = "windows")]
+fn is_hidden(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    if let Ok(metadata) = path.metadata() {
+        let attributes = metadata.file_attributes();
+        // FILE_ATTRIBUTE_HIDDEN = 0x2, FILE_ATTRIBUTE_SYSTEM = 0x4
+        (attributes & 0x6) != 0
+    } else {
+        false
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_hidden(path: &Path) -> bool {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        name.starts_with('.')
+    } else {
+        false
+    }
+}
+
+fn read_directories(path: &str) -> std::io::Result<Vec<Value>> {
+    let mut dirs = Vec::new();
+    let entries = std::fs::read_dir(path)?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_dir() {
+            if is_hidden(&p) {
+                continue;
+            }
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                dirs.push(json!({
+                    "name": name,
+                    "path": p.to_string_lossy().to_string(),
+                }));
+            }
+        }
+    }
+    dirs.sort_by(|a, b| {
+        let name_a = a["name"].as_str().unwrap_or("").to_lowercase();
+        let name_b = b["name"].as_str().unwrap_or("").to_lowercase();
+        name_a.cmp(&name_b)
+    });
+    Ok(dirs)
 }
 
 fn read_body(request: &mut Request) -> Value {

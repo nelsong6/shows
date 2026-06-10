@@ -239,6 +239,7 @@ impl Runner {
     }
 
     pub fn run(&self) {
+        self.syncer.push(); // push any pending local changes or trigger auto-seed on startup
         self.syncer.seed(); // pull/reconcile once before the first local round
         self.run_loop();
     }

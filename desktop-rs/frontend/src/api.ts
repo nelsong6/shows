@@ -247,6 +247,22 @@ export async function rescanShow(show_id: string): Promise<{added: number}> {
   return r.json();
 }
 
+export type BrowseItem = {
+  name: string;
+  path: string;
+  is_drive?: boolean;
+};
+
+export async function browseDirectory(path?: string): Promise<BrowseItem[]> {
+  const url = path ? `/library/browse?path=${encodeURIComponent(path)}` : '/library/browse';
+  const r = await fetch(url);
+  if (!r.ok) {
+    const msg = await r.json().catch(() => ({}));
+    throw new Error(msg.error || `browse failed (${r.status})`);
+  }
+  return r.json();
+}
+
 // Subscribe to the desktop status stream. The control server sends an initial
 // snapshot immediately, then publishes runner/window/mpv updates as they occur.
 export function subscribeStatus(onStatus: (s: Status) => void): () => void {

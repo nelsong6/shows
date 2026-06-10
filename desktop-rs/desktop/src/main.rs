@@ -20,8 +20,6 @@ mod webserver;
 use std::sync::{Arc, mpsc::sync_channel};
 use std::time::{Duration, Instant};
 
-use shows_core::apiclient::{Client, RefreshFn};
-use shows_core::oauth;
 use shows_core::replica::Replica;
 use shows_core::roundlogic::parse_playlists;
 use shows_core::runner::{Callbacks, PlayerOps, Runner, StopFlag, SyncOps};
@@ -93,16 +91,8 @@ fn start_status_waker(
         let _ = tx.try_send(());
     })
 }
-
 fn to_err(e: String) -> Box<dyn std::error::Error> {
     e.into()
-}
-
-/// Open a URL in the default browser (the oauth login flow).
-fn open_browser(url: &str) {
-    let _ = std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", url])
-        .spawn();
 }
 
 /// `%APPDATA%\shows\replica.db`.
@@ -167,33 +157,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         &std::env::var("SHOWS_PLAYLISTS").unwrap_or_default(),
         &["nelson"],
     );
-    let base_url = std::env::var("SHOWS_BASE_URL")
-        .unwrap_or_else(|_| shows_core::apiclient::DEFAULT_BASE_URL.to_string());
-    let auth_base = std::env::var("SHOWS_AUTH_BASE")
-        .unwrap_or_else(|_| oauth::DEFAULT_AUTH_BASE_URL.to_string());
-
-    // Token: a SHOWS_TOKEN env override (offline / testing) or the PKCE login flow.
-    let token = match std::env::var("SHOWS_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => {
-            oauth::ensure_token(&auth_base, open_browser)
-                .map_err(to_err)?
-                .token
-        }
-    };
-    let auth_base2 = auth_base.clone();
-    let refresh: RefreshFn = Box::new(move || {
-        oauth::ensure_token(&auth_base2, open_browser)
-            .map(|t| t.token)
-            .unwrap_or_default()
-    });
-    let client = Arc::new(Client::new(token, base_url, Some(refresh)));
-
     // Offline-first: the replica is the working copy; the syncer reconciles it.
     // SHOWS_REPLICA overrides the path (used for safe, throwaway test runs).
     let rp = std::env::var("SHOWS_REPLICA").unwrap_or_else(|_| replica_path());
     let replica = Arc::new(Replica::new(&rp));
-    let syncer = Arc::new(Syncer::new(replica.clone(), client, playlists.clone()));
+
+    // SQLite-to-SQLite Sync: synchronizes the local replica with a database file on a network share/NAS.
+    // Defaults to S:\shows.db, can be overridden by SHOWS_SHARED_DB.
+    let shared_db_path = std::env::var("SHOWS_SHARED_DB")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| Some("S:\\shows.db".to_string()));
+    let syncer = Arc::new(Syncer::new(replica.clone(), shared_db_path, playlists.clone()));
 
     // Control server serves the React overlay + the control surface. Picking
     // a dist dir: explicit env override > in-tree source dir (dev) > embedded (release).

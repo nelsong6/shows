@@ -502,47 +502,7 @@ function App() {
       )}
       {dashboardVisible ? (
         <div className={`layout${playing ? ' over-video' : ''}`}>
-          <aside className="sidebar">
-            <h2>{status.playlist || 'playlist'}</h2>
-            {shows.length === 0 ? (
-              <div className="empty" style={{ margin: '0 16px' }}>
-                no shows yet.
-              </div>
-            ) : (
-              <ul>
-                {shows.map((sh) => (
-                  <li
-                    key={sh.id}
-                    className={selected === sh.id ? 'selected' : ''}
-                    onClick={() => setSelected(selected === sh.id ? null : sh.id)}
-                  >
-                    <div className="row-top">
-                      <span>{sh.name}</span>
-                      <button
-                        className="mini"
-                        title="scan this show's folder for new episodes"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void rescanShow(sh.id).then(refreshShows);
-                        }}
-                      >
-                        rescan
-                      </button>
-                    </div>
-                    <div className="meta">
-                      added {relTime(sh.date_added)}
-                      {playingByShow.has(sh.id) && (
-                        <span className="pill busy" style={{ marginLeft: 8 }}>
-                          playing
-                        </span>
-                      )}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-            <AddShowForm playlist={status.playlist} onAdded={refreshShows} />
-          </aside>
+
 
           <main className="main">
             <div className="kpi">

@@ -1,6 +1,0 @@
-apiVersion: v2
-name: shows
-description: TV-show playlist API for romaine.life (Go + Postgres on CNPG)
-type: application
-version: 0.1.0
-appVersion: "0.1.0"

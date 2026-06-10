@@ -22,7 +22,7 @@ use uuid::Uuid;
 use crate::engine::{self, Episode, Show};
 use crate::model::{LibraryEpisode, LibraryShow, LibraryQueue};
 
-const SCHEMA: &str = "
+pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS shows (
   id         TEXT PRIMARY KEY,
   playlist   TEXT NOT NULL,
@@ -740,6 +740,174 @@ impl Replica {
             "recent": recent,
             "by_day": Value::Object(by_day),
         })
+    }
+
+    pub fn push_to_shared(&self, shared_conn: &mut Connection) -> Result<(Vec<String>, Vec<String>, Vec<String>, Option<String>), rusqlite::Error> {
+        let local_conn = self.db.lock().unwrap();
+
+        // 1. Shows
+        let mut stmt = local_conn.prepare("SELECT id, playlist, name, root_path, date_added, removed_at, updated_at FROM shows WHERE dirty=1")?;
+        let dirty_shows: Vec<(String, String, String, String, Option<String>, Option<String>, String)> = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .filter_map(Result::ok)
+        .collect();
+
+        // 2. Episodes
+        let mut stmt = local_conn.prepare("SELECT id, show_id, relative_path, position, watched_at, resume_pos, updated_at FROM episodes WHERE dirty=1")?;
+        let dirty_episodes: Vec<(String, String, String, i64, Option<String>, Option<f64>, String)> = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+            ))
+        })?
+        .filter_map(Result::ok)
+        .collect();
+
+        // 3. History
+        let mut stmt = local_conn.prepare("SELECT id, show_id, episode_id, relative_path, played_at FROM watch_history WHERE dirty=1")?;
+        let dirty_history: Vec<(String, String, String, Option<String>, String)> = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+            ))
+        })?
+        .filter_map(Result::ok)
+        .collect();
+
+        // 4. Queue (round_queue is synced per playlist, so if any row is dirty in a playlist, we sync all entries for that playlist)
+        let dirty_pl: Option<(String, String)> = local_conn.query_row(
+            "SELECT playlist, updated_at FROM round_queue WHERE dirty=1 LIMIT 1",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        )
+        .optional()?;
+
+        let queue_data = if let Some((playlist, updated_at)) = dirty_pl {
+            let mut stmt = local_conn.prepare("SELECT episode_id, show_id, play_order, state FROM round_queue WHERE playlist=?1 ORDER BY play_order")?;
+            let entries: Vec<(String, String, i32, String)> = stmt.query_map([&playlist], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .filter_map(Result::ok)
+            .collect();
+            Some((playlist, updated_at, entries))
+        } else {
+            None
+        };
+
+        // Write all these to the shared database inside a transaction
+        let tx = shared_conn.transaction()?;
+        {
+            // Write shows
+            for s in &dirty_shows {
+                let existing: Option<String> = tx.query_row(
+                    "SELECT updated_at FROM shows WHERE id=?1",
+                    params![s.0],
+                    |r| r.get(0)
+                )
+                .optional()?;
+                
+                let should_write = match existing {
+                    None => true,
+                    Some(ref cur_updated) => newer(Some(&s.6), Some(cur_updated))
+                };
+                if should_write {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO shows(id,playlist,name,root_path,date_added,removed_at,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
+                        params![s.0, s.1, s.2, s.3, s.4, s.5, s.6]
+                    )?;
+                }
+            }
+
+            // Write episodes
+            for e in &dirty_episodes {
+                let existing: Option<String> = tx.query_row(
+                    "SELECT updated_at FROM episodes WHERE id=?1",
+                    params![e.0],
+                    |r| r.get(0)
+                )
+                .optional()?;
+                
+                let should_write = match existing {
+                    None => true,
+                    Some(ref cur_updated) => newer(Some(&e.6), Some(cur_updated))
+                };
+                if should_write {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
+                        params![e.0, e.1, e.2, e.3, e.4, e.5, e.6]
+                    )?;
+                }
+            }
+
+            // Write watch_history
+            for h in &dirty_history {
+                tx.execute(
+                    "INSERT OR IGNORE INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,0)",
+                    params![h.0, h.1, h.2, h.3, h.4]
+                )?;
+            }
+
+            // Write queue
+            if let Some((ref playlist, ref updated_at, ref entries)) = queue_data {
+                let existing_updated: Option<String> = tx.query_row(
+                    "SELECT MAX(updated_at) FROM round_queue WHERE playlist=?1",
+                    params![playlist],
+                    |r| r.get(0)
+                )
+                .optional()?
+                .flatten();
+                
+                let should_write = match existing_updated {
+                    None => true,
+                    Some(ref cur_updated) => newer(Some(updated_at), Some(cur_updated))
+                };
+                if should_write {
+                    tx.execute("DELETE FROM round_queue WHERE playlist=?1", params![playlist])?;
+                    for entry in entries {
+                        tx.execute(
+                            "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                            params![entry.0, entry.1, entry.2, entry.3, playlist, updated_at]
+                        )?;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+
+        // Collect IDs of successfully written dirty rows to mark them as clean in the local DB
+        let show_ids: Vec<String> = dirty_shows.into_iter().map(|s| s.0).collect();
+        let episode_ids: Vec<String> = dirty_episodes.into_iter().map(|e| e.0).collect();
+        let history_ids: Vec<String> = dirty_history.into_iter().map(|h| h.0).collect();
+        let queue_playlist = queue_data.map(|q| q.0);
+
+        Ok((show_ids, episode_ids, history_ids, queue_playlist))
+    }
+
+    pub fn mark_all_dirty(&self) -> Result<(), rusqlite::Error> {
+        let conn = self.db.lock().unwrap();
+        conn.execute("UPDATE shows SET dirty = 1", [])?;
+        conn.execute("UPDATE episodes SET dirty = 1", [])?;
+        conn.execute("UPDATE watch_history SET dirty = 1", [])?;
+        conn.execute("UPDATE round_queue SET dirty = 1", [])?;
+        Ok(())
     }
 }
 

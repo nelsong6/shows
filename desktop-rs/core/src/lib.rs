@@ -5,10 +5,8 @@
 //! the compiler rather than by discipline.
 #![forbid(unsafe_code)]
 
-pub mod apiclient;
 pub mod engine;
 pub mod model;
-pub mod oauth;
 pub mod ordering;
 pub mod replica;
 pub mod roundlogic;
