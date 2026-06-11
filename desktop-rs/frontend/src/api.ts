@@ -266,6 +266,19 @@ export async function getNextRound(): Promise<NextRoundEpisode[]> {
   return data.next_round || [];
 }
 
+export async function detectNewFolders(parentPath: string): Promise<string[]> {
+  const r = await fetch('/library/detect-unadded', {
+    method: 'POST',
+    body: JSON.stringify({ parent_path: parentPath }),
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to detect new folders (${r.status})`);
+  }
+  const data = await r.json();
+  return data.unadded || [];
+}
+
 export function removeShow(show_id: string): void {
   void fetch('/library/remove', {method: 'POST', body: JSON.stringify({show_id})});
 }

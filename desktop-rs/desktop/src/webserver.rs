@@ -351,10 +351,10 @@ impl ControlServer {
                 }
                 respond(request, 204, vec![], "text/plain");
             }
-            "/library/remove" => self.library_remove(request),
             "/library/pick-folder" => self.library_pick_folder(request),
             "/library/preview" => self.library_preview(request),
             "/library/rescan" => self.library_rescan(request),
+            "/library/detect-unadded" => self.library_detect_unadded(request),
             _ => respond(request, 404, b"not found".to_vec(), "text/plain"),
         }
     }
@@ -444,6 +444,51 @@ impl ControlServer {
             }));
         }
         respond_json(request, 200, &json!({"next_round": results}));
+    }
+
+    fn library_detect_unadded(self: &Arc<Self>, mut request: Request) {
+        let b = read_body(&mut request);
+        let parent = b
+            .get("parent_path")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if parent.is_empty() {
+            return respond_json(
+                request,
+                400,
+                &json!({"error":"parent_path is required"}),
+            );
+        }
+
+        let mut unadded = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&parent) {
+            let existing_shows = self.replica.all_shows();
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if file_type.is_dir() {
+                        let path = entry.path();
+                        let path_str = path.to_string_lossy().to_string();
+                        // Check if any existing show has a matching folder name
+                        // This handles the migration from D:\Downloads\Group-Nelson to S:\Group-Nelson
+                        let is_added = existing_shows.iter().any(|s| {
+                            let s_path = std::path::Path::new(&s.root_path);
+                            if let (Some(s_name), Some(p_name)) = (s_path.file_name(), path.file_name()) {
+                                s_name == p_name
+                            } else {
+                                s_path == path.as_path()
+                            }
+                        });
+                        if !is_added {
+                            unadded.push(path_str);
+                        }
+                    }
+                }
+            }
+        }
+        unadded.sort();
+        respond_json(request, 200, &json!({"unadded": unadded}));
     }
 
     fn library_remove(self: &Arc<Self>, mut request: Request) {

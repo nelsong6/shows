@@ -23,6 +23,7 @@ import {
   syncNow,
   addShow,
   previewShow,
+  detectNewFolders,
   pickFolder,
   getNextRound,
   type NextRoundEpisode,
@@ -572,7 +573,6 @@ function App() {
               </table>
             </div>
           )}
-          <StatsPanel stats={stats} />
         </>
       )}
     </>
@@ -629,6 +629,7 @@ function App() {
             <SettingsPanel
               status={status}
               shows={shows}
+              stats={stats}
               selected={selected}
               setSelected={setSelected}
               refreshShows={refreshShows}
@@ -1220,6 +1221,9 @@ function ShowHistory({
 
 // Add a show by pointing at a local folder; the desktop scans it for episodes.
 function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => void }) {
+  const [mode, setMode] = useState<'manual' | 'detect'>('detect');
+  
+  // Manual state
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [pl, setPl] = useState(playlist || 'nelson');
@@ -1227,9 +1231,17 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
   const [busy, setBusy] = useState(false);
   const [previewData, setPreviewData] = useState<string[] | null>(null);
 
-  const handlePreview = async () => {
-    const cleanPath = path.trim().replace(/^["']|["']$/g, '');
-    if (!name.trim() || !cleanPath) {
+  // Detect state
+  const PRESET_FOLDER = "S:\\Group-Nelson";
+  const [detectedFolders, setDetectedFolders] = useState<string[] | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+
+  const handlePreview = async (overridePath?: string, overrideName?: string) => {
+    const p = overridePath || path;
+    const n = overrideName !== undefined ? overrideName : name;
+    const cleanPath = p.trim().replace(/^["']|["']$/g, '');
+    if (!n.trim() || !cleanPath) {
       setMsg('name and folder are required');
       return;
     }
@@ -1259,71 +1271,181 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
         setTimeout(() => {
           setMsg('');
         }, 1500);
+        setDetectedFolders(null);
         onAdded();
       })
       .catch((e) => setMsg(String(e.message || e)))
       .finally(() => setBusy(false));
   };
 
+  const handleDetect = async () => {
+    setDetecting(true);
+    setMsg('detecting…');
+    try {
+      const folders = await detectNewFolders(PRESET_FOLDER);
+      setDetectedFolders(folders);
+      setLastRefreshed(new Date());
+      setMsg('');
+    } catch (e: any) {
+      setMsg(String(e.message || e));
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const selectDetected = (folderPath: string) => {
+    // Extract the folder name to use as default show name
+    const parts = folderPath.split(/[\\/]/);
+    const folderName = parts[parts.length - 1] || '';
+    
+    setName(folderName);
+    setPath(folderPath);
+    setMode('manual');
+    setMsg('');
+    // Auto-preview once the state settles
+    setTimeout(() => {
+      handlePreview(folderPath, folderName);
+    }, 50);
+  };
+
+  useEffect(() => {
+    if (mode === 'detect' && detectedFolders === null && !detecting) {
+      handleDetect();
+    }
+  }, [mode, detectedFolders, detecting]);
+
   return (
-    <div className="add-form" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-      <input placeholder="show name" value={name} onChange={(e) => setName(e.target.value)} disabled={!!previewData} />
-      <div style={{ display: 'flex', gap: '8px' }}>
-        <input
-          placeholder="folder path"
-          value={path}
-          onChange={(e) => setPath(e.target.value)}
-          style={{ flex: 1 }}
-          disabled={!!previewData}
-        />
-        {!previewData && (
-          <button className="gb" disabled={busy} onClick={() => pickFolder().then(p => { if (p) setPath(p); })}>
-            browse
-          </button>
-        )}
+    <div className="add-form" style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, minHeight: 0 }}>
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
+        <button 
+          className="gb" 
+          style={{ flex: 1, textAlign: 'center', padding: '8px', opacity: mode === 'detect' ? 1 : 0.5 }}
+          onClick={() => { 
+            if (mode === 'detect') {
+              handleDetect();
+            } else {
+              setMode('detect'); 
+            }
+            setMsg(''); 
+          }}
+        >
+          detect new folders
+        </button>
+        <button 
+          className="gb" 
+          style={{ flex: 1, textAlign: 'center', padding: '8px', opacity: mode === 'manual' ? 1 : 0.5 }}
+          onClick={() => { setMode('manual'); setMsg(''); }}
+        >
+          manually add
+        </button>
       </div>
-      <input placeholder="playlist" value={pl} onChange={(e) => setPl(e.target.value)} disabled={!!previewData} />
-      
-      {previewData && (
-        <div style={{ marginTop: '16px', marginBottom: '16px' }}>
-          <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', color: 'var(--fg)' }}>
-            Found {previewData.length} episode{previewData.length === 1 ? '' : 's'}
-          </h4>
-          <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '4px' }}>
-            <ul className="queue">
-              {previewData.map((epPath, i) => (
-                <li key={i} className="next">
-                  <span className="q-mark" style={{ opacity: 0.5 }}>{i + 1}</span>
-                  <span className="q-ep">{epPath}</span>
-                </li>
-              ))}
-            </ul>
+
+      {mode === 'detect' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, minHeight: 0 }}>
+          <div style={{ fontSize: '13px', opacity: 0.8, marginBottom: '4px' }}>
+            Scanning folder: <strong>{PRESET_FOLDER}</strong>
           </div>
+          
+          {detectedFolders === null && detecting && (
+            <div style={{ padding: '8px', opacity: 0.7 }}>Scanning NAS for new folders...</div>
+          )}
+
+          {detectedFolders !== null && (
+            <div style={{ marginTop: '16px', marginBottom: '8px', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '8px' }}>
+                <h4 style={{ margin: 0, fontSize: '13px', color: 'var(--fg)' }}>
+                  Found {detectedFolders.length} new folder{detectedFolders.length === 1 ? '' : 's'}
+                </h4>
+                {lastRefreshed && (
+                  <span style={{ fontSize: '12px', opacity: 0.6 }}>
+                    Refreshed at {lastRefreshed.toLocaleTimeString()}
+                  </span>
+                )}
+              </div>
+              {detectedFolders.length > 0 && (
+                <div style={{ border: '1px solid var(--border)', borderRadius: '4px', overflowY: 'auto', flex: '0 1 auto', minHeight: 0 }}>
+                  <ul className="queue">
+                    {detectedFolders.map((folder, i) => {
+                      const parts = folder.split(/[\\/]/);
+                      const folderName = parts[parts.length - 1] || folder;
+                      return (
+                        <li key={i} className="next" style={{ cursor: 'pointer' }} onClick={() => selectDetected(folder)}>
+                          <span className="q-mark" style={{ opacity: 0.5 }}>+</span>
+                          <span className="q-show">{folderName}</span>
+                          <span className="q-ep">{folder}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
-      <div className="add-actions" style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
-        {!previewData ? (
-          <button className="gb" disabled={busy} onClick={handlePreview}>
-            preview
-          </button>
-        ) : (
-          <button className="gb" disabled={busy} onClick={handleAdd}>
-            confirm add
-          </button>
-        )}
-        <button
-          className="gb"
-          onClick={() => {
-            setName('');
-            setPath('');
-            setPreviewData(null);
-            setMsg('');
-          }}
-        >
-          clear
-        </button>
-      </div>
+      {mode === 'manual' && (
+        <form onSubmit={(e) => { e.preventDefault(); handleAdd(); }} style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, minHeight: 0 }}>
+          <input placeholder="show name" value={name} onChange={(e) => setName(e.target.value)} disabled={!!previewData} />
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <input
+              placeholder="folder path"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              style={{ flex: 1 }}
+              disabled={!!previewData}
+            />
+            {!previewData && (
+              <button className="gb" disabled={busy} onClick={() => pickFolder().then(p => { if (p) setPath(p); })}>
+                browse
+              </button>
+            )}
+          </div>
+          <input placeholder="playlist" value={pl} onChange={(e) => setPl(e.target.value)} disabled={!!previewData} />
+          
+          <div className="add-actions" style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
+            {!previewData ? (
+              <button className="gb" disabled={busy} onClick={() => handlePreview()}>
+                preview
+              </button>
+            ) : (
+              <button className="gb" disabled={busy} onClick={handleAdd}>
+                confirm add
+              </button>
+            )}
+            <button
+              className="gb"
+              onClick={() => {
+                setName('');
+                setPath('');
+                setPreviewData(null);
+                setMsg('');
+              }}
+            >
+              clear
+            </button>
+          </div>
+
+          {previewData && (
+            <div style={{ marginTop: '16px', marginBottom: '8px', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+              <h4 style={{ margin: '0 0 8px 0', fontSize: '13px', color: 'var(--fg)', flexShrink: 0 }}>
+                Found {previewData.length} episode{previewData.length === 1 ? '' : 's'}
+              </h4>
+              <div style={{ border: '1px solid var(--border)', borderRadius: '4px', overflowY: 'auto', flex: '0 1 auto', minHeight: 0 }}>
+                <ul className="queue">
+                  {previewData.map((epPath, i) => (
+                    <li key={i} className="next">
+                      <span className="q-mark" style={{ opacity: 0.5 }}>{i + 1}</span>
+                      <span className="q-ep">{epPath}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+        </form>
+      )}
+
       {msg && <div className="add-msg">{msg}</div>}
     </div>
   );
@@ -1423,6 +1545,7 @@ function durationDays(start: string, end: string): string {
 function SettingsPanel({
   status,
   shows,
+  stats,
   selected,
   setSelected,
   refreshShows,
@@ -1431,13 +1554,14 @@ function SettingsPanel({
 }: {
   status: Status;
   shows: Show[];
+  stats: Stats | null;
   selected: string | null;
   setSelected: (id: string | null) => void;
   refreshShows: () => void;
   removeShow: (id: string) => void;
   overviewContent: React.ReactNode;
 }) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'stats' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
 
   return (
     <div className="settings-panel">
@@ -1445,6 +1569,7 @@ function SettingsPanel({
         <h3>settings</h3>
         <nav className="settings-nav">
           <button className={`nav-btn${activeTab === 'overview' ? ' active' : ''}`} onClick={() => setActiveTab('overview')}>overview</button>
+          <button className={`nav-btn${activeTab === 'stats' ? ' active' : ''}`} onClick={() => setActiveTab('stats')}>stats</button>
           <button className={`nav-btn${activeTab === 'library' ? ' active' : ''}`} onClick={() => setActiveTab('library')}>library</button>
           <button className={`nav-btn${activeTab === 'add_show' ? ' active' : ''}`} onClick={() => setActiveTab('add_show')}>add show</button>
           <button className={`nav-btn${activeTab === 'next_round' ? ' active' : ''}`} onClick={() => setActiveTab('next_round')}>next round</button>
@@ -1460,6 +1585,12 @@ function SettingsPanel({
           </div>
         )}
 
+        {activeTab === 'stats' && (
+          <div className="settings-tab">
+            <StatsPanel stats={stats} />
+          </div>
+        )}
+
         {activeTab === 'library' && (
           <div className="settings-tab">
             <div className="section">
@@ -1468,7 +1599,7 @@ function SettingsPanel({
                 <div className="empty">no shows yet.</div>
               ) : (
                 <ul className="queue">
-                  {shows.map((sh) => (
+                  {[...shows].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })).map((sh) => (
                     <li
                       key={sh.id}
                       className={`next ${selected === sh.id ? 'now' : ''}`}
@@ -1492,9 +1623,9 @@ function SettingsPanel({
         {activeTab === 'next_round' && <NextRoundTab currentRound={status.round || []} onSelectShow={(id) => { setSelected(id); setActiveTab('overview'); }} />}
 
         {activeTab === 'add_show' && (
-          <div className="settings-tab">
-            <div className="section">
-              <h3>add show</h3>
+          <div className="settings-tab" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+            <div className="section" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, marginBottom: 0 }}>
+              <h3 style={{ flexShrink: 0 }}>add show</h3>
               <AddShowForm playlist={status.playlist} onAdded={refreshShows} />
             </div>
           </div>

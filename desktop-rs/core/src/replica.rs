@@ -128,6 +128,18 @@ impl Replica {
         ids.iter().filter_map(|id| load_show(&conn, id)).collect()
     }
 
+    pub fn all_shows(&self) -> Vec<Show> {
+        let conn = self.db.lock().unwrap();
+        let sql = "SELECT id FROM shows WHERE removed_at IS NULL";
+        let mut stmt = conn.prepare(sql).expect("prep all_shows");
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .expect("query all_shows")
+            .filter_map(Result::ok)
+            .collect();
+        ids.iter().filter_map(|id| load_show(&conn, id)).collect()
+    }
+
     pub fn show(&self, show_id: &str) -> Option<Show> {
         let conn = self.db.lock().unwrap();
         load_show(&conn, show_id)
