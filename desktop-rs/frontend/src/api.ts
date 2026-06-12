@@ -272,6 +272,22 @@ export async function getNextRound(): Promise<NextRoundEpisode[]> {
   return data.next_round || [];
 }
 
+export type ShowNewEpisodes = {
+  show_id: string;
+  show_name: string;
+  new_episodes: string[];
+};
+
+export async function detectNewEpisodes(): Promise<ShowNewEpisodes[]> {
+  const r = await fetch('/library/detect-new-episodes', { method: 'POST' });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.error || `Failed to detect new episodes (${r.status})`);
+  }
+  const data = await r.json();
+  return data.shows || [];
+}
+
 export async function detectNewFolders(parentPath: string): Promise<string[]> {
   const r = await fetch('/library/detect-unadded', {
     method: 'POST',
@@ -296,8 +312,17 @@ export function updateShow(
   void fetch('/library/update', {method: 'POST', body: JSON.stringify({show_id, ...fields})});
 }
 
-export async function rescanShow(show_id: string): Promise<{added: number}> {
-  const r = await fetch('/library/rescan', {method: 'POST', body: JSON.stringify({show_id})});
+export async function rescanShow(show_id: string, episodes?: string[]): Promise<{added: number}> {
+  const body: any = {show_id};
+  if (episodes) body.episodes = episodes;
+  const r = await fetch('/library/rescan', {method: 'POST', body: JSON.stringify(body)});
+  return r.json();
+}
+
+export async function rescanWatchedShow(show_id: string, episodes?: string[]): Promise<{added: number}> {
+  const body: any = {show_id};
+  if (episodes) body.episodes = episodes;
+  const r = await fetch('/library/rescan-watched', {method: 'POST', body: JSON.stringify(body)});
   return r.json();
 }
 
@@ -348,4 +373,37 @@ export function maximizeWindow(): void {
 
 export function closeWindow(): void {
   void fetch('/window/close', {method: 'POST'});
+}
+
+
+export interface ShowDetailsEpisode {
+  id: string;
+  relative_path: string;
+  position: number;
+  watched_at: string | null;
+  resume_pos: number | null;
+}
+
+export interface ShowDetailsResponse {
+  show: {
+    id: string;
+    name: string;
+    playlist: string;
+    root_path: string;
+  };
+  all_episodes: ShowDetailsEpisode[];
+  previous_episodes: ShowDetailsEpisode[];
+  upcoming_episodes: ShowDetailsEpisode[];
+  history: any[];
+}
+
+export async function fetchShowDetails(show_id: string): Promise<ShowDetailsResponse> {
+  const r = await fetch('/library/show-details', {
+    method: 'POST',
+    body: JSON.stringify({ show_id }),
+  });
+  if (!r.ok) {
+    throw new Error(`failed to fetch show details (${r.status})`);
+  }
+  return r.json();
 }

@@ -25,17 +25,22 @@ import {
   addShow,
   previewShow,
   detectNewFolders,
+  detectNewEpisodes,
+  type ShowNewEpisodes,
   pickFolder,
   getNextRound,
   type NextRoundEpisode,
   removeShow,
   rescanShow,
+  rescanWatchedShow,
   type Status,
   type Show,
   type HistoryEvent,
   type Playback,
   type Stats,
   type UpdateInfo,
+  fetchShowDetails,
+  type ShowDetailsResponse,
 } from './api';
 import './App.css';
 
@@ -106,7 +111,7 @@ function App() {
   });
   const [shows, setShows] = useState<Show[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [history, setHistory] = useState<HistoryEvent[]>([]);
+  const [showDetails, setShowDetails] = useState<ShowDetailsResponse | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
@@ -406,15 +411,15 @@ function App() {
   }, [status.phase, status.last_advance?.advanced_count]);
 
   useEffect(() => {
-    // Watch history for the selected show.
+    // Watch history and episodes for the selected show.
     if (!selected) {
-      setHistory([]);
+      setShowDetails(null);
       return;
     }
     let alive = true;
-    listHistory(selected)
-      .then((h) => alive && setHistory(h ?? []))
-      .catch(() => alive && setHistory([]));
+    fetchShowDetails(selected)
+      .then((d) => alive && setShowDetails(d))
+      .catch(() => alive && setShowDetails(null));
     return () => {
       alive = false;
     };
@@ -443,9 +448,9 @@ function App() {
       .catch(() => {});
 
   const refreshHistory = (showId: string) =>
-    listHistory(showId)
-      .then((h) => setHistory(h ?? []))
-      .catch(() => setHistory([]));
+    fetchShowDetails(showId)
+      .then((d) => setShowDetails(d))
+      .catch(() => setShowDetails(null));
 
   const handlePlayShow = (showId: string) => {
     playShow(showId);
@@ -532,10 +537,10 @@ function App() {
 
   const overviewContent = (
     <>
-      {selectedShow ? (
-        <ShowHistory
+      {selectedShow && showDetails ? (
+        <ShowOverview
           show={selectedShow}
-          events={history}
+          details={showDetails}
           onClose={() => setSelected(null)}
           onPlay={() => handlePlayShow(selectedShow.id)}
           onMarkWatched={() => handleMarkWatched(selectedShow.id)}
@@ -1178,9 +1183,9 @@ function Queue({ round, pos, onSelectShow }: { round: Status['round']; pos: numb
   );
 }
 
-function ShowHistory({
+function ShowOverview({
   show,
-  events,
+  details,
   onClose,
   onPlay,
   onMarkWatched,
@@ -1189,7 +1194,7 @@ function ShowHistory({
   onRescan,
 }: {
   show: Show;
-  events: HistoryEvent[];
+  details: ShowDetailsResponse;
   onClose: () => void;
   onPlay: () => void;
   onMarkWatched: () => void;
@@ -1197,10 +1202,12 @@ function ShowHistory({
   onRemove: () => void;
   onRescan: () => void;
 }) {
+  const [view, setView] = useState<'all' | 'previous' | 'upcoming' | 'history'>('all');
+
   return (
     <div className="section">
       <h3>
-        history — {show.name}
+        overview - {show.name}
         <button className="gb" style={{ marginLeft: 12 }} onClick={onClose} title="Back (Escape)">
           back
         </button>
@@ -1233,25 +1240,70 @@ function ShowHistory({
       <div className="meta" style={{ margin: '0 0 12px' }}>
         {shortPath(show.root_path)}
       </div>
-      {events.length === 0 ? (
-        <div className="empty">no watch history yet.</div>
-      ) : (
-        <table className="runs">
-          <thead>
-            <tr>
-              <th>episode</th>
-              <th>watched</th>
-            </tr>
-          </thead>
-          <tbody>
-            {events.map((e) => (
-              <tr key={e.episode_id + e.played_at}>
-                <td>{shortPath(e.relative_path)}</td>
-                <td style={{ color: 'var(--fg-dim)' }}>{relTime(e.played_at)}</td>
+
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
+        <button className="gb" style={{ opacity: view === 'all' ? 1 : 0.5 }} onClick={() => setView('all')}>
+          all episodes ({details.all_episodes.length})
+        </button>
+        <button className="gb" style={{ opacity: view === 'previous' ? 1 : 0.5 }} onClick={() => setView('previous')}>
+          previous episodes ({details.previous_episodes.length})
+        </button>
+        <button className="gb" style={{ opacity: view === 'upcoming' ? 1 : 0.5 }} onClick={() => setView('upcoming')}>
+          upcoming episodes ({details.upcoming_episodes.length})
+        </button>
+        <button className="gb" style={{ opacity: view === 'history' ? 1 : 0.5 }} onClick={() => setView('history')}>
+          history ({details.history.length})
+        </button>
+      </div>
+
+      {view === 'history' && (
+        <>
+          {details.history.length === 0 ? (
+            <div className="empty">no watch history yet.</div>
+          ) : (
+            <table className="runs">
+              <thead>
+                <tr>
+                  <th>episode</th>
+                  <th>watched</th>
+                </tr>
+              </thead>
+              <tbody>
+                {details.history.map((e) => (
+                  <tr key={e.episode_id + e.played_at}>
+                    <td>{shortPath(e.relative_path)}</td>
+                    <td style={{ color: 'var(--fg-dim)' }}>{relTime(e.played_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+
+      {view !== 'history' && (
+        <>
+          {view === 'all' && details.all_episodes.length === 0 && <div className="empty">no episodes found.</div>}
+          {view === 'previous' && details.previous_episodes.length === 0 && <div className="empty">no previous episodes.</div>}
+          {view === 'upcoming' && details.upcoming_episodes.length === 0 && <div className="empty">no upcoming episodes.</div>}
+          
+          <table className="runs">
+            <thead>
+              <tr>
+                <th>episode</th>
+                <th>status</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {(view === 'all' ? details.all_episodes : view === 'previous' ? details.previous_episodes : details.upcoming_episodes).map((ep) => (
+                <tr key={ep.id}>
+                  <td>{shortPath(ep.relative_path)}</td>
+                  <td style={{ color: 'var(--fg-dim)' }}>{ep.watched_at ? 'watched' : 'unwatched'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
     </div>
   );
@@ -1259,7 +1311,7 @@ function ShowHistory({
 
 // Add a show by pointing at a local folder; the desktop scans it for episodes.
 function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => void }) {
-  const [mode, setMode] = useState<'manual' | 'detect'>('detect');
+  const [mode, setMode] = useState<'manual' | 'detect' | 'detect-episodes'>('detect');
   
   // Manual state
   const [name, setName] = useState('');
@@ -1274,6 +1326,13 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
   const [detectedFolders, setDetectedFolders] = useState<string[] | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
+
+  // Detect episodes state
+  const [detectedEpisodes, setDetectedEpisodes] = useState<ShowNewEpisodes[] | null>(null);
+  const [detectingEpisodes, setDetectingEpisodes] = useState(false);
+  const [lastRefreshedEpisodes, setLastRefreshedEpisodes] = useState<Date | null>(null);
+  const [selectedEpisodeShow, setSelectedEpisodeShow] = useState<ShowNewEpisodes | null>(null);
+  const [checkedEpisodes, setCheckedEpisodes] = useState<Set<string>>(new Set());
 
   const handlePreview = async (overridePath?: string, overrideName?: string) => {
     const p = overridePath || path;
@@ -1331,6 +1390,39 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
     }
   };
 
+  const handleDetectEpisodes = async () => {
+    setDetectingEpisodes(true);
+    setDetectedEpisodes(null);
+    setMsg('detecting new episodes.');
+    try {
+      const shows = await detectNewEpisodes();
+      setDetectedEpisodes(shows);
+      setLastRefreshedEpisodes(new Date());
+      setSelectedEpisodeShow(null);
+      setMsg('');
+    } catch (e: any) {
+      setMsg(String(e.message || e));
+    } finally {
+      setDetectingEpisodes(false);
+    }
+  };
+
+  const handleAddEpisodes = async (showId: string, markWatched: boolean = false) => {
+    setBusy(true);
+    setMsg(markWatched ? 'adding and marking as watched…' : 'adding episodes…');
+    try {
+      const res = markWatched ? await rescanWatchedShow(showId) : await rescanShow(showId);
+      setSelectedEpisodeShow(null);
+      setMsg(`added ${res.added} episode(s)${markWatched ? ' as watched' : ''}`);
+      handleDetectEpisodes();
+      onAdded();
+      setBusy(false);
+    } catch(e: any) {
+      setMsg(String(e.message || e));
+      setBusy(false);
+    }
+  };
+
   const selectDetected = (folderPath: string) => {
     // Extract the folder name to use as default show name
     const parts = folderPath.split(/[\\/]/);
@@ -1352,6 +1444,12 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
     }
   }, [mode, detectedFolders, detecting]);
 
+  useEffect(() => {
+    if (mode === 'detect-episodes' && detectedEpisodes === null && !detectingEpisodes) {
+      handleDetectEpisodes();
+    }
+  }, [mode, detectedEpisodes, detectingEpisodes]);
+
   return (
     <div className="add-form" style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, minHeight: 0 }}>
       <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>
@@ -1368,6 +1466,21 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
           }}
         >
           detect new folders
+        </button>
+        <button 
+          className="gb" 
+          style={{ flex: 1, textAlign: 'center', padding: '8px', opacity: mode === 'detect-episodes' ? 1 : 0.5 }}
+          onClick={() => { 
+            if (mode === 'detect-episodes') {
+              handleDetectEpisodes();
+            } else {
+              setMode('detect-episodes'); 
+              handleDetectEpisodes();
+            }
+            setMsg(''); 
+          }}
+        >
+          detect new episodes
         </button>
         <button 
           className="gb" 
@@ -1422,24 +1535,87 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
         </div>
       )}
 
+      {mode === 'detect-episodes' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, minHeight: 0 }}>
+          <div style={{ fontSize: '13px', opacity: 0.8, marginBottom: '4px' }}>
+            Scanning all shows for new episodes...
+          </div>
+          
+          {detectedEpisodes === null && detectingEpisodes && (
+            <div style={{ padding: '8px', opacity: 0.7 }}>Scanning NAS for new episodes...</div>
+          )}
+
+          {detectedEpisodes !== null && !selectedEpisodeShow && (
+            <div style={{ marginTop: '16px', marginBottom: '8px', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '8px' }}>
+                <h4 style={{ margin: 0, fontSize: '13px', color: 'var(--fg)' }}>
+                  Found new episodes for {detectedEpisodes.length} show{detectedEpisodes.length === 1 ? '' : 's'}
+                </h4>
+                {lastRefreshedEpisodes && (
+                  <span style={{ fontSize: '12px', opacity: 0.6 }}>
+                    Refreshed at {lastRefreshedEpisodes.toLocaleTimeString()}
+                  </span>
+                )}
+              </div>
+              {detectedEpisodes.length > 0 && (
+                <div style={{ border: '1px solid var(--border)', borderRadius: '4px', overflowY: 'auto', flex: '0 1 auto', minHeight: 0 }}>
+                  <ul className="queue">
+                    {detectedEpisodes.map((show, i) => (
+                      <li key={i} className="next" style={{ cursor: 'pointer' }} onClick={() => { setSelectedEpisodeShow(show); setCheckedEpisodes(new Set(show.new_episodes)); }}>
+                        <span className="q-mark" style={{ opacity: 0.5 }}>+</span>
+                        <span className="q-show">{show.show_name}</span>
+                        <span className="q-ep">{show.new_episodes.length} new episode{show.new_episodes.length === 1 ? '' : 's'}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {selectedEpisodeShow && (
+            <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+              <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', alignItems: 'center' }}>
+                <button className="gb" onClick={() => setSelectedEpisodeShow(null)}>← back</button>
+                <h4 style={{ margin: 0, fontSize: '13px', color: 'var(--fg)' }}>{selectedEpisodeShow.show_name}</h4>
+                <div style={{ flex: 1 }} />
+                <button className="gb" disabled={busy} onClick={() => handleAddEpisodes(selectedEpisodeShow.show_id, false)}>
+                  add {selectedEpisodeShow.new_episodes.length} episode{selectedEpisodeShow.new_episodes.length === 1 ? '' : 's'}
+                </button>
+                <button className="gb" disabled={busy} onClick={() => handleAddEpisodes(selectedEpisodeShow.show_id, true)}>
+                  add as watched
+                </button>
+              </div>
+              <div style={{ border: '1px solid var(--border)', borderRadius: '4px', overflowY: 'auto', flex: '1 1 auto', minHeight: 0 }}>
+                <ul style={{ margin: 0, padding: '12px', fontSize: '13px', color: 'var(--fg-secondary)', listStyleType: 'none' }}>
+                  {selectedEpisodeShow.new_episodes.map((ep, j) => (
+                    <li key={j} style={{ padding: '4px 0', borderBottom: j < selectedEpisodeShow.new_episodes.length - 1 ? '1px solid var(--border)' : 'none', wordBreak: 'break-all', display: 'flex', gap: '12px' }}>
+                      <span style={{ opacity: 0.5, flexShrink: 0, minWidth: '24px', textAlign: 'right' }}>{j + 1}.</span>
+                      <span>{ep}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {mode === 'manual' && (
         <form onSubmit={(e) => { e.preventDefault(); handleAdd(); }} style={{ display: 'flex', flexDirection: 'column', gap: '8px', flex: 1, minHeight: 0 }}>
-          <input placeholder="show name" value={name} onChange={(e) => setName(e.target.value)} disabled={!!previewData} />
+          <input placeholder="show name" value={name} onChange={(e) => setName(e.target.value)} />
           <div style={{ display: 'flex', gap: '8px' }}>
             <input
               placeholder="folder path"
               value={path}
               onChange={(e) => setPath(e.target.value)}
               style={{ flex: 1 }}
-              disabled={!!previewData}
             />
-            {!previewData && (
-              <button className="gb" disabled={busy} onClick={() => pickFolder().then(p => { if (p) setPath(p); })}>
-                browse
-              </button>
-            )}
+            <button className="gb" type="button" disabled={busy} onClick={() => pickFolder().then(p => { if (p) setPath(p); })}>
+              browse
+            </button>
           </div>
-          <input placeholder="playlist" value={pl} onChange={(e) => setPl(e.target.value)} disabled={!!previewData} />
+          <input placeholder="playlist" value={pl} onChange={(e) => setPl(e.target.value)} />
           
           <div className="add-actions" style={{ display: 'flex', gap: '8px', marginTop: '8px' }}>
             {!previewData ? (
@@ -1834,3 +2010,4 @@ function PipControlOverlay({
     </div>
   );
 }
+

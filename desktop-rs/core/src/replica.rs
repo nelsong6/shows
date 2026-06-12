@@ -389,9 +389,9 @@ impl Replica {
         true
     }
 
-    pub fn rescan_episodes(&self, show_id: &str, sorted_rels: &[String]) -> usize {
+    pub fn rescan_episodes(&self, show_id: &str, sorted_rels: &[String]) -> Vec<String> {
         if sorted_rels.is_empty() {
-            return 0;
+            return Vec::new();
         }
         let now = now();
         let mut conn = self.db.lock().unwrap();
@@ -405,16 +405,17 @@ impl Replica {
                 .collect()
         };
             
-        let mut added = 0;
+        let mut added_ids = Vec::new();
         
         for (i, rel) in sorted_rels.iter().enumerate() {
             if !existing.contains(rel) {
+                let new_id = Uuid::new_v4().to_string();
                 tx.execute(
                     "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,NULL,NULL,?5,1)",
-                    params![Uuid::new_v4().to_string(), show_id, rel, i as i64, now],
+                    params![new_id, show_id, rel, i as i64, now],
                 )
                 .expect("add episode");
-                added += 1;
+                added_ids.push(new_id);
             } else {
                 tx.execute(
                     "UPDATE episodes SET position=?1, updated_at=?2, dirty=1 WHERE show_id=?3 AND relative_path=?4",
@@ -425,7 +426,38 @@ impl Replica {
         }
         
         tx.commit().expect("commit rescan tx");
-        added
+        added_ids
+    }
+
+    pub fn mark_episodes_watched(&self, show_id: &str, episode_ids: &[String]) {
+        if episode_ids.is_empty() {
+            return;
+        }
+        let now = now();
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn.transaction().expect("begin mark tx");
+        for eid in episode_ids {
+            // Retrieve relative_path to insert into watch_history
+            let rel: String = {
+                let mut stmt = tx.prepare("SELECT relative_path FROM episodes WHERE id=?1").expect("prep rel");
+                stmt.query_row(params![eid], |r| r.get(0)).unwrap_or_default()
+            };
+            if rel.is_empty() {
+                continue;
+            }
+
+            tx.execute(
+                "UPDATE episodes SET watched_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+                params![now, now, eid],
+            )
+            .expect("mark watched");
+            tx.execute(
+                "INSERT INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,1)",
+                params![Uuid::new_v4().to_string(), show_id, eid, rel, now],
+            )
+            .expect("append history");
+        }
+        tx.commit().expect("commit mark tx");
     }
 
     /// Relative paths already known for a show — for diffing a rescan.

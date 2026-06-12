@@ -368,7 +368,10 @@ impl ControlServer {
             "/library/pick-folder" => self.library_pick_folder(request),
             "/library/preview" => self.library_preview(request),
             "/library/rescan" => self.library_rescan(request),
+            "/library/rescan-watched" => self.library_rescan_watched(request),
             "/library/detect-unadded" => self.library_detect_unadded(request),
+            "/library/detect-new-episodes" => self.library_detect_new_episodes(request),
+            "/library/show-details" => self.library_show_details(request),
             _ => respond(request, 404, b"not found".to_vec(), "text/plain"),
         }
     }
@@ -505,6 +508,33 @@ impl ControlServer {
         respond_json(request, 200, &json!({"unadded": unadded}));
     }
 
+    fn library_detect_new_episodes(self: &Arc<Self>, request: Request) {
+        let mut shows_with_new = Vec::new();
+        let all_shows = self.replica.all_shows();
+
+        for show in all_shows {
+            let scanned: Vec<String> = scan::scan_episodes(&show.root_path);
+            let existing = self.replica.episode_paths(&show.id);
+            let mut new_eps = Vec::new();
+
+            for ep in scanned {
+                if !existing.contains(&ep) {
+                    new_eps.push(ep);
+                }
+            }
+
+            if !new_eps.is_empty() {
+                shows_with_new.push(json!({
+                    "show_id": show.id,
+                    "show_name": show.name,
+                    "new_episodes": new_eps,
+                }));
+            }
+        }
+
+        respond_json(request, 200, &json!({"shows": shows_with_new}));
+    }
+
     fn library_remove(self: &Arc<Self>, mut request: Request) {
         let b = read_body(&mut request);
         let sid = b
@@ -527,14 +557,95 @@ impl ControlServer {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let specific_episodes: Option<Vec<String>> = b.get("episodes").and_then(Value::as_array).map(|arr| {
+            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        });
         let mut added = 0usize;
         if let Some(show) = self.replica.show(&sid) {
-            let full_sorted: Vec<String> = scan::scan_episodes(&show.root_path);
-            added = self.replica.rescan_episodes(&sid, &full_sorted);
+            let full_sorted: Vec<String> = specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
+            let added_ids = self.replica.rescan_episodes(&sid, &full_sorted);
+            added = added_ids.len();
             self.push_sync();
         }
         respond_json(request, 200, &json!({"added": added}));
     }
+
+    fn library_rescan_watched(self: &Arc<Self>, mut request: Request) {
+        let b = read_body(&mut request);
+        let sid = b
+            .get("show_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let specific_episodes: Option<Vec<String>> = b.get("episodes").and_then(Value::as_array).map(|arr| {
+            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        });
+        let mut added = 0usize;
+        if let Some(show) = self.replica.show(&sid) {
+            let full_sorted: Vec<String> = specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
+            let added_ids = self.replica.rescan_episodes(&sid, &full_sorted);
+            added = added_ids.len();
+            if added > 0 {
+                self.replica.mark_episodes_watched(&sid, &added_ids);
+            }
+            self.push_sync();
+        }
+        respond_json(request, 200, &json!({"added": added}));
+    }
+
+    fn library_show_details(self: &Arc<Self>, mut request: Request) {
+        let b = read_body(&mut request);
+        let sid = b
+            .get("show_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        if let Some(show) = self.replica.show(&sid) {
+            let history = self.replica.show_history(&sid);
+            let first_unwatched_id = shows_core::engine::first_unwatched(&show.episodes).map(|e| e.id.clone());
+
+            let mut all_episodes = Vec::new();
+            let mut previous = Vec::new();
+            let mut upcoming = Vec::new();
+
+            for ep in &show.episodes {
+                let ep_val = json!({
+                    "id": ep.id,
+                    "relative_path": ep.relative_path,
+                    "position": ep.position,
+                    "watched_at": ep.watched_at,
+                    "resume_pos": ep.resume_pos,
+                });
+                
+                all_episodes.push(ep_val.clone());
+
+                if ep.watched_at.is_some() {
+                    previous.push(ep_val.clone());
+                } else {
+                    if Some(&ep.id) != first_unwatched_id.as_ref() {
+                        upcoming.push(ep_val);
+                    }
+                }
+            }
+
+            respond_json(request, 200, &json!({
+                "show": {
+                    "id": show.id,
+                    "name": show.name,
+                    "playlist": show.playlist,
+                    "root_path": show.root_path,
+                },
+                "all_episodes": all_episodes,
+                "previous_episodes": previous,
+                "upcoming_episodes": upcoming,
+                "history": history,
+            }));
+        } else {
+            respond_json(request, 404, &json!({"error": "not found"}));
+        }
+    }
+
 
     fn status_json(&self) -> Value {
         let mut status = self.status.lock().unwrap().clone();
@@ -895,3 +1006,4 @@ mod tests {
         assert_eq!(&buf, b"latest");
     }
 }
+
