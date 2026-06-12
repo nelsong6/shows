@@ -522,22 +522,31 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     let width = rect.right - rect.left;
                     let height = rect.bottom - rect.top;
 
-                    // Top-right controls (Close & Expand, roughly 96x48)
-                    if client_y < 48 && client_x > width - 96 {
+                    let resize_border = 6;
+                    if client_x < resize_border && client_y < resize_border { return LRESULT(HTTOPLEFT as isize); }
+                    if client_x > width - resize_border && client_y < resize_border { return LRESULT(HTTOPRIGHT as isize); }
+                    if client_x < resize_border && client_y > height - resize_border { return LRESULT(HTBOTTOMLEFT as isize); }
+                    if client_x > width - resize_border && client_y > height - resize_border { return LRESULT(HTBOTTOMRIGHT as isize); }
+                    if client_x < resize_border { return LRESULT(HTLEFT as isize); }
+                    if client_x > width - resize_border { return LRESULT(HTRIGHT as isize); }
+                    if client_y < resize_border { return LRESULT(HTTOP as isize); }
+                    if client_y > height - resize_border { return LRESULT(HTBOTTOM as isize); }
+
+                    // Top-right cutout: back-to-tab and close
+                    if client_x > width - 96 && client_y < 48 {
                         return LRESULT(HTCLIENT as isize);
                     }
-
-                    // Center controls (Prev, Play/Pause, Next, roughly 200x80)
-                    let center_x = width / 2;
+                    // Bottom cutout: progress bar area
+                    if client_y > height - 12 {
+                        return LRESULT(HTCLIENT as isize);
+                    }
+                    // Center cutout: previous, play/pause, next
                     let center_y = height / 2;
-                    if client_x > center_x - 100 && client_x < center_x + 100 &&
-                       client_y > center_y - 40 && client_y < center_y + 40 {
-                        return LRESULT(HTCLIENT as isize);
-                    }
-
-                    // Bottom progress bar (roughly 16px high at the absolute bottom)
-                    if client_y > height - 16 {
-                        return LRESULT(HTCLIENT as isize);
+                    let center_x = width / 2;
+                    if client_x > center_x - 70 && client_x < center_x + 70 {
+                        if client_y > center_y - 36 && client_y < center_y + 36 {
+                            return LRESULT(HTCLIENT as isize);
+                        }
                     }
 
                     return LRESULT(HTCAPTION as isize);
