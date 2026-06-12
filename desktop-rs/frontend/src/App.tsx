@@ -169,6 +169,11 @@ function App() {
   // handler can re-arm it without re-binding.
   const volOsdTimer = useRef<number | undefined>(undefined);
   const wheelVolumeRemainder = useRef(0);
+  const controlsIdleRef = useRef(controlsIdle);
+
+  useEffect(() => {
+    controlsIdleRef.current = controlsIdle;
+  }, [controlsIdle]);
 
   const flashVolume = useCallback((volume: number) => {
     setVolOsd(volume);
@@ -204,7 +209,7 @@ function App() {
     setDisplayVolume(nextVolume);
     volumeSync.current.desired = nextVolume;
     pumpVolumeQueue();
-    if (flash) {
+    if (flash && controlsIdleRef.current) {
       flashVolume(nextVolume);
     }
   }, [flashVolume, pumpVolumeQueue]);
