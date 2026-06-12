@@ -517,12 +517,30 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 }
                 
                 if is_pip {
+                    let client_x = x - rect.left;
                     let client_y = y - rect.top;
+                    let width = rect.right - rect.left;
                     let height = rect.bottom - rect.top;
-                    if client_y < height - 60 {
-                        return LRESULT(HTCAPTION as isize);
+
+                    // Top-right controls (Close & Expand, roughly 96x48)
+                    if client_y < 48 && client_x > width - 96 {
+                        return LRESULT(HTCLIENT as isize);
                     }
-                    return LRESULT(HTCLIENT as isize);
+
+                    // Center controls (Prev, Play/Pause, Next, roughly 200x80)
+                    let center_x = width / 2;
+                    let center_y = height / 2;
+                    if client_x > center_x - 100 && client_x < center_x + 100 &&
+                       client_y > center_y - 40 && client_y < center_y + 40 {
+                        return LRESULT(HTCLIENT as isize);
+                    }
+
+                    // Bottom progress bar (roughly 16px high at the absolute bottom)
+                    if client_y > height - 16 {
+                        return LRESULT(HTCLIENT as isize);
+                    }
+
+                    return LRESULT(HTCAPTION as isize);
                 }
 
                 if is_max {

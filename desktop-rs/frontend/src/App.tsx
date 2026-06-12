@@ -657,26 +657,37 @@ function App() {
           onWheel={handleVolumeWheel}
         />
       )}
-      <BottomControlBar
-        status={status}
-        pos={pos}
-        playing={playing}
-        viewing={showSettings}
-        onToggleView={() => {
-          setShowSettings((v) => !v);
-        }}
-        viewingSettings={showSettings}
-        onToggleSettings={() => {
-          setShowSettings((v) => !v);
-        }}
-        controlsIdle={controlsIdle}
-        onHoverChange={setControlsHovered}
-        volume={displayVolume}
-        onVolumeChange={requestVolume}
-        onVolumeWheel={handleVolumeWheel}
-        displayPaused={displayPaused}
-        onRequestPause={requestPause}
-      />
+      {status.window_pip ? (
+        <PipControlOverlay
+          status={status}
+          pos={pos}
+          controlsIdle={controlsIdle}
+          onHoverChange={setControlsHovered}
+          displayPaused={displayPaused}
+          onRequestPause={requestPause}
+        />
+      ) : (
+        <BottomControlBar
+          status={status}
+          pos={pos}
+          playing={playing}
+          viewing={showSettings}
+          onToggleView={() => {
+            setShowSettings((v) => !v);
+          }}
+          viewingSettings={showSettings}
+          onToggleSettings={() => {
+            setShowSettings((v) => !v);
+          }}
+          controlsIdle={controlsIdle}
+          onHoverChange={setControlsHovered}
+          volume={displayVolume}
+          onVolumeChange={requestVolume}
+          onVolumeWheel={handleVolumeWheel}
+          displayPaused={displayPaused}
+          onRequestPause={requestPause}
+        />
+      )}
     </div>
   );
 }
@@ -1767,3 +1778,58 @@ function NextRoundTab({ currentRound, onSelectShow }: { currentRound: any[], onS
   );
 }
 
+function PipControlOverlay({
+  status,
+  pos,
+  controlsIdle,
+  onHoverChange,
+  displayPaused,
+  onRequestPause,
+}: {
+  status: Status;
+  pos: number;
+  controlsIdle: boolean;
+  onHoverChange: (hovered: boolean) => void;
+  displayPaused: boolean;
+  onRequestPause: (paused: boolean) => void;
+}) {
+  const roundLen = status.round?.length || 1;
+  const progressPct = Math.min(100, Math.max(0, (pos / roundLen) * 100));
+
+  return (
+    <div 
+      className={`pip-overlay${controlsIdle ? ' hidden' : ''}`}
+      onMouseEnter={() => onHoverChange(true)}
+      onMouseLeave={() => onHoverChange(false)}
+    >
+      <div className="pip-top-right">
+        <button className="pip-btn" onClick={() => toggleFullscreen()} title="Back to tab">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14zm-10-7h9v6h-9z" /></svg>
+        </button>
+        <button className="pip-btn" onClick={closeWindow} title="Close">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </div>
+
+      <div className="pip-center-controls">
+        <button className="pip-btn center-btn" onClick={previous} title="Previous">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" /></svg>
+        </button>
+        <button className="pip-btn center-btn play-btn" onClick={() => onRequestPause(!displayPaused)}>
+          {displayPaused ? (
+             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+          ) : (
+             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
+          )}
+        </button>
+        <button className="pip-btn center-btn" onClick={skip} title="Next">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" /></svg>
+        </button>
+      </div>
+
+      <div className="pip-progress-bar">
+        <div className="pip-progress-fill" style={{ width: `${progressPct}%` }} />
+      </div>
+    </div>
+  );
+}

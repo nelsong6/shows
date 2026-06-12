@@ -1125,26 +1125,100 @@ button.gb.toggle-view-btn {
   display: none;
 }
 
-.window-pip .scrub-container,
-.window-pip .sync-btn,
-.window-pip .playlist-btn,
-.window-pip .settings-btn,
-.window-pip .volume-slider,
-.window-pip .track-select,
-.window-pip .hud-buffering,
-.window-pip .hud-playlist,
-.window-pip .display-now-playing {
-  display: none;
+.pip-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.4);
+  opacity: 1;
+  transition: opacity 0.2s ease, background 0.2s ease;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.window-pip .bottom-controls {
-  padding: 8px 12px;
-  background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
-  border-top: none;
-  backdrop-filter: none;
-  gap: 0;
+.pip-overlay.hidden {
+  opacity: 0;
+  background: transparent;
 }
 
-.window-pip .controls-row {
-  height: 32px;
+/* Let the buttons themselves intercept clicks */
+.pip-btn {
+  pointer-events: auto;
+  background: none;
+  border: none;
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.9;
+  transition: opacity 0.1s ease, transform 0.1s ease;
+  padding: 0;
+}
+
+.pip-btn:hover {
+  opacity: 1;
+}
+
+.pip-top-right {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+.pip-top-right .pip-btn {
+  width: 40px;
+  height: 40px;
+}
+
+.pip-top-right .pip-btn svg {
+  width: 24px;
+  height: 24px;
+  filter: drop-shadow(0 1px 2px rgba(0,0,0,0.5));
+}
+
+.pip-center-controls {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.center-btn {
+  width: 48px;
+  height: 48px;
+}
+
+.center-btn svg {
+  width: 36px;
+  height: 36px;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.4));
+}
+
+.center-btn.play-btn {
+  width: 64px;
+  height: 64px;
+}
+
+.center-btn.play-btn svg {
+  width: 52px;
+  height: 52px;
+}
+
+.pip-progress-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.2);
+  pointer-events: auto;
+}
+
+.pip-progress-fill {
+  height: 100%;
+  background: #f00; /* YouTube red */
 }
