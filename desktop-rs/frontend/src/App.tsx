@@ -1411,7 +1411,8 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
     setBusy(true);
     setMsg(markWatched ? 'adding and marking as watched…' : 'adding episodes…');
     try {
-      const res = markWatched ? await rescanWatchedShow(showId) : await rescanShow(showId);
+      const episodesToPass = Array.from(checkedEpisodes);
+      const res = markWatched ? await rescanWatchedShow(showId, episodesToPass) : await rescanShow(showId, episodesToPass);
       setSelectedEpisodeShow(null);
       setMsg(`added ${res.added} episode(s)${markWatched ? ' as watched' : ''}`);
       handleDetectEpisodes();
@@ -1580,7 +1581,7 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
                 <h4 style={{ margin: 0, fontSize: '13px', color: 'var(--fg)' }}>{selectedEpisodeShow.show_name}</h4>
                 <div style={{ flex: 1 }} />
                 <button className="gb" disabled={busy} onClick={() => handleAddEpisodes(selectedEpisodeShow.show_id, false)}>
-                  add {selectedEpisodeShow.new_episodes.length} episode{selectedEpisodeShow.new_episodes.length === 1 ? '' : 's'}
+                  add to show
                 </button>
                 <button className="gb" disabled={busy} onClick={() => handleAddEpisodes(selectedEpisodeShow.show_id, true)}>
                   add as watched
@@ -1589,7 +1590,17 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
               <div style={{ border: '1px solid var(--border)', borderRadius: '4px', overflowY: 'auto', flex: '1 1 auto', minHeight: 0 }}>
                 <ul style={{ margin: 0, padding: '12px', fontSize: '13px', color: 'var(--fg-secondary)', listStyleType: 'none' }}>
                   {selectedEpisodeShow.new_episodes.map((ep, j) => (
-                    <li key={j} style={{ padding: '4px 0', borderBottom: j < selectedEpisodeShow.new_episodes.length - 1 ? '1px solid var(--border)' : 'none', wordBreak: 'break-all', display: 'flex', gap: '12px' }}>
+                    <li key={j} style={{ padding: '4px 0', borderBottom: j < selectedEpisodeShow.new_episodes.length - 1 ? '1px solid var(--border)' : 'none', wordBreak: 'break-all', display: 'flex', gap: '12px', alignItems: 'center' }}>
+                      <input 
+                        type="checkbox" 
+                        checked={checkedEpisodes.has(ep)}
+                        onChange={(e) => {
+                          const next = new Set(checkedEpisodes);
+                          if (e.target.checked) next.add(ep);
+                          else next.delete(ep);
+                          setCheckedEpisodes(next);
+                        }}
+                      />
                       <span style={{ opacity: 0.5, flexShrink: 0, minWidth: '24px', textAlign: 'right' }}>{j + 1}.</span>
                       <span>{ep}</span>
                     </li>
