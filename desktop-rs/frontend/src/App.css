@@ -704,6 +704,9 @@ ul.recent li {
 .layout.over-video {
   background: color-mix(in srgb, var(--bg-deep) 68%, transparent);
 }
+.window-pip .layout.over-video {
+  background: transparent;
+}
 
 /* Flat now-playing / up-next queue. Play order; current marked, earlier
    done (dimmed), later are what's next. */
@@ -1115,4 +1118,33 @@ button.gb.toggle-view-btn {
   display: block;
   height: 96px;
   flex-shrink: 0;
+}
+
+/* Picture-in-Picture mode */
+.window-pip .titlebar {
+  display: none;
+}
+
+.window-pip .scrub-container,
+.window-pip .sync-btn,
+.window-pip .playlist-btn,
+.window-pip .settings-btn,
+.window-pip .volume-slider,
+.window-pip .track-select,
+.window-pip .hud-buffering,
+.window-pip .hud-playlist,
+.window-pip .display-now-playing {
+  display: none;
+}
+
+.window-pip .bottom-controls {
+  padding: 8px 12px;
+  background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+  border-top: none;
+  backdrop-filter: none;
+  gap: 0;
+}
+
+.window-pip .controls-row {
+  height: 32px;
 }

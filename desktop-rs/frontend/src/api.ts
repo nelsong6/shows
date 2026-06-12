@@ -85,6 +85,7 @@ export type Status = {
   update?: UpdateInfo;
   window_maximized?: boolean;
   window_fullscreen?: boolean;
+  window_pip?: boolean;
 };
 
 export type Show = {
@@ -186,6 +187,11 @@ export function defer(): void {
 // Toggle the Qt window between windowed and fullscreen.
 export function toggleFullscreen(): void {
   void fetch('/fullscreen', {method: 'POST'});
+}
+
+// Toggle the window between windowed and picture-in-picture mode.
+export function togglePip(): void {
+  void fetch('/pip', {method: 'POST'});
 }
 
 export function seekPercent(percent: number): void {

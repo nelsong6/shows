@@ -46,6 +46,7 @@ const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
 const WM_WINDOW_MINIMIZE: u32 = WM_APP + 2;
 const WM_WINDOW_MAXIMIZE: u32 = WM_APP + 3;
 const WM_WINDOW_CLOSE: u32 = WM_APP + 4;
+const WM_TOGGLE_PIP: u32 = WM_APP + 5;
 
 type StatusUpdateCb = Box<dyn Fn(serde_json::Value) + Send + Sync>;
 
@@ -120,6 +121,7 @@ struct State {
     _webview: ICoreWebView2,
     // Borderless-fullscreen toggle: saved on entry, restored on exit.
     is_fullscreen: bool,
+    is_pip: bool,
     saved_style: isize,
     saved_exstyle: isize,
     saved_rect: RECT,
@@ -290,6 +292,7 @@ impl Compositor {
                 base,
                 _webview: webview,
                 is_fullscreen: false,
+                is_pip: false,
                 saved_style: 0,
                 saved_exstyle: 0,
                 saved_rect: RECT::default(),
@@ -356,6 +359,19 @@ impl Compositor {
         })
     }
 
+    /// A `Send + Sync` closure that posts a pip-toggle message to the UI thread.
+    pub fn pip_callback(&self) -> Box<dyn Fn() + Send + Sync> {
+        let raw = self.hwnd.0 as usize;
+        Box::new(move || unsafe {
+            let _ = PostMessageW(
+                Some(HWND(raw as *mut _)),
+                WM_TOGGLE_PIP,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        })
+    }
+
     /// Set the shutdown hook run on window close (save resume + flush sync).
     pub fn set_quit(&self, cb: QuitCb) {
         STATE.with(|s| {
@@ -416,13 +432,28 @@ fn render(s: &State) {
 extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
         match msg {
+            WM_NCLBUTTONDBLCLK => {
+                let is_pip = STATE.with(|s| {
+                    s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
+                });
+                if is_pip {
+                    let _ = PostMessageW(
+                        Some(hwnd),
+                        WM_TOGGLE_PIP,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                    return LRESULT(0);
+                }
+                DefWindowProcW(hwnd, msg, w, l)
+            }
             WM_NCCALCSIZE => {
                 if w.0 != 0 {
-                    let is_fs = STATE.with(|s| {
-                        s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
+                    let (is_fs, is_pip) = STATE.with(|s| {
+                        s.borrow().as_ref().map(|st| (st.is_fullscreen, st.is_pip)).unwrap_or((false, false))
                     });
                     let is_max = IsZoomed(hwnd).as_bool();
-                    if is_max && !is_fs {
+                    if is_max && !is_fs && !is_pip {
                         let params = &mut *(l.0 as *mut NCCALCSIZE_PARAMS);
                         let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                         let mut mi = MONITORINFO {
@@ -437,8 +468,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(0)
             }
             WM_NCHITTEST => {
-                let is_fs = STATE.with(|s| {
-                    s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
+                let (is_fs, is_pip) = STATE.with(|s| {
+                    s.borrow().as_ref().map(|st| (st.is_fullscreen, st.is_pip)).unwrap_or((false, false))
                 });
                 if is_fs {
                     return LRESULT(HTCLIENT as isize);
@@ -452,6 +483,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 
                 let is_max = IsZoomed(hwnd).as_bool();
                 
+                if is_pip {
+                    let client_y = y - rect.top;
+                    let height = rect.bottom - rect.top;
+                    if client_y < height - 60 {
+                        return LRESULT(HTCAPTION as isize);
+                    }
+                    return LRESULT(HTCLIENT as isize);
+                }
+
                 if is_max {
                     let client_y = y - rect.top;
                     if client_y >= 0 && client_y < 32 {
@@ -656,7 +696,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     STATE.with(|s| {
                         if let Some(st) = s.borrow_mut().as_mut() {
                             let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
-                            let video_top = if st.is_fullscreen { 0 } else { (32 * dpi) / 96 };
+                            let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
                             let video_h = (ch - video_top).max(1);
 
                             let _ = st.swapchain.ResizeBuffers(
@@ -772,7 +812,145 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         STATE.with(|s| {
                             if let Some(st) = s.borrow_mut().as_mut() {
                                 let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
-                                let video_top = if st.is_fullscreen { 0 } else { (32 * dpi) / 96 };
+                                let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
+                                let video_h = (ch - video_top).max(1);
+                                let _ = st.swapchain.ResizeBuffers(
+                                    0,
+                                    cw as u32,
+                                    video_h as u32,
+                                    DXGI_FORMAT_UNKNOWN,
+                                    DXGI_SWAP_CHAIN_FLAG(0),
+                                );
+                                let _ = st._bottom.SetOffsetY2(video_top as f32);
+                                let _ = st.base.SetBounds(RECT {
+                                    left: 0,
+                                    top: 0,
+                                    right: cw,
+                                    bottom: ch,
+                                });
+                                let _ = st.gl.resize(&st.device, cw, video_h);
+                                let _ = st.dcomp.Commit();
+                                render(st);
+                            }
+                        });
+                    }
+                }
+                LRESULT(0)
+            }
+            m if m == WM_TOGGLE_PIP => {
+                enum Action {
+                    Enter { new_style: isize, rect: RECT },
+                    Exit { restore_style: isize, restore_exstyle: isize, restore_rect: RECT },
+                }
+                let action = STATE.with(|s| -> Option<Action> {
+                    let mut b = s.borrow_mut();
+                    let st = b.as_mut()?;
+                    if !st.is_pip {
+                        let mut rc = RECT::default();
+                        let _ = GetWindowRect(hwnd, &mut rc);
+                        let saved_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+                        let saved_exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                        st.saved_rect = rc;
+                        st.saved_style = saved_style;
+                        st.saved_exstyle = saved_exstyle;
+                        st.is_pip = true;
+                        if let Some(cb) = &st.status_callback {
+                            cb(serde_json::json!({ "window_pip": true }));
+                        }
+                        let new_style =
+                            ((saved_style as u32 & !WS_OVERLAPPEDWINDOW.0 & !WS_MAXIMIZE.0) | WS_POPUP.0) as isize;
+                        
+                        let mon: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                        let mut mi = MONITORINFO {
+                            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                            ..Default::default()
+                        };
+                        let _ = GetMonitorInfoW(mon, &mut mi);
+                        
+                        // Calculate PiP rectangle: e.g. 400x225, bottom right corner with margin.
+                        let margin = 24;
+                        let pip_w = 400;
+                        let pip_h = 225;
+                        let mut target_rect = RECT {
+                            left: mi.rcWork.right - margin - pip_w,
+                            top: mi.rcWork.bottom - margin - pip_h,
+                            right: mi.rcWork.right - margin,
+                            bottom: mi.rcWork.bottom - margin,
+                        };
+                        // Keep it on screen if monitor is tiny
+                        if target_rect.left < mi.rcWork.left {
+                            target_rect.left = mi.rcWork.left;
+                            target_rect.right = mi.rcWork.left + pip_w;
+                        }
+                        if target_rect.top < mi.rcWork.top {
+                            target_rect.top = mi.rcWork.top;
+                            target_rect.bottom = mi.rcWork.top + pip_h;
+                        }
+
+                        Some(Action::Enter { new_style, rect: target_rect })
+                    } else {
+                        let action = Action::Exit {
+                            restore_style: st.saved_style,
+                            restore_exstyle: st.saved_exstyle,
+                            restore_rect: st.saved_rect,
+                        };
+                        st.is_pip = false;
+                        if let Some(cb) = &st.status_callback {
+                            cb(serde_json::json!({ "window_pip": false }));
+                        }
+                        Some(action)
+                    }
+                });
+                match action {
+                    Some(Action::Enter { new_style, rect: mr }) => {
+                        SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
+                        let _ = SetWindowPos(
+                            hwnd,
+                            Some(HWND_TOPMOST),
+                            mr.left,
+                            mr.top,
+                            mr.right - mr.left,
+                            mr.bottom - mr.top,
+                            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+                        );
+                    }
+                    Some(Action::Exit { restore_style, restore_exstyle, restore_rect: r }) => {
+                        SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
+                        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, restore_exstyle);
+                        if (restore_style as u32 & WS_MAXIMIZE.0) != 0 {
+                            let _ = SetWindowPos(
+                                hwnd,
+                                Some(HWND_NOTOPMOST),
+                                0, 0, 0, 0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED,
+                            );
+                            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+                        } else {
+                            let _ = SetWindowPos(
+                                hwnd,
+                                Some(HWND_NOTOPMOST),
+                                r.left,
+                                r.top,
+                                r.right - r.left,
+                                r.bottom - r.top,
+                                SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+                            );
+                        }
+                    }
+                    None => {}
+                }
+
+                // Force layout recalculation after entering or exiting pip to ensure
+                // the video swapchain, visual offset, and overlay bounds are updated correctly.
+                let mut rc = RECT::default();
+                if GetClientRect(hwnd, &mut rc).is_ok() {
+                    let cw = rc.right - rc.left;
+                    let ch = rc.bottom - rc.top;
+                    if cw > 0 && ch > 0 {
+                        STATE.with(|s| {
+                            if let Some(st) = s.borrow_mut().as_mut() {
+                                let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+                                let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
                                 let video_h = (ch - video_top).max(1);
                                 let _ = st.swapchain.ResizeBuffers(
                                     0,

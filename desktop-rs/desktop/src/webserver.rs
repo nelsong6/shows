@@ -33,6 +33,7 @@ pub enum WindowAction {
 
 pub type WindowActionCb = Box<dyn Fn(WindowAction) + Send + Sync>;
 type FullscreenCb = Box<dyn Fn() + Send + Sync>;
+type PipCb = Box<dyn Fn() + Send + Sync>;
 
 pub struct ControlServer {
     dist_dir: Option<PathBuf>,
@@ -45,6 +46,7 @@ pub struct ControlServer {
     runner: Mutex<Option<Arc<Runner>>>,
     syncer: Mutex<Option<Arc<Syncer>>>,
     on_fullscreen: Mutex<Option<FullscreenCb>>,
+    on_pip: Mutex<Option<PipCb>>,
     on_window_action: Mutex<Option<WindowActionCb>>,
 }
 
@@ -63,6 +65,7 @@ impl ControlServer {
         status.insert("round_id".into(), json!(null));
         status.insert("window_maximized".into(), json!(false));
         status.insert("window_fullscreen".into(), json!(false));
+        status.insert("window_pip".into(), json!(false));
         Arc::new(ControlServer {
             dist_dir,
             playlists,
@@ -74,6 +77,7 @@ impl ControlServer {
             runner: Mutex::new(None),
             syncer: Mutex::new(None),
             on_fullscreen: Mutex::new(None),
+            on_pip: Mutex::new(None),
             on_window_action: Mutex::new(None),
         })
     }
@@ -91,6 +95,9 @@ impl ControlServer {
     }
     pub fn set_on_fullscreen(&self, f: FullscreenCb) {
         *self.on_fullscreen.lock().unwrap() = Some(f);
+    }
+    pub fn set_on_pip(&self, f: PipCb) {
+        *self.on_pip.lock().unwrap() = Some(f);
     }
     pub fn set_on_window_action(&self, f: WindowActionCb) {
         *self.on_window_action.lock().unwrap() = Some(f);
@@ -254,6 +261,12 @@ impl ControlServer {
             }
             "/fullscreen" => {
                 if let Some(cb) = self.on_fullscreen.lock().unwrap().as_ref() {
+                    cb();
+                }
+                respond(request, 204, vec![], "text/plain");
+            }
+            "/pip" => {
+                if let Some(cb) = self.on_pip.lock().unwrap().as_ref() {
                     cb();
                 }
                 respond(request, 204, vec![], "text/plain");

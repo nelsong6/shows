@@ -12,6 +12,7 @@ import {
   markShowUnwatched,
   defer,
   toggleFullscreen,
+  togglePip,
   minimizeWindow,
   maximizeWindow,
   closeWindow,
@@ -264,7 +265,7 @@ function App() {
 
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
-  // n=next show, p=previous show, d=defer, f=fullscreen, h=hide all chrome,
+  // n=next show, p=previous show, d=defer, f=fullscreen, i=pip, h=hide all chrome,
   // c=toggle closed captions, ←/→ (or j/l)=seek -/+10s, ↑/↓=volume, v/Tab=dashboard,
   // Esc=hide dashboard.
   useEffect(() => {
@@ -290,6 +291,9 @@ function App() {
           break;
         case 'f':
           toggleFullscreen();
+          break;
+        case 'i':
+          togglePip();
           break;
 
         case 'c': {
@@ -581,8 +585,8 @@ function App() {
   );
 
   return (
-    <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}${status.window_maximized ? ' window-maximized' : ''}${status.window_fullscreen ? ' window-fullscreen' : ''}`}>
-      {!status.window_fullscreen && (
+    <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}${status.window_maximized ? ' window-maximized' : ''}${status.window_fullscreen ? ' window-fullscreen' : ''}${status.window_pip ? ' window-pip' : ''}`}>
+      {!status.window_fullscreen && !status.window_pip && (
         <div className="titlebar">
           <div className="titlebar-logo">
             <img src="/favicon.ico" className="titlebar-logo-img" alt="" />
@@ -613,7 +617,7 @@ function App() {
           pointerEvents: 'auto',
           zIndex: -1,
         }}
-        onDoubleClick={() => toggleFullscreen()}
+        onDoubleClick={() => status.window_pip ? togglePip() : toggleFullscreen()}
         onWheel={handleVolumeWheel}
       />
       <VolumeOsd volume={volOsd} />
@@ -644,7 +648,7 @@ function App() {
       ) : (
         <div
           style={{ flex: 1 }}
-          onDoubleClick={() => toggleFullscreen()}
+          onDoubleClick={() => status.window_pip ? togglePip() : toggleFullscreen()}
           onWheel={handleVolumeWheel}
         />
       )}
@@ -793,6 +797,13 @@ const PlaylistIcon = () => (
 const FullscreenIcon = () => (
   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+  </svg>
+);
+
+const PipIcon = () => (
+  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+    <rect x="12" y="12" width="7" height="5" />
   </svg>
 );
 
@@ -1098,6 +1109,14 @@ function BottomControlBar({
             title="Settings & Library Management"
           >
             <SettingsIcon />
+          </button>
+
+          <button
+            className="control-btn pip-btn"
+            onClick={() => togglePip()}
+            title="Picture in Picture (i)"
+          >
+            <PipIcon />
           </button>
 
           <button

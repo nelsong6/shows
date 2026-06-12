@@ -276,6 +276,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     server.set_runner(runner.clone());
     server.set_syncer(syncer.clone());
     server.set_on_fullscreen(compositor.fullscreen_callback());
+    server.set_on_pip(compositor.pip_callback());
     server.set_on_window_action(compositor.window_action_callback());
 
     let s_clone = server.clone();
@@ -287,6 +288,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     server.push(serde_json::json!({
         "window_maximized": compositor.maximized(),
         "window_fullscreen": false,
+        "window_pip": false,
     }));
 
     // Player events (mpv's thread) -> runner.
