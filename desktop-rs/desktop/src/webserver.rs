@@ -315,6 +315,7 @@ impl ControlServer {
                 let b = read_body(&mut request);
                 if let Some(v) = b.get("volume").and_then(Value::as_f64) {
                     self.with_player(|p| p.set_volume(v));
+                    self.replica.set_volume(v);
                 }
                 respond(request, 204, vec![], "text/plain");
             }

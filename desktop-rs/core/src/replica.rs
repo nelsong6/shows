@@ -157,6 +157,28 @@ impl Replica {
         .flatten()
     }
 
+    pub fn get_volume(&self) -> Option<f64> {
+        let conn = self.db.lock().unwrap();
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = 'volume'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+    }
+
+    pub fn set_volume(&self, vol: f64) {
+        let conn = self.db.lock().unwrap();
+        let _ = conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('volume', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![vol.to_string()],
+        );
+    }
+
     // ── mutations (local-first: mark dirty + bump updated_at) ────────────
     /// Mark `(show_id, episode_id)` pairs watched via the engine; persist
     /// watched_at/removed_at, append history. Returns (newly-watched, removed ids).

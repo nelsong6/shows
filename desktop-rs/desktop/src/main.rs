@@ -192,6 +192,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let api = mpv::Api::load().map_err(to_err)?;
     let handle = Arc::new(mpv::Handle::create(api).map_err(to_err)?);
     let player = Player::new(handle.clone());
+    if let Some(vol) = replica.get_volume() {
+        player.set_volume(vol);
+    }
     let compositor = Compositor::create(handle.clone(), &overlay_url)?;
     let _audio_monitor = audio_monitor::AudioMonitor::start(Arc::downgrade(&player))?;
     log::info!("compositor + render context ready");
