@@ -1800,6 +1800,7 @@ function PipControlOverlay({
     <div 
       className={`pip-overlay${controlsIdle ? ' hidden' : ''}`}
       onMouseEnter={() => onHoverChange(true)}
+      onMouseMove={() => onHoverChange(true)}
       onMouseLeave={() => onHoverChange(false)}
     >
       <div className="pip-top-right">

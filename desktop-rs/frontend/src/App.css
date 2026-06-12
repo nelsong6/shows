@@ -1323,7 +1323,7 @@ button.gb.toggle-view-btn {
 .pip-overlay {
   position: absolute;
   inset: 0;
-  pointer-events: none;
+  pointer-events: auto;
   background: rgba(0, 0, 0, 0.4);
   opacity: 1;
   transition: opacity 0.2s ease, background 0.2s ease;
@@ -1338,7 +1338,11 @@ button.gb.toggle-view-btn {
   background: transparent;
 }
 
-/* Let the buttons themselves intercept clicks */
+.pip-overlay.hidden .pip-btn,
+.pip-overlay.hidden .pip-progress-bar {
+  pointer-events: none;
+}
+
 .pip-btn {
   pointer-events: auto;
   background: none;

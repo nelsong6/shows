@@ -27,7 +27,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::gl::GlVideo;
@@ -68,6 +70,101 @@ impl CursorMotion {
     }
 }
 
+fn pip_hit_test(client_x: i32, client_y: i32, width: i32, height: i32) -> u32 {
+    let resize_border = 6;
+    if client_x < resize_border && client_y < resize_border { return HTTOPLEFT; }
+    if client_x > width - resize_border && client_y < resize_border { return HTTOPRIGHT; }
+    if client_x < resize_border && client_y > height - resize_border { return HTBOTTOMLEFT; }
+    if client_x > width - resize_border && client_y > height - resize_border { return HTBOTTOMRIGHT; }
+    if client_x < resize_border { return HTLEFT; }
+    if client_x > width - resize_border { return HTRIGHT; }
+    if client_y < resize_border { return HTTOP; }
+    if client_y > height - resize_border { return HTBOTTOM; }
+
+    // Top-right buttons: back-to-tab and close.
+    if client_x > width - 96 && client_y < 48 {
+        return HTCLIENT;
+    }
+    // Bottom progress bar area.
+    if client_y > height - 12 {
+        return HTCLIENT;
+    }
+    // Center playback controls.
+    let center_y = height / 2;
+    let center_x = width / 2;
+    if client_x > center_x - 70 && client_x < center_x + 70 {
+        if client_y > center_y - 36 && client_y < center_y + 36 {
+            return HTCLIENT;
+        }
+    }
+
+    HTCAPTION
+}
+
+fn rect_width(rect: RECT) -> i32 {
+    rect.right - rect.left
+}
+
+fn rect_height(rect: RECT) -> i32 {
+    rect.bottom - rect.top
+}
+
+fn default_pip_rect(work: RECT) -> RECT {
+    let margin = 24;
+    let work_w = rect_width(work).max(1);
+    let work_h = rect_height(work).max(1);
+    let max_w = (work_w - margin * 2).max(1);
+    let max_h = (work_h - margin * 2).max(1);
+
+    let mut pip_w = ((work_w as f64) * 0.375) as i32;
+    pip_w = pip_w.clamp(640, 960).min(max_w);
+    let mut pip_h = (pip_w * 9) / 16;
+
+    if pip_h > max_h {
+        pip_h = max_h;
+        pip_w = (pip_h * 16) / 9;
+    }
+
+    let right = work.right - margin.min(work_w / 2);
+    let bottom = work.bottom - margin.min(work_h / 2);
+    RECT {
+        left: right - pip_w,
+        top: bottom - pip_h,
+        right,
+        bottom,
+    }
+}
+
+fn clamp_pip_rect_to_work_area(rect: RECT, work: RECT) -> RECT {
+    let work_w = rect_width(work).max(1);
+    let work_h = rect_height(work).max(1);
+    let width = rect_width(rect).clamp(1, work_w);
+    let height = rect_height(rect).clamp(1, work_h);
+
+    let mut left = rect.left;
+    let mut top = rect.top;
+
+    if left < work.left {
+        left = work.left;
+    }
+    if top < work.top {
+        top = work.top;
+    }
+    if left + width > work.right {
+        left = work.right - width;
+    }
+    if top + height > work.bottom {
+        top = work.bottom - height;
+    }
+
+    RECT {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +189,63 @@ mod tests {
         assert!(motion.observe(point(321, 180)));
         assert!(!motion.observe(point(321, 180)));
         assert!(motion.observe(point(321, 181)));
+    }
+
+    #[test]
+    fn pip_hit_test_keeps_blank_video_draggable() {
+        assert_eq!(pip_hit_test(20, 20, 400, 225), HTCAPTION);
+        assert_eq!(pip_hit_test(200, 30, 400, 225), HTCAPTION);
+    }
+
+    #[test]
+    fn pip_hit_test_keeps_controls_clickable() {
+        assert_eq!(pip_hit_test(380, 24, 400, 225), HTCLIENT);
+        assert_eq!(pip_hit_test(200, 112, 400, 225), HTCLIENT);
+        assert_eq!(pip_hit_test(200, 216, 400, 225), HTCLIENT);
+    }
+
+    #[test]
+    fn pip_hit_test_keeps_edges_resizable() {
+        assert_eq!(pip_hit_test(1, 1, 400, 225), HTTOPLEFT);
+        assert_eq!(pip_hit_test(399, 224, 400, 225), HTBOTTOMRIGHT);
+        assert_eq!(pip_hit_test(200, 1, 400, 225), HTTOP);
+        assert_eq!(pip_hit_test(1, 100, 400, 225), HTLEFT);
+    }
+
+    #[test]
+    fn default_pip_rect_is_larger_than_old_tiny_size() {
+        let work = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let rect = default_pip_rect(work);
+
+        assert_eq!(rect_width(rect), 720);
+        assert_eq!(rect_height(rect), 405);
+        assert_eq!(rect.right, 1896);
+        assert_eq!(rect.bottom, 1056);
+    }
+
+    #[test]
+    fn default_pip_rect_stays_inside_small_work_area() {
+        let work = RECT { left: 0, top: 0, right: 800, bottom: 500 };
+        let rect = default_pip_rect(work);
+
+        assert!(rect_width(rect) <= 752);
+        assert!(rect_height(rect) <= 452);
+        assert!(rect.left >= work.left);
+        assert!(rect.top >= work.top);
+        assert!(rect.right <= work.right);
+        assert!(rect.bottom <= work.bottom);
+    }
+
+    #[test]
+    fn clamp_pip_rect_preserves_size_and_moves_inside_work_area() {
+        let work = RECT { left: 100, top: 100, right: 900, bottom: 700 };
+        let rect = RECT { left: 850, top: 650, right: 1250, bottom: 875 };
+        let clamped = clamp_pip_rect_to_work_area(rect, work);
+
+        assert_eq!(rect_width(clamped), 400);
+        assert_eq!(rect_height(clamped), 225);
+        assert_eq!(clamped.right, work.right);
+        assert_eq!(clamped.bottom, work.bottom);
     }
 }
 
@@ -125,6 +279,7 @@ struct State {
     saved_style: isize,
     saved_exstyle: isize,
     saved_rect: RECT,
+    last_pip_rect: Option<RECT>,
 }
 
 thread_local! {
@@ -296,6 +451,7 @@ impl Compositor {
                 saved_style: 0,
                 saved_exstyle: 0,
                 saved_rect: RECT::default(),
+                last_pip_rect: None,
             });
         });
 
@@ -536,34 +692,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     let width = rect.right - rect.left;
                     let height = rect.bottom - rect.top;
 
-                    let resize_border = 6;
-                    if client_x < resize_border && client_y < resize_border { return LRESULT(HTTOPLEFT as isize); }
-                    if client_x > width - resize_border && client_y < resize_border { return LRESULT(HTTOPRIGHT as isize); }
-                    if client_x < resize_border && client_y > height - resize_border { return LRESULT(HTBOTTOMLEFT as isize); }
-                    if client_x > width - resize_border && client_y > height - resize_border { return LRESULT(HTBOTTOMRIGHT as isize); }
-                    if client_x < resize_border { return LRESULT(HTLEFT as isize); }
-                    if client_x > width - resize_border { return LRESULT(HTRIGHT as isize); }
-                    if client_y < resize_border { return LRESULT(HTTOP as isize); }
-                    if client_y > height - resize_border { return LRESULT(HTBOTTOM as isize); }
-
-                    // Top-right cutout: back-to-tab and close
-                    if client_x > width - 96 && client_y < 48 {
-                        return LRESULT(HTCLIENT as isize);
-                    }
-                    // Bottom cutout: progress bar area
-                    if client_y > height - 12 {
-                        return LRESULT(HTCLIENT as isize);
-                    }
-                    // Center cutout: previous, play/pause, next
-                    let center_y = height / 2;
-                    let center_x = width / 2;
-                    if client_x > center_x - 70 && client_x < center_x + 70 {
-                        if client_y > center_y - 36 && client_y < center_y + 36 {
-                            return LRESULT(HTCLIENT as isize);
-                        }
-                    }
-
-                    return LRESULT(HTCAPTION as isize);
+                    return LRESULT(pip_hit_test(client_x, client_y, width, height) as isize);
                 }
 
                 if is_max {
@@ -600,6 +729,28 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             | WM_MBUTTONDOWN | WM_MBUTTONUP => {
                 let lp = l.0 as u32;
                 let point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
+                if msg == WM_LBUTTONDOWN {
+                    let starts_pip_drag = STATE.with(|s| {
+                        if !s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false) {
+                            return false;
+                        }
+                        let mut rc = RECT::default();
+                        if GetClientRect(hwnd, &mut rc).is_err() {
+                            return false;
+                        }
+                        pip_hit_test(point.x, point.y, rc.right - rc.left, rc.bottom - rc.top) == HTCAPTION
+                    });
+                    if starts_pip_drag {
+                        let _ = ReleaseCapture();
+                        let _ = SendMessageW(
+                            hwnd,
+                            WM_NCLBUTTONDOWN,
+                            Some(WPARAM(HTCAPTION as usize)),
+                            Some(LPARAM(0)),
+                        );
+                        return LRESULT(0);
+                    }
+                }
                 if msg == WM_MOUSEMOVE {
                     // Keyboard/media input can synthesize a same-position
                     // WM_MOUSEMOVE. Only real pointer displacement may reveal
@@ -954,28 +1105,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         };
                         let _ = GetMonitorInfoW(mon, &mut mi);
                         
-                        // Calculate PiP rectangle: e.g. 400x225, bottom right corner with margin.
-                        let margin = 24;
-                        let pip_w = 400;
-                        let pip_h = 225;
-                        let mut target_rect = RECT {
-                            left: mi.rcWork.right - margin - pip_w,
-                            top: mi.rcWork.bottom - margin - pip_h,
-                            right: mi.rcWork.right - margin,
-                            bottom: mi.rcWork.bottom - margin,
-                        };
-                        // Keep it on screen if monitor is tiny
-                        if target_rect.left < mi.rcWork.left {
-                            target_rect.left = mi.rcWork.left;
-                            target_rect.right = mi.rcWork.left + pip_w;
-                        }
-                        if target_rect.top < mi.rcWork.top {
-                            target_rect.top = mi.rcWork.top;
-                            target_rect.bottom = mi.rcWork.top + pip_h;
-                        }
+                        let target_rect = st
+                            .last_pip_rect
+                            .map(|rect| clamp_pip_rect_to_work_area(rect, mi.rcWork))
+                            .unwrap_or_else(|| default_pip_rect(mi.rcWork));
 
                         Some(Action::Enter { new_style, rect: target_rect })
                     } else {
+                        let mut pip_rect = RECT::default();
+                        if GetWindowRect(hwnd, &mut pip_rect).is_ok() {
+                            st.last_pip_rect = Some(pip_rect);
+                        }
                         let action = Action::Exit {
                             restore_style: st.saved_style,
                             restore_exstyle: st.saved_exstyle,
@@ -1132,10 +1272,12 @@ fn save_window_placement(hwnd: HWND) {
             let mut maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
             let mut rect = wp.rcNormalPosition;
             
-            let is_fs = STATE.with(|s| {
-                s.borrow().as_ref().map(|st| (st.is_fullscreen, st.saved_rect, st.saved_style))
+            let saved_transient = STATE.with(|s| {
+                s.borrow().as_ref().map(|st| {
+                    (st.is_fullscreen || st.is_pip, st.saved_rect, st.saved_style)
+                })
             });
-            if let Some((true, saved_rect, saved_style)) = is_fs {
+            if let Some((true, saved_rect, saved_style)) = saved_transient {
                 rect = saved_rect;
                 maximized = (saved_style as u32 & WS_MAXIMIZE.0) != 0;
             }
