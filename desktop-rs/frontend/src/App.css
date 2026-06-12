@@ -177,6 +177,18 @@
   margin-bottom: 24px;
 }
 
+.main .overview-kpi {
+  margin: 0;
+  padding: 24px 32px 16px 32px;
+  background: var(--bg);
+  border-top: none;
+  border-left: none;
+  border-right: none;
+  border-radius: 0;
+  box-shadow: none;
+  border-bottom: 1px solid var(--border);
+}
+
 .main .kpi .kpi-cell {
   display: flex;
   flex-direction: column;

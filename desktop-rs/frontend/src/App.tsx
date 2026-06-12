@@ -466,61 +466,63 @@ function App() {
 
 
 
-  const overviewContent = (
-    <>
-      <div className="kpi">
-        <div className="kpi-cell">
-          <div className="kpi-key">round #</div>
-          <div className="kpi-val">{status.round_id ?? '—'}</div>
-        </div>
-        <div className="kpi-cell">
-          <div className="kpi-key">round progress</div>
-          <div className="kpi-val">
-            {round.length ? `${pos + 1}/${round.length}` : '—'}
-          </div>
-        </div>
-        <div className="kpi-cell">
-          <div className="kpi-key">watched</div>
-          <div className="kpi-val">
-            {activeShowStats ? (
-              <span
-                className={`pill ${
-                  activeShowStats.removed || activeShowStats.watched === activeShowStats.total
-                    ? 'drain'
-                    : 'busy'
-                }`}
-              >
-                {activeShowStats.removed || activeShowStats.watched === activeShowStats.total
-                  ? 'yes'
-                  : activeShowName === playingShowName
-                  ? 'in progress'
-                  : 'no'}
-              </span>
-            ) : (
-              '—'
-            )}
-          </div>
-        </div>
-        <div className="kpi-cell" style={{ flex: 1, minWidth: 0 }}>
-          <div className="kpi-key">episode</div>
-          <div
-            className="kpi-val"
-            style={{
-              fontSize: '14.5px',
-              lineHeight: '24px',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              color: 'var(--fg-secondary)',
-              fontWeight: 400
-            }}
-            title={activeEpisodePath || undefined}
-          >
-            {activeEpisodePath ? shortPath(activeEpisodePath) : '—'}
-          </div>
+  const overviewHeader = (
+    <div className="kpi overview-kpi">
+      <div className="kpi-cell">
+        <div className="kpi-key">round #</div>
+        <div className="kpi-val">{status.round_id ?? '—'}</div>
+      </div>
+      <div className="kpi-cell">
+        <div className="kpi-key">round progress</div>
+        <div className="kpi-val">
+          {round.length ? `${pos + 1}/${round.length}` : '—'}
         </div>
       </div>
+      <div className="kpi-cell">
+        <div className="kpi-key">watched</div>
+        <div className="kpi-val">
+          {activeShowStats ? (
+            <span
+              className={`pill ${
+                activeShowStats.removed || activeShowStats.watched === activeShowStats.total
+                  ? 'drain'
+                  : 'busy'
+              }`}
+            >
+              {activeShowStats.removed || activeShowStats.watched === activeShowStats.total
+                ? 'yes'
+                : activeShowName === playingShowName
+                ? 'in progress'
+                : 'no'}
+            </span>
+          ) : (
+            '—'
+          )}
+        </div>
+      </div>
+      <div className="kpi-cell" style={{ flex: 1, minWidth: 0 }}>
+        <div className="kpi-key">episode</div>
+        <div
+          className="kpi-val"
+          style={{
+            fontSize: '14.5px',
+            lineHeight: '24px',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            color: 'var(--fg-secondary)',
+            fontWeight: 400
+          }}
+          title={activeEpisodePath || undefined}
+        >
+          {activeEpisodePath ? shortPath(activeEpisodePath) : '—'}
+        </div>
+      </div>
+    </div>
+  );
 
+  const overviewContent = (
+    <>
       {selectedShow ? (
         <ShowHistory
           show={selectedShow}
@@ -634,6 +636,7 @@ function App() {
               setSelected={setSelected}
               refreshShows={refreshShows}
               removeShow={removeShow}
+              overviewHeader={overviewHeader}
               overviewContent={overviewContent}
             />
           </main>
@@ -1474,23 +1477,6 @@ function StatsPanel({ stats }: { stats: Stats | null }) {
   const active = stats.per_show.filter((s) => !s.removed).slice(0, 14);
   return (
     <div className="section">
-      <h3>stats</h3>
-      <div className="kpi">
-        <div className="kpi-cell">
-          <div className="kpi-key">episodes watched</div>
-          <div className="kpi-val">
-            {stats.episodes_watched} / {stats.episodes_total} ({pct}%)
-          </div>
-        </div>
-        <div className="kpi-cell">
-          <div className="kpi-key">shows finished</div>
-          <div className="kpi-val">{stats.finished_shows}</div>
-        </div>
-        <div className="kpi-cell">
-          <div className="kpi-key">active shows</div>
-          <div className="kpi-val">{stats.active_shows}</div>
-        </div>
-      </div>
       <Heatmap byDay={stats.by_day} />
       <h4 className="stat-h">progress</h4>
       <ul className="progress">
@@ -1550,6 +1536,7 @@ function SettingsPanel({
   setSelected,
   refreshShows,
   removeShow,
+  overviewHeader,
   overviewContent,
 }: {
   status: Status;
@@ -1559,9 +1546,54 @@ function SettingsPanel({
   setSelected: (id: string | null) => void;
   refreshShows: () => void;
   removeShow: (id: string) => void;
+  overviewHeader: React.ReactNode;
   overviewContent: React.ReactNode;
 }) {
   const [activeTab, setActiveTab] = useState<'overview' | 'stats' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
+
+  const statsHeader = stats && stats.total_shows ? (() => {
+    const pct = stats.episodes_total
+      ? Math.round((stats.episodes_watched / stats.episodes_total) * 100)
+      : 0;
+    return (
+      <div className="kpi overview-kpi">
+        <div className="kpi-cell">
+          <div className="kpi-key">episodes watched</div>
+          <div className="kpi-val">
+            {stats.episodes_watched} / {stats.episodes_total} ({pct}%)
+          </div>
+        </div>
+        <div className="kpi-cell">
+          <div className="kpi-key">shows finished</div>
+          <div className="kpi-val">{stats.finished_shows}</div>
+        </div>
+        <div className="kpi-cell">
+          <div className="kpi-key">active shows</div>
+          <div className="kpi-val">{stats.active_shows}</div>
+        </div>
+      </div>
+    );
+  })() : null;
+
+  const libraryHeader = (
+    <div className="kpi overview-kpi">
+      <div className="kpi-cell">
+        <div className="kpi-key">total shows</div>
+        <div className="kpi-val">{shows.length}</div>
+      </div>
+    </div>
+  );
+
+  const nextRoundHeader = (
+    <div className="kpi overview-kpi">
+      <div className="kpi-cell" style={{ flex: 1 }}>
+        <div className="kpi-key">preview info</div>
+        <div className="kpi-val" style={{ fontSize: '14.5px', whiteSpace: 'normal', fontWeight: 400 }}>
+          this is what the next round of episodes would look like if it was generated right now.
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="settings-panel">
@@ -1578,12 +1610,17 @@ function SettingsPanel({
         </nav>
       </div>
 
-      <div className="settings-content">
-        {activeTab === 'overview' && (
-          <div className="settings-tab">
-            {overviewContent}
-          </div>
-        )}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+        {activeTab === 'overview' && overviewHeader}
+        {activeTab === 'stats' && statsHeader}
+        {activeTab === 'library' && libraryHeader}
+        {activeTab === 'next_round' && nextRoundHeader}
+        <div className="settings-content">
+          {activeTab === 'overview' && (
+            <div className="settings-tab">
+              {overviewContent}
+            </div>
+          )}
 
         {activeTab === 'stats' && (
           <div className="settings-tab">
@@ -1594,7 +1631,7 @@ function SettingsPanel({
         {activeTab === 'library' && (
           <div className="settings-tab">
             <div className="section">
-              <h3>library ({shows.length} shows)</h3>
+
               {shows.length === 0 ? (
                 <div className="empty">no shows yet.</div>
               ) : (
@@ -1620,7 +1657,11 @@ function SettingsPanel({
           </div>
         )}
 
-        {activeTab === 'next_round' && <NextRoundTab currentRound={status.round || []} onSelectShow={(id) => { setSelected(id); setActiveTab('overview'); }} />}
+        {activeTab === 'next_round' && (
+          <div className="settings-tab">
+            <NextRoundTab currentRound={status.round || []} onSelectShow={(id) => { setSelected(id); setActiveTab('overview'); }} />
+          </div>
+        )}
 
         {activeTab === 'add_show' && (
           <div className="settings-tab" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
@@ -1644,10 +1685,11 @@ function SettingsPanel({
           <div className="settings-tab">
             <div className="section">
               <h3>appearance</h3>
-              <div className="empty" style={{ padding: '24px 0' }}>appearance settings coming soon...</div>
+              <div className="empty">no appearance settings yet.</div>
             </div>
           </div>
         )}
+        </div>
       </div>
     </div>
   );
@@ -1678,12 +1720,8 @@ function NextRoundTab({ currentRound, onSelectShow }: { currentRound: any[], onS
   }, []);
 
   return (
-    <div className="settings-tab">
+    <>
       <div className="section">
-        <h3>preview next round</h3>
-        <p style={{ opacity: 0.7, marginBottom: '16px' }}>
-          this is what the next round of episodes would look like if it was generated right now.
-        </p>
         {msg && <div className="add-msg">{msg}</div>}
         {round && round.length === 0 && !msg && <div className="empty">no episodes found.</div>}
         {round && round.length > 0 && (
@@ -1701,7 +1739,7 @@ function NextRoundTab({ currentRound, onSelectShow }: { currentRound: any[], onS
           </ul>
         )}
       </div>
-    </div>
+    </>
   );
 }
 
