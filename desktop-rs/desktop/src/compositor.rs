@@ -483,6 +483,39 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 
                 let is_max = IsZoomed(hwnd).as_bool();
                 
+                if !is_max {
+                    let border_width = 6;
+                    let is_top = y < rect.top + border_width;
+                    let is_bottom = y >= rect.bottom - border_width;
+                    let is_left = x < rect.left + border_width;
+                    let is_right = x >= rect.right - border_width;
+                    
+                    if is_top && is_left {
+                        return LRESULT(HTTOPLEFT as isize);
+                    }
+                    if is_top && is_right {
+                        return LRESULT(HTTOPRIGHT as isize);
+                    }
+                    if is_bottom && is_left {
+                        return LRESULT(HTBOTTOMLEFT as isize);
+                    }
+                    if is_bottom && is_right {
+                        return LRESULT(HTBOTTOMRIGHT as isize);
+                    }
+                    if is_top {
+                        return LRESULT(HTTOP as isize);
+                    }
+                    if is_bottom {
+                        return LRESULT(HTBOTTOM as isize);
+                    }
+                    if is_left {
+                        return LRESULT(HTLEFT as isize);
+                    }
+                    if is_right {
+                        return LRESULT(HTRIGHT as isize);
+                    }
+                }
+                
                 if is_pip {
                     let client_y = y - rect.top;
                     let height = rect.bottom - rect.top;
@@ -502,37 +535,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         }
                     }
                     return LRESULT(HTCLIENT as isize);
-                }
-                
-                let border_width = 6;
-                let is_top = y < rect.top + border_width;
-                let is_bottom = y >= rect.bottom - border_width;
-                let is_left = x < rect.left + border_width;
-                let is_right = x >= rect.right - border_width;
-                
-                if is_top && is_left {
-                    return LRESULT(HTTOPLEFT as isize);
-                }
-                if is_top && is_right {
-                    return LRESULT(HTTOPRIGHT as isize);
-                }
-                if is_bottom && is_left {
-                    return LRESULT(HTBOTTOMLEFT as isize);
-                }
-                if is_bottom && is_right {
-                    return LRESULT(HTBOTTOMRIGHT as isize);
-                }
-                if is_top {
-                    return LRESULT(HTTOP as isize);
-                }
-                if is_bottom {
-                    return LRESULT(HTBOTTOM as isize);
-                }
-                if is_left {
-                    return LRESULT(HTLEFT as isize);
-                }
-                if is_right {
-                    return LRESULT(HTRIGHT as isize);
                 }
                 
                 let client_y = y - rect.top;
