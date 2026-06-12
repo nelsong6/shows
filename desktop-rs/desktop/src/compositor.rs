@@ -417,6 +417,20 @@ fn current_cursor_screen_pos() -> Option<POINT> {
     Some(point)
 }
 
+fn is_cursor_in_window(hwnd: HWND) -> bool {
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return false;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(hwnd, &mut rect).is_err() {
+            return false;
+        }
+        windows::Win32::Graphics::Gdi::PtInRect(&rect, pt).as_bool()
+    }
+}
+
 fn render(s: &State) {
     unsafe {
         s.gl.render(); // mpv OpenGL render -> the shared D3D texture
@@ -630,6 +644,48 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 });
                 LRESULT(0)
             }
+            WM_NCMOUSEMOVE => {
+                let lp = l.0 as u32;
+                let mut point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
+                let _ = unsafe { ScreenToClient(hwnd, &mut point) };
+
+                STATE.with(|s| {
+                    if let Some(st) = s.borrow().as_ref() {
+                        let mut tme = TRACKMOUSEEVENT {
+                            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                            dwFlags: TME_LEAVE | windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT_FLAGS(0x00000010), // TME_NONCLIENT
+                            hwndTrack: hwnd,
+                            dwHoverTime: 0,
+                        };
+                        let _ = unsafe { TrackMouseEvent(&mut tme) };
+
+                        let vkeys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS((w.0 & 0xFFFF) as i32);
+                        // Forward as standard MOUSE_MOVE so the webview sees the hover
+                        let _ = st.controller.SendMouseInput(
+                            COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+                            vkeys,
+                            0,
+                            point,
+                        );
+                    }
+                });
+                unsafe { DefWindowProcW(hwnd, msg, w, l) }
+            }
+            0x02A2 => { // WM_NCMOUSELEAVE
+                if !is_cursor_in_window(hwnd) {
+                    STATE.with(|s| {
+                        if let Some(st) = s.borrow().as_ref() {
+                            let _ = st.controller.SendMouseInput(
+                                COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+                                COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
+                                0,
+                                POINT { x: 0, y: 0 },
+                            );
+                        }
+                    });
+                }
+                unsafe { DefWindowProcW(hwnd, msg, w, l) }
+            }
             WM_SETCURSOR => {
                 // The windowless overlay can't own the OS cursor, so the host
                 // applies the cursor it requested. Over the client area use the
@@ -675,16 +731,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
-                STATE.with(|s| {
-                    if let Some(st) = s.borrow().as_ref() {
-                        let _ = st.controller.SendMouseInput(
-                            COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
-                            COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
-                            0,
-                            POINT { x: 0, y: 0 },
-                        );
-                    }
-                });
+                if !is_cursor_in_window(hwnd) {
+                    STATE.with(|s| {
+                        if let Some(st) = s.borrow().as_ref() {
+                            let _ = st.controller.SendMouseInput(
+                                COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+                                COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
+                                0,
+                                POINT { x: 0, y: 0 },
+                            );
+                        }
+                    });
+                }
                 LRESULT(0)
             }
             WM_SETFOCUS => {
