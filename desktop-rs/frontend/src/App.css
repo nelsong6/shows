@@ -337,7 +337,38 @@ table.runs th {
   min-width: 30px;
   text-align: right;
 }
+
+.control-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 112px;
+  transform: translateX(-50%);
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 10px 14px;
+  background: color-mix(in srgb, var(--bg-deep) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font-size: 12.5px;
+  line-height: 17px;
+  text-align: center;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  z-index: 2100;
+  animation: control-toast-in 120ms ease-out;
+}
+
+.control-toast.danger {
+  border-color: color-mix(in srgb, var(--state-danger-fg) 55%, var(--border));
+  color: var(--state-danger-fg);
+}
+
 @keyframes vol-osd-in {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+@keyframes control-toast-in {
   from { opacity: 0; transform: translate(-50%, 8px); }
   to { opacity: 1; transform: translate(-50%, 0); }
 }

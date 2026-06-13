@@ -39,6 +39,7 @@ import {
   type Playback,
   type Stats,
   type UpdateInfo,
+  type ControlResult,
   fetchShowDetails,
   type ShowDetailsResponse,
 } from './api';
@@ -121,8 +122,35 @@ function App() {
   const [volOsd, setVolOsd] = useState<number | null>(null);
   const [displayVolume, setDisplayVolume] = useState(100);
   const [displayPaused, setDisplayPaused] = useState(false);
+  const [controlToast, setControlToast] = useState<{message: string; level: 'info' | 'danger'} | null>(null);
 
   useEffect(() => subscribeStatus(setStatus), []);
+
+  const showControlToast = useCallback((message: string, level: 'info' | 'danger' = 'info') => {
+    setControlToast({message, level});
+  }, []);
+
+  useEffect(() => {
+    if (!controlToast) return;
+    const id = window.setTimeout(() => setControlToast(null), 2600);
+    return () => window.clearTimeout(id);
+  }, [controlToast]);
+
+  const runControl = useCallback(
+    async (action: () => Promise<ControlResult>, options?: {success?: boolean}) => {
+      try {
+        const result = await action();
+        if (options?.success) {
+          showControlToast(result.message, 'info');
+        }
+      } catch (e) {
+        const message = e instanceof Error ? e.message : 'control failed';
+        showControlToast(message, 'danger');
+        console.error(e);
+      }
+    },
+    [showControlToast],
+  );
 
   // Library/watch stats for the dashboard — refresh on phase change and after
   // each advance (the watched counts move).
@@ -291,13 +319,13 @@ function App() {
           requestPause(!pauseRef.current);
           break;
         case 'n':
-          void skip().catch(console.error);
+          void runControl(skip);
           break;
         case 'p':
           previous();
           break;
         case 'd':
-          void defer().catch(console.error);
+          void runControl(defer);
           break;
         case 'f':
           toggleFullscreen();
@@ -357,7 +385,7 @@ function App() {
       window.removeEventListener('keydown', onKey);
       window.clearTimeout(volOsdTimer.current);
     };
-  }, [adjustVolume]);
+  }, [adjustVolume, runControl]);
 
 
 
@@ -461,7 +489,7 @@ function App() {
       .catch(() => setShowDetails(null));
 
   const handlePlayShow = (showId: string) => {
-    void playShow(showId).catch(console.error);
+    void runControl(() => playShow(showId));
   };
 
   const handleMarkWatched = async (showId: string) => {
@@ -655,6 +683,7 @@ function App() {
         onWheel={handleVolumeWheel}
       />
       <VolumeOsd volume={volOsd} />
+      {controlToast && <ControlToast message={controlToast.message} level={controlToast.level} />}
       {status.update?.available && status.update.latest !== updateDismissed && (
         <UpdateBanner
           info={status.update}
@@ -715,6 +744,9 @@ function App() {
           onVolumeWheel={handleVolumeWheel}
           displayPaused={displayPaused}
           onRequestPause={requestPause}
+          onSkip={() => runControl(skip)}
+          onDefer={() => runControl(defer)}
+          onSyncNow={() => runControl(syncNow, {success: true})}
         />
       )}
     </div>
@@ -887,6 +919,14 @@ function VolumeOsd({ volume }: { volume: number | null }) {
   );
 }
 
+function ControlToast({ message, level }: { message: string; level: 'info' | 'danger' }) {
+  return (
+    <div className={`control-toast ${level}`} role="status" aria-live="polite">
+      {message}
+    </div>
+  );
+}
+
 // Unified bottom-anchored control bar.
 function BottomControlBar({
   status,
@@ -903,6 +943,9 @@ function BottomControlBar({
   onVolumeWheel,
   displayPaused,
   onRequestPause,
+  onSkip,
+  onDefer,
+  onSyncNow,
 }: {
   status: Status;
   pos: number;
@@ -918,6 +961,9 @@ function BottomControlBar({
   onVolumeWheel: WheelEventHandler<HTMLDivElement>;
   displayPaused: boolean;
   onRequestPause: (paused: boolean) => void;
+  onSkip: () => void;
+  onDefer: () => void;
+  onSyncNow: () => void;
 }) {
   const pb = status.playback;
   const pct = pb
@@ -1047,9 +1093,7 @@ function BottomControlBar({
 
           <button
             className="control-btn"
-            onClick={() => {
-              void skip().catch(console.error);
-            }}
+            onClick={onSkip}
             disabled={!playing}
             title="Skip Show (n)"
           >
@@ -1061,9 +1105,7 @@ function BottomControlBar({
         <div className="controls-group right-controls">
           <button
             className="control-btn defer-btn"
-            onClick={() => {
-              void defer().catch(console.error);
-            }}
+            onClick={onDefer}
             disabled={!playing}
             title="Defer Episode (d)"
           >
@@ -1136,9 +1178,7 @@ function BottomControlBar({
 
           <button
             className="control-btn sync-btn"
-            onClick={() => {
-              void syncNow().catch(console.error);
-            }}
+            onClick={onSyncNow}
             title="Sync Now"
           >
             <SyncIcon />
