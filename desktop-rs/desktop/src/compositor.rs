@@ -798,7 +798,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             WM_NCMOUSEMOVE => {
                 let lp = l.0 as u32;
                 let mut point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
-                let _ = unsafe { ScreenToClient(hwnd, &mut point) };
+                let _ = ScreenToClient(hwnd, &mut point);
 
                 STATE.with(|s| {
                     if let Some(st) = s.borrow().as_ref() {
@@ -808,7 +808,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                             hwndTrack: hwnd,
                             dwHoverTime: 0,
                         };
-                        let _ = unsafe { TrackMouseEvent(&mut tme) };
+                        let _ = TrackMouseEvent(&mut tme);
 
                         let vkeys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS((w.0 & 0xFFFF) as i32);
                         // Forward as standard MOUSE_MOVE so the webview sees the hover
@@ -820,7 +820,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         );
                     }
                 });
-                unsafe { DefWindowProcW(hwnd, msg, w, l) }
+                DefWindowProcW(hwnd, msg, w, l)
             }
             0x02A2 => { // WM_NCMOUSELEAVE
                 if !is_cursor_in_window(hwnd) {
@@ -835,7 +835,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         }
                     });
                 }
-                unsafe { DefWindowProcW(hwnd, msg, w, l) }
+                DefWindowProcW(hwnd, msg, w, l)
             }
             WM_SETCURSOR => {
                 // The windowless overlay can't own the OS cursor, so the host
@@ -933,7 +933,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 if cw > 0 && ch > 0 {
                     STATE.with(|s| {
                         if let Some(st) = s.borrow_mut().as_mut() {
-                            let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+                            let dpi = GetDpiForWindow(hwnd) as i32;
                             let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
                             let video_h = (ch - video_top).max(1);
 
@@ -1049,7 +1049,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     if cw > 0 && ch > 0 {
                         STATE.with(|s| {
                             if let Some(st) = s.borrow_mut().as_mut() {
-                                let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+                                let dpi = GetDpiForWindow(hwnd) as i32;
                                 let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
                                 let video_h = (ch - video_top).max(1);
                                 let _ = st.swapchain.ResizeBuffers(
@@ -1176,7 +1176,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     if cw > 0 && ch > 0 {
                         STATE.with(|s| {
                             if let Some(st) = s.borrow_mut().as_mut() {
-                                let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+                                let dpi = GetDpiForWindow(hwnd) as i32;
                                 let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
                                 let video_h = (ch - video_top).max(1);
                                 let _ = st.swapchain.ResizeBuffers(
