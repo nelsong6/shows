@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type WheelEventHandler } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type WheelEventHandler } from 'react';
 import {
   subscribeStatus,
   listShows,
@@ -23,6 +23,8 @@ import {
   setAudio,
   syncNow,
   removeRoundEntry,
+  reloadRound,
+  recordPipUiDebug,
   addShow,
   previewShow,
   detectNewFolders,
@@ -326,16 +328,16 @@ function App() {
           void runControl(skip);
           break;
         case 'p':
-          previous();
+          void runControl(previous);
           break;
         case 'd':
           void runControl(defer);
           break;
         case 'f':
-          toggleFullscreen();
+          void runControl(toggleFullscreen);
           break;
         case 'i':
-          togglePip();
+          void runControl(togglePip);
           break;
 
         case 'c': {
@@ -347,10 +349,10 @@ function App() {
             if (isOff) {
               const firstTrack = pb.sub_tracks[0];
               if (firstTrack) {
-                setSub(firstTrack.id);
+                void setSub(firstTrack.id);
               }
             } else {
-              setSub('no');
+              void setSub('no');
             }
           }
           break;
@@ -358,12 +360,12 @@ function App() {
         case 'ArrowLeft':
         case 'j':
           e.preventDefault();
-          seekRelative(-10);
+          void runControl(() => seekRelative(-10));
           break;
         case 'ArrowRight':
         case 'l':
           e.preventDefault();
-          seekRelative(10);
+          void runControl(() => seekRelative(10));
           break;
         case 'ArrowUp': {
           e.preventDefault();
@@ -432,6 +434,15 @@ function App() {
   }, [status.phase, showSettings, controlsHovered]);
 
   useEffect(() => {
+    if (!status.window_pip) return;
+    void recordPipUiDebug({
+      controls_idle: controlsIdle,
+      controls_hovered: controlsHovered,
+      window_pip: true,
+    }).catch(() => {});
+  }, [status.window_pip, controlsIdle, controlsHovered]);
+
+  useEffect(() => {
     // Re-fetch shows whenever the playlist gains a round or advance — a
     // finished show drops out of the active list after advance. Keyed on
     // advanced_count so unrelated status stream updates don't reload the list.
@@ -480,8 +491,9 @@ function App() {
     : null;
   const alerts = status.alerts ?? [];
   const repairableRoundProblems = status.round_blocked
-    ? (status.file_sync?.problems ?? []).filter((problem) => !repairedRoundEntries.has(problem.episode_id))
+    ? (status.file_sync?.problems ?? [])
     : [];
+  const hasRepairedRoundEntries = repairedRoundEntries.size > 0;
 
   // Library edits mutate the replica but don't change phase/advance, so re-fetch
   // the sidebar shows explicitly after add/remove/rescan.
@@ -500,6 +512,10 @@ function App() {
   };
 
   const handleRemoveRoundEntry = (episodeId: string) => {
+    const problem = status.file_sync?.problems.find((p) => p.episode_id === episodeId);
+    if (!window.confirm(`Remove ${problem?.show_name ?? 'this entry'} from the current round?`)) {
+      return;
+    }
     void runControl(() => removeRoundEntry(episodeId), {success: true}).then((ok) => {
       if (!ok) return;
       setRepairedRoundEntries((prev) => {
@@ -510,14 +526,35 @@ function App() {
     });
   };
 
+  const handleReloadRound = () => {
+    void runControl(reloadRound, {success: true}).then((ok) => {
+      if (ok) setRepairedRoundEntries(new Set());
+    });
+  };
+
+  const runLibraryAction = async (action: () => Promise<void>, success?: string) => {
+    try {
+      await action();
+      if (success) {
+        showControlToast(success, 'info');
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'library action failed';
+      showControlToast(message, 'danger');
+      console.error(e);
+    }
+  };
+
   const handleMarkWatched = async (showId: string) => {
     try {
       await markShowWatched(showId);
       await refreshShows();
       await refreshHistory(showId);
       getStats().then(setStats).catch(() => {});
+      showControlToast('marked watched', 'info');
     } catch (e) {
-      console.error(e);
+      const message = e instanceof Error ? e.message : 'mark watched failed';
+      showControlToast(message, 'danger');
     }
   };
 
@@ -527,8 +564,10 @@ function App() {
       await refreshShows();
       await refreshHistory(showId);
       getStats().then(setStats).catch(() => {});
+      showControlToast('marked unwatched', 'info');
     } catch (e) {
-      console.error(e);
+      const message = e instanceof Error ? e.message : 'mark unwatched failed';
+      showControlToast(message, 'danger');
     }
   };
 
@@ -600,12 +639,18 @@ function App() {
           onMarkWatched={() => handleMarkWatched(selectedShow.id)}
           onMarkUnwatched={() => handleMarkUnwatched(selectedShow.id)}
           onRemove={() => {
-            removeShow(selectedShow.id);
-            setSelected(null);
-            setTimeout(refreshShows, 400);
+            void runLibraryAction(async () => {
+              await removeShow(selectedShow.id);
+              setSelected(null);
+              await refreshShows();
+            }, 'show removed');
           }}
           onRescan={() => {
-            void rescanShow(selectedShow.id).then(refreshShows);
+            void runLibraryAction(async () => {
+              const result = await rescanShow(selectedShow.id);
+              await refreshShows();
+              showControlToast(`added ${result.added} episode${result.added === 1 ? '' : 's'}`, 'info');
+            });
           }}
         />
       ) : (
@@ -624,20 +669,30 @@ function App() {
               </div>
               {repairableRoundProblems.length > 0 && (
                 <div className="round-repair-list">
-                  {repairableRoundProblems.map((problem) => (
-                    <div className="round-repair-item" key={problem.episode_id}>
-                      <div className="round-repair-copy">
-                        <div className="round-repair-title">{problem.show_name}</div>
-                        <div className="round-repair-path">{problem.source_path || problem.local_path}</div>
+                  {repairableRoundProblems.map((problem) => {
+                    const removed = repairedRoundEntries.has(problem.episode_id);
+                    return (
+                      <div className={`round-repair-item${removed ? ' removed' : ''}`} key={problem.episode_id}>
+                        <div className="round-repair-copy">
+                          <div className="round-repair-title">{problem.show_name}</div>
+                          <div className="round-repair-path">{problem.source_path || problem.local_path}</div>
+                          {removed && <div className="round-repair-state">removed, reload round</div>}
+                        </div>
+                        <button
+                          className="round-repair-btn"
+                          disabled={removed}
+                          onClick={() => handleRemoveRoundEntry(problem.episode_id)}
+                        >
+                          {removed ? 'removed' : 'remove from round'}
+                        </button>
                       </div>
-                      <button
-                        className="round-repair-btn"
-                        onClick={() => handleRemoveRoundEntry(problem.episode_id)}
-                      >
-                        remove from round
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
+                  {hasRepairedRoundEntries && (
+                    <button className="round-reload-btn" onClick={handleReloadRound}>
+                      reload round
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -692,17 +747,17 @@ function App() {
           </div>
           <div className="titlebar-title">{status.playlist ? `shows — ${status.playlist}` : 'shows'}</div>
           <div className="titlebar-actions">
-            <button className="titlebar-btn min-btn" onClick={minimizeWindow} title="Minimize">
+            <button className="titlebar-btn min-btn" onClick={() => void runControl(minimizeWindow)} title="Minimize">
               <svg viewBox="0 0 10 10"><path d="M0 5h10v1H0z" fill="currentColor" /></svg>
             </button>
-            <button className="titlebar-btn max-btn" onClick={maximizeWindow} title={status.window_maximized ? "Restore" : "Maximize"}>
+            <button className="titlebar-btn max-btn" onClick={() => void runControl(maximizeWindow)} title={status.window_maximized ? "Restore" : "Maximize"}>
               {status.window_maximized ? (
                 <svg viewBox="0 0 10 10"><path d="M2 0v2H0v8h8V8h2V0H2zM7 9H1V3h6v6zm2-2H8V2H3V1h6v6z" fill="currentColor" /></svg>
               ) : (
                 <svg viewBox="0 0 10 10"><path d="M0 0v10h10V0H0zm9 9H1V1h8v8z" fill="currentColor" /></svg>
               )}
             </button>
-            <button className="titlebar-btn close-btn" onClick={closeWindow} title="Close">
+            <button className="titlebar-btn close-btn" onClick={() => void runControl(closeWindow)} title="Close">
               <svg viewBox="0 0 10 10"><path d="M0 0l10 10M10 0L0 10" stroke="currentColor" strokeWidth="1.2" fill="none" /></svg>
             </button>
           </div>
@@ -715,7 +770,7 @@ function App() {
           pointerEvents: 'auto',
           zIndex: -1,
         }}
-        onDoubleClick={() => status.window_pip ? togglePip() : toggleFullscreen()}
+        onDoubleClick={() => void runControl(status.window_pip ? togglePip : toggleFullscreen)}
         onWheel={handleVolumeWheel}
       />
       <VolumeOsd volume={volOsd} />
@@ -739,6 +794,7 @@ function App() {
               setSelected={setSelected}
               refreshShows={refreshShows}
               removeShow={removeShow}
+              onToast={showControlToast}
               overviewHeader={overviewHeader}
               overviewContent={overviewContent}
             />
@@ -747,7 +803,7 @@ function App() {
       ) : (
         <div
           style={{ flex: 1 }}
-          onDoubleClick={() => status.window_pip ? togglePip() : toggleFullscreen()}
+          onDoubleClick={() => void runControl(status.window_pip ? togglePip : toggleFullscreen)}
           onWheel={handleVolumeWheel}
         />
       )}
@@ -757,9 +813,17 @@ function App() {
           pos={pos}
           controlsIdle={controlsIdle}
           onHoverChange={setControlsHovered}
+          onActivity={() => setControlsIdle(false)}
+          onIdle={() => {
+            setControlsHovered(false);
+            setControlsIdle(true);
+          }}
           displayPaused={displayPaused}
           onRequestPause={requestPause}
+          onPrevious={() => runControl(previous)}
           onSkip={() => runControl(skip)}
+          onTogglePip={() => runControl(togglePip)}
+          onCloseWindow={() => runControl(closeWindow)}
         />
       ) : (
         <BottomControlBar
@@ -781,9 +845,13 @@ function App() {
           onVolumeWheel={handleVolumeWheel}
           displayPaused={displayPaused}
           onRequestPause={requestPause}
+          onPrevious={() => runControl(previous)}
+          onSeekRelative={(seconds) => runControl(() => seekRelative(seconds))}
           onSkip={() => runControl(skip)}
           onDefer={() => runControl(defer)}
           onSyncNow={() => runControl(syncNow, {success: true})}
+          onTogglePip={() => runControl(togglePip)}
+          onToggleFullscreen={() => runControl(toggleFullscreen)}
         />
       )}
     </div>
@@ -980,9 +1048,13 @@ function BottomControlBar({
   onVolumeWheel,
   displayPaused,
   onRequestPause,
+  onPrevious,
+  onSeekRelative,
   onSkip,
   onDefer,
   onSyncNow,
+  onTogglePip,
+  onToggleFullscreen,
 }: {
   status: Status;
   pos: number;
@@ -998,9 +1070,13 @@ function BottomControlBar({
   onVolumeWheel: WheelEventHandler<HTMLDivElement>;
   displayPaused: boolean;
   onRequestPause: (paused: boolean) => void;
+  onPrevious: () => void;
+  onSeekRelative: (seconds: number) => void;
   onSkip: () => void;
   onDefer: () => void;
   onSyncNow: () => void;
+  onTogglePip: () => void;
+  onToggleFullscreen: () => void;
 }) {
   const pb = status.playback;
   const pct = pb
@@ -1027,10 +1103,10 @@ function BottomControlBar({
       if (isOff) {
         const firstTrack = pb.sub_tracks[0];
         if (firstTrack) {
-          setSub(firstTrack.id);
+          void setSub(firstTrack.id);
         }
       } else {
-        setSub('no');
+        void setSub('no');
       }
     }
   };
@@ -1058,7 +1134,7 @@ function BottomControlBar({
           onClick={(e) => {
             if (!pb) return;
             const r = e.currentTarget.getBoundingClientRect();
-            seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
+            void seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
           }}
         >
           <div className="scrub-fill" style={{ width: `${pct}%` }} />
@@ -1094,7 +1170,7 @@ function BottomControlBar({
         <div className="controls-group center-controls">
           <button
             className="control-btn"
-            onClick={() => previous()}
+            onClick={onPrevious}
             disabled={!playing}
             title="Previous Show (p)"
           >
@@ -1103,7 +1179,7 @@ function BottomControlBar({
           
           <button
             className="control-btn"
-            onClick={() => seekRelative(-10)}
+            onClick={() => onSeekRelative(-10)}
             disabled={!pb}
             title="Rewind 10s (j / ←)"
           >
@@ -1121,7 +1197,7 @@ function BottomControlBar({
 
           <button
             className="control-btn"
-            onClick={() => seekRelative(10)}
+            onClick={() => onSeekRelative(10)}
             disabled={!pb}
             title="Forward 10s (l / →)"
           >
@@ -1186,7 +1262,7 @@ function BottomControlBar({
               title="Subtitle Track"
               value={String(pb.sid ?? 'no')}
               onChange={(e) =>
-                setSub(e.currentTarget.value === 'no' ? 'no' : Number(e.currentTarget.value))
+                void setSub(e.currentTarget.value === 'no' ? 'no' : Number(e.currentTarget.value))
               }
             >
               <option value="no">subs: off</option>
@@ -1203,7 +1279,7 @@ function BottomControlBar({
               className="track-select"
               title="Audio Track"
               value={String(pb.aid ?? '')}
-              onChange={(e) => setAudio(Number(e.currentTarget.value))}
+              onChange={(e) => void setAudio(Number(e.currentTarget.value))}
             >
               {pb.audio_tracks.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -1241,7 +1317,7 @@ function BottomControlBar({
 
           <button
             className="control-btn pip-btn"
-            onClick={() => togglePip()}
+            onClick={onTogglePip}
             title="Picture in Picture (i)"
           >
             <PipIcon />
@@ -1249,7 +1325,7 @@ function BottomControlBar({
 
           <button
             className="control-btn fullscreen-btn"
-            onClick={() => toggleFullscreen()}
+            onClick={onToggleFullscreen}
             title="Fullscreen (f)"
           >
             <FullscreenIcon />
@@ -1417,7 +1493,15 @@ function ShowOverview({
 }
 
 // Add a show by pointing at a local folder; the desktop scans it for episodes.
-function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => void }) {
+function AddShowForm({
+  playlist,
+  onAdded,
+  onToast,
+}: {
+  playlist: string;
+  onAdded: () => void;
+  onToast?: (message: string, level?: 'info' | 'danger') => void;
+}) {
   const [mode, setMode] = useState<'manual' | 'detect' | 'detect-episodes'>('detect');
   
   // Manual state
@@ -1456,7 +1540,9 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
       setPreviewData(episodes);
       setMsg('');
     } catch (e: any) {
-      setMsg(String(e.message || e));
+      const message = String(e.message || e);
+      setMsg(message);
+      onToast?.(message, 'danger');
     } finally {
       setBusy(false);
     }
@@ -1468,7 +1554,9 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
     setMsg('saving…');
     addShow(name.trim(), cleanPath, (pl || 'nelson').trim())
       .then((r) => {
-        setMsg(`added ${r.episodes} episode${r.episodes === 1 ? '' : 's'}`);
+        const message = `added ${r.episodes} episode${r.episodes === 1 ? '' : 's'}`;
+        setMsg(message);
+        onToast?.(message, 'info');
         setName('');
         setPath('');
         setPreviewData(null);
@@ -1478,7 +1566,11 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
         setDetectedFolders(null);
         onAdded();
       })
-      .catch((e) => setMsg(String(e.message || e)))
+      .catch((e) => {
+        const message = String(e.message || e);
+        setMsg(message);
+        onToast?.(message, 'danger');
+      })
       .finally(() => setBusy(false));
   };
 
@@ -1491,7 +1583,9 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
       setLastRefreshed(new Date());
       setMsg('');
     } catch (e: any) {
-      setMsg(String(e.message || e));
+      const message = String(e.message || e);
+      setMsg(message);
+      onToast?.(message, 'danger');
     } finally {
       setDetecting(false);
     }
@@ -1508,7 +1602,9 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
       setSelectedEpisodeShow(null);
       setMsg('');
     } catch (e: any) {
-      setMsg(String(e.message || e));
+      const message = String(e.message || e);
+      setMsg(message);
+      onToast?.(message, 'danger');
     } finally {
       setDetectingEpisodes(false);
     }
@@ -1521,12 +1617,16 @@ function AddShowForm({ playlist, onAdded }: { playlist: string; onAdded: () => v
       const episodesToPass = Array.from(checkedEpisodes);
       const res = markWatched ? await rescanWatchedShow(showId, episodesToPass) : await rescanShow(showId, episodesToPass);
       setSelectedEpisodeShow(null);
-      setMsg(`added ${res.added} episode(s)${markWatched ? ' as watched' : ''}`);
+      const message = `added ${res.added} episode${res.added === 1 ? '' : 's'}${markWatched ? ' as watched' : ''}`;
+      setMsg(message);
+      onToast?.(message, 'info');
       handleDetectEpisodes();
       onAdded();
       setBusy(false);
     } catch(e: any) {
-      setMsg(String(e.message || e));
+      const message = String(e.message || e);
+      setMsg(message);
+      onToast?.(message, 'danger');
       setBusy(false);
     }
   };
@@ -1865,6 +1965,7 @@ function SettingsPanel({
   setSelected,
   refreshShows,
   removeShow,
+  onToast,
   overviewHeader,
   overviewContent,
 }: {
@@ -1874,7 +1975,8 @@ function SettingsPanel({
   selected: string | null;
   setSelected: (id: string | null) => void;
   refreshShows: () => void;
-  removeShow: (id: string) => void;
+  removeShow: (id: string) => void | Promise<void>;
+  onToast: (message: string, level?: 'info' | 'danger') => void;
   overviewHeader: React.ReactNode;
   overviewContent: React.ReactNode;
 }) {
@@ -1996,7 +2098,7 @@ function SettingsPanel({
           <div className="settings-tab" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
             <div className="section" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, marginBottom: 0 }}>
               <h3 style={{ flexShrink: 0 }}>add show</h3>
-              <AddShowForm playlist={status.playlist} onAdded={refreshShows} />
+              <AddShowForm playlist={status.playlist} onAdded={refreshShows} onToast={onToast} />
             </div>
           </div>
         )}
@@ -2077,39 +2179,57 @@ function PipControlOverlay({
   pos,
   controlsIdle,
   onHoverChange,
+  onActivity,
+  onIdle,
   displayPaused,
   onRequestPause,
+  onPrevious,
   onSkip,
+  onTogglePip,
+  onCloseWindow,
 }: {
   status: Status;
   pos: number;
   controlsIdle: boolean;
   onHoverChange: (hovered: boolean) => void;
+  onActivity: () => void;
+  onIdle: () => void;
   displayPaused: boolean;
   onRequestPause: (paused: boolean) => void;
+  onPrevious: () => void;
   onSkip: () => void;
+  onTogglePip: () => void;
+  onCloseWindow: () => void;
 }) {
   const roundLen = status.round?.length || 1;
   const progressPct = Math.min(100, Math.max(0, (pos / roundLen) * 100));
+  const handlePointerMove = (event: ReactMouseEvent<HTMLDivElement>) => {
+    onActivity();
+    const target = event.target as HTMLElement | null;
+    onHoverChange(Boolean(target?.closest('.pip-hover-zone')));
+  };
 
   return (
     <div 
       className={`pip-overlay${controlsIdle ? ' hidden' : ''}`}
-      onMouseEnter={() => onHoverChange(true)}
-      onMouseMove={() => onHoverChange(true)}
-      onMouseLeave={() => onHoverChange(false)}
+      onMouseMove={handlePointerMove}
+      onMouseLeave={onIdle}
     >
-      <div className="pip-top-right">
-        <button className="pip-btn" onClick={() => togglePip()} title="Back to tab">
+      <div
+        className="pip-top-right pip-hover-zone"
+      >
+        <button className="pip-btn" onClick={onTogglePip} title="Back to tab">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14zm-10-7h9v6h-9z" /></svg>
         </button>
-        <button className="pip-btn" onClick={closeWindow} title="Close">
+        <button className="pip-btn" onClick={onCloseWindow} title="Close">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
         </button>
       </div>
 
-      <div className="pip-center-controls">
-        <button className="pip-btn center-btn" onClick={previous} title="Previous">
+      <div
+        className="pip-center-controls pip-hover-zone"
+      >
+        <button className="pip-btn center-btn" onClick={onPrevious} title="Previous">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" /></svg>
         </button>
         <button className="pip-btn center-btn play-btn" onClick={() => onRequestPause(!displayPaused)}>
@@ -2124,7 +2244,9 @@ function PipControlOverlay({
         </button>
       </div>
 
-      <div className="pip-progress-bar">
+      <div
+        className="pip-progress-bar pip-hover-zone"
+      >
         <div className="pip-progress-fill" style={{ width: `${progressPct}%` }} />
       </div>
     </div>

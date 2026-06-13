@@ -407,9 +407,11 @@ impl Runner {
                 inner.loaded_any = false;
             }
             log::info!(
-                "round loaded/queued: {} episodes, starting at pos {}",
+                "round loaded/queued: playlists={} episodes={} start_pos={} start_episode={}",
+                self.playlists.join(","),
                 round.len(),
-                pos
+                pos,
+                round.get(pos).map(|e| e.episode_id.as_str()).unwrap_or("")
             );
             let file_sync = self.pull_and_prune_files(&round);
             if let Some(cb) = &self.cb.on_file_sync {
@@ -484,8 +486,20 @@ impl Runner {
     /// entry is a no-op at its natural end (engine I3). The playlist-pos observer
     /// moves `pos` + the overlay's now-playing as mpv steps back; a finished
     /// episode replays from the start because [`apply_advance`] clears resume.
-    pub fn previous(&self) {
+    pub fn previous(&self) -> ControlOutcome {
+        if self.current().is_none() {
+            return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
+        }
         self.player.previous();
+        ControlOutcome::applied("previous", "stepped back")
+    }
+
+    /// Deliberately reload the current round from `round_queue`. Manual repair
+    /// removes bad queue entries in the replica; this interrupts mpv so the run
+    /// loop clears the in-memory playlist and rebuilds from the repaired queue.
+    pub fn reload_round(&self) -> ControlOutcome {
+        self.player.playlist_clear();
+        ControlOutcome::applied("round_reload_requested", "reloading round")
     }
 
     /// Defer the current show's pick: bump it locally (D1-D3, not watched), push,
@@ -785,7 +799,12 @@ impl Runner {
             base_path.to_path_buf()
         };
 
-        log::info!("Starting file sync for new round to {:?}", canonical_base);
+        log::info!(
+            "file sync start: playlists={} round_entries={} local_base={:?}",
+            self.playlists.join(","),
+            round.len(),
+            canonical_base
+        );
         self.player
             .show_text("Syncing new round files to SSD...", 10000);
 
@@ -809,8 +828,11 @@ impl Runner {
                 if local_path.exists() {
                     report.cached += 1;
                     log::warn!(
-                        "Source file does not exist or NAS is offline, using cached copy: {:?}",
-                        nas_path
+                        "file sync cached because source is unavailable: show={} episode={} source={:?} local={:?}",
+                        entry.show_id,
+                        entry.episode_id,
+                        nas_path,
+                        local_path
                     );
                 } else {
                     report.missing += 1;
@@ -821,8 +843,11 @@ impl Runner {
                         "source file missing",
                     );
                     log::error!(
-                        "Source file does not exist and no cached copy is available: {:?}",
-                        nas_path
+                        "file sync missing: show={} episode={} source={:?} local={:?}",
+                        entry.show_id,
+                        entry.episode_id,
+                        nas_path,
+                        local_path
                     );
                 }
                 continue;
@@ -835,7 +860,9 @@ impl Runner {
                     if src_m.len() == dst_m.len() {
                         report.cached += 1;
                         log::info!(
-                            "File already exists and size matches, skipping copy: {:?}",
+                            "file sync cached: show={} episode={} local={:?}",
+                            entry.show_id,
+                            entry.episode_id,
                             local_path
                         );
                         continue;
@@ -843,7 +870,13 @@ impl Runner {
                 }
             }
 
-            log::info!("Copying from NAS: {:?} -> {:?}", nas_path, local_path);
+            log::info!(
+                "file sync copy: show={} episode={} source={:?} local={:?}",
+                entry.show_id,
+                entry.episode_id,
+                nas_path,
+                local_path
+            );
             if let Some(parent) = local_path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     report.failed += 1;
@@ -853,7 +886,13 @@ impl Runner {
                         &local_path,
                         format!("failed to create local folder: {e}"),
                     );
-                    log::error!("Failed to create directory {:?}: {}", parent, e);
+                    log::error!(
+                        "file sync mkdir failed: show={} episode={} parent={:?} error={}",
+                        entry.show_id,
+                        entry.episode_id,
+                        parent,
+                        e
+                    );
                     continue;
                 }
             }
@@ -869,7 +908,9 @@ impl Runner {
                     format!("copy failed: {e}"),
                 );
                 log::error!(
-                    "Failed to copy file from {:?} to {:?}: {}",
+                    "file sync copy failed: show={} episode={} source={:?} local={:?} error={}",
+                    entry.show_id,
+                    entry.episode_id,
                     nas_path,
                     local_path,
                     e
@@ -944,6 +985,7 @@ mod tests {
     struct FakePlayer {
         skips: AtomicUsize,
         prevs: AtomicUsize,
+        clears: AtomicUsize,
         time: Mutex<Option<f64>>,
         seeked: Mutex<Option<f64>>,
         playlist_pos: Mutex<Option<usize>>,
@@ -956,7 +998,9 @@ mod tests {
     }
     impl PlayerOps for FakePlayer {
         fn play(&self, _p: &str, _m: &str) {}
-        fn playlist_clear(&self) {}
+        fn playlist_clear(&self) {
+            self.clears.fetch_add(1, Ordering::SeqCst);
+        }
         fn show_text(&self, _t: &str, _d: i64) {}
         fn skip(&self) {
             self.skips.fetch_add(1, Ordering::SeqCst);
@@ -1168,7 +1212,9 @@ mod tests {
         set_round(&run);
         run.set_pos(0);
         let cur = run.current().unwrap();
-        run.previous();
+        let outcome = run.previous();
+        assert!(outcome.ok());
+        assert_eq!(outcome.status(), "previous");
         assert_eq!(p.prevs.load(Ordering::SeqCst), 1);
         // navigation only — stepping back marks nothing watched
         assert!(watched(&r, &cur.episode_id).is_none());
@@ -1275,7 +1321,27 @@ mod tests {
         let run = runner(r, p, &["nelson"], StopFlag::new(), Callbacks::default());
 
         assert_eq!(run.defer().status(), "no_current_episode");
+        assert_eq!(run.previous().status(), "no_current_episode");
         assert_eq!(run.play_show("s1").status(), "show_not_in_round");
+    }
+
+    #[test]
+    fn reload_round_interrupts_player_so_loop_can_rebuild_from_queue() {
+        let r = replica(&[show("s1", "nelson", &["a"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(
+            r,
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+
+        let outcome = run.reload_round();
+
+        assert!(outcome.ok());
+        assert_eq!(outcome.status(), "round_reload_requested");
+        assert_eq!(p.clears.load(Ordering::SeqCst), 1);
     }
 
     // ── per-episode advance (the "watch what's next" model) ───────────

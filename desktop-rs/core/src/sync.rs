@@ -10,7 +10,7 @@
 
 use crate::model::{LibraryEpisode, LibraryQueue, LibraryShow, RoundQueueEntry};
 use crate::replica::{Replica, SCHEMA};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -272,11 +272,20 @@ fn load_library_queues(
 ) -> Result<Vec<LibraryQueue>, rusqlite::Error> {
     let mut queues = Vec::new();
     for pl in playlists {
+        let meta_updated: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key=?1",
+                [format!("queue_updated:{pl}")],
+                |r| r.get(0),
+            )
+            .optional()?;
         let mut stmt = conn.prepare(
             "SELECT episode_id, show_id, play_order, state, updated_at FROM round_queue WHERE playlist = ? ORDER BY play_order"
         )?;
         let mut entries = Vec::new();
-        let mut max_updated_at = "1970-01-01T00:00:00Z".to_string();
+        let mut max_updated_at = meta_updated
+            .clone()
+            .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
 
         let rows = stmt.query_map([pl], |r| {
             let ep_id: String = r.get(0)?;
@@ -300,7 +309,7 @@ fn load_library_queues(
             });
         }
 
-        if !entries.is_empty() {
+        if !entries.is_empty() || meta_updated.is_some() {
             queues.push(LibraryQueue {
                 playlist: pl.clone(),
                 updated_at: max_updated_at,
@@ -402,6 +411,55 @@ mod tests {
         assert_eq!(pending.episodes, 1);
         assert_eq!(pending.queue, 1);
         assert_eq!(s.pending(), pending.total());
+    }
+
+    #[test]
+    fn push_empty_repaired_queue_deletes_shared_queue() {
+        let r = Arc::new(Replica::new(":memory:"));
+        let shared_path = temp_db_path();
+        let shared_db = Replica::new(&shared_path);
+        let entries = [(
+            "ep1".to_string(),
+            "show1".to_string(),
+            0,
+            "pending".to_string(),
+            "nelson".to_string(),
+        )];
+
+        r.save_round_queue(&entries, "2026-01-01T00:00:00Z", false);
+        shared_db.save_round_queue(&entries, "2026-01-01T00:00:00Z", false);
+        assert!(r.remove_round_entry("ep1").is_some());
+
+        let s = Syncer::new(r.clone(), Some(shared_path.clone()), vec!["nelson".into()]);
+        assert!(s.push());
+
+        let shared_db = Replica::new(&shared_path);
+        assert!(shared_db.get_round_queue().is_empty());
+        assert_eq!(s.pending_breakdown().queue, 0);
+    }
+
+    #[test]
+    fn seed_empty_repaired_queue_deletes_stale_local_queue() {
+        let r = Arc::new(Replica::new(":memory:"));
+        let shared_path = temp_db_path();
+        let shared_db = Replica::new(&shared_path);
+        let entries = [(
+            "ep1".to_string(),
+            "show1".to_string(),
+            0,
+            "pending".to_string(),
+            "nelson".to_string(),
+        )];
+
+        r.save_round_queue(&entries, "2026-01-01T00:00:00Z", false);
+        shared_db.save_round_queue(&entries, "2026-01-01T00:00:00Z", false);
+        assert!(shared_db.remove_round_entry("ep1").is_some());
+        shared_db.mark_queue_synced("nelson");
+
+        let s = Syncer::new(r.clone(), Some(shared_path), vec!["nelson".into()]);
+        assert!(s.seed());
+
+        assert!(r.get_round_queue().is_empty());
     }
 
     #[test]

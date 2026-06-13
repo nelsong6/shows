@@ -591,13 +591,22 @@ impl Replica {
         let tx = conn.transaction().expect("begin save_round_queue tx");
         tx.execute("DELETE FROM round_queue", []).expect("delete round_queue");
         let dirty_val = if dirty { 1 } else { 0 };
+        let mut playlists = HashSet::new();
         for entry in entries {
+            playlists.insert(entry.4.clone());
             tx.execute(
                 "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![entry.0, entry.1, entry.2, entry.3, entry.4, updated_at, dirty_val],
             )
             .expect("insert round_queue entry");
+        }
+        for playlist in playlists {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+                params![format!("queue_updated:{playlist}"), updated_at],
+            )
+            .expect("record queue timestamp");
         }
         tx.commit().expect("commit save_round_queue tx");
     }
@@ -639,6 +648,11 @@ impl Replica {
             params![now, playlist],
         )
         .expect("mark repaired queue dirty");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+            params![format!("queue_updated:{playlist}"), now],
+        )
+        .expect("record repaired queue timestamp");
         let remaining: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM round_queue WHERE playlist=?1",
@@ -1023,20 +1037,41 @@ impl Replica {
 
             // Write queue
             if let Some((ref playlist, ref updated_at, ref entries)) = queue_data {
-                let existing_updated: Option<String> = tx.query_row(
+                let row_updated: Option<String> = tx.query_row(
                     "SELECT MAX(updated_at) FROM round_queue WHERE playlist=?1",
                     params![playlist],
                     |r| r.get(0)
                 )
                 .optional()?
                 .flatten();
+                let meta_updated: Option<String> = tx
+                    .query_row(
+                        "SELECT value FROM meta WHERE key=?1",
+                        params![format!("queue_updated:{playlist}")],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let existing_updated = match (row_updated.as_deref(), meta_updated.as_deref()) {
+                    (None, None) => None,
+                    (Some(row), None) => Some(row.to_string()),
+                    (None, Some(meta)) => Some(meta.to_string()),
+                    (Some(row), Some(meta)) => Some(if newer(Some(row), Some(meta)) {
+                        row.to_string()
+                    } else {
+                        meta.to_string()
+                    }),
+                };
                 
                 let should_write = match existing_updated {
                     None => true,
-                    Some(ref cur_updated) => newer(Some(updated_at), Some(cur_updated))
+                    Some(ref cur_updated) => newer(Some(updated_at), Some(cur_updated.as_str()))
                 };
                 if should_write {
                     tx.execute("DELETE FROM round_queue WHERE playlist=?1", params![playlist])?;
+                    tx.execute(
+                        "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+                        params![format!("queue_updated:{playlist}"), updated_at],
+                    )?;
                     for entry in entries {
                         tx.execute(
                             "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \
@@ -1167,25 +1202,59 @@ fn merge_episode(conn: &Connection, show_id: &str, e: &LibraryEpisode) {
 }
 
 fn merge_queue_impl(conn: &Connection, q: &LibraryQueue) {
-    let local: Option<(String, i64)> = conn
+    let row_stats: (String, i64, i64) = conn
         .query_row(
-            "SELECT COALESCE(MAX(updated_at), ''), COALESCE(SUM(dirty), 0) FROM round_queue WHERE playlist=?1",
+            "SELECT COALESCE(MAX(updated_at), ''), COALESCE(SUM(dirty), 0), COUNT(*) FROM round_queue WHERE playlist=?1",
             params![q.playlist],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
+        )
+        .expect("lookup local queue row stats");
+    let meta_updated: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            params![format!("queue_updated:{}", q.playlist)],
+            |r| r.get(0),
         )
         .optional()
-        .expect("lookup local queue stats");
+        .expect("lookup local queue timestamp");
+    let dirty_empty: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            params![format!("dirty_queue:{}", q.playlist)],
+            |r| r.get(0),
+        )
+        .optional()
+        .expect("lookup local empty queue dirty marker");
+    let local_updated = match (row_stats.0.as_str(), meta_updated.as_deref()) {
+        ("", None) => None,
+        ("", Some(meta)) => Some(meta.to_string()),
+        (rows, None) => Some(rows.to_string()),
+        (rows, Some(meta)) => Some(if newer(Some(rows), Some(meta)) {
+            rows.to_string()
+        } else {
+            meta.to_string()
+        }),
+    };
+    let dirty_count = row_stats.1 + i64::from(dirty_empty.is_some());
         
-    let should_overwrite = match local {
+    let should_overwrite = match local_updated {
         None => true,
-        Some((cur_updated, dirty_count)) => {
-            dirty_count == 0 && newer(Some(&q.updated_at), Some(cur_updated.as_str()))
-        }
+        Some(cur_updated) => dirty_count == 0 && newer(Some(&q.updated_at), Some(cur_updated.as_str())),
     };
     
     if should_overwrite {
         conn.execute("DELETE FROM round_queue WHERE playlist=?1", params![q.playlist])
             .expect("delete old round_queue");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+            params![format!("queue_updated:{}", q.playlist), q.updated_at],
+        )
+        .expect("record merged queue timestamp");
+        conn.execute(
+            "DELETE FROM meta WHERE key=?1",
+            params![format!("dirty_queue:{}", q.playlist)],
+        )
+        .expect("clear merged dirty queue marker");
         for entry in &q.entries {
             conn.execute(
                 "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \

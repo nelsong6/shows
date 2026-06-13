@@ -97,6 +97,12 @@ export type FileSyncStatus = {
   problems: FileSyncProblem[];
 };
 
+export type PipUiDebug = {
+  controls_idle: boolean;
+  controls_hovered: boolean;
+  window_pip: boolean;
+};
+
 // Set by the launch update-check when this build is behind the latest release.
 export type UpdateInfo = {
   available: boolean;
@@ -124,6 +130,7 @@ export type Status = {
   window_maximized?: boolean;
   window_fullscreen?: boolean;
   window_pip?: boolean;
+  pip_ui?: PipUiDebug;
 };
 
 export type Show = {
@@ -226,8 +233,8 @@ export async function skip(): Promise<ControlResult> {
 
 // Step back to the previous show in the current round (navigation only — going
 // back never marks anything watched).
-export function previous(): void {
-  void fetch('/prev', {method: 'POST'});
+export async function previous(): Promise<ControlResult> {
+  return postControl('/prev');
 }
 
 export async function playShow(showId: string): Promise<ControlResult> {
@@ -236,12 +243,18 @@ export async function playShow(showId: string): Promise<ControlResult> {
 
 export async function markShowWatched(showId: string): Promise<void> {
   const r = await fetch('/library/mark-watched', {method: 'POST', body: JSON.stringify({show_id: showId})});
-  if (!r.ok) throw new Error(`Failed to mark watched: ${r.status}`);
+  if (!r.ok) {
+    const msg = await r.json().catch(() => ({}));
+    throw new Error(msg.message || `Failed to mark watched: ${r.status}`);
+  }
 }
 
 export async function markShowUnwatched(showId: string): Promise<void> {
   const r = await fetch('/library/mark-unwatched', {method: 'POST', body: JSON.stringify({show_id: showId})});
-  if (!r.ok) throw new Error(`Failed to mark unwatched: ${r.status}`);
+  if (!r.ok) {
+    const msg = await r.json().catch(() => ({}));
+    throw new Error(msg.message || `Failed to mark unwatched: ${r.status}`);
+  }
 }
 // Re-roll the current show's next-round pick without marking it watched
 // (server contract D1-D3). The runner jumps to the next entry too.
@@ -250,21 +263,21 @@ export async function defer(): Promise<ControlResult> {
 }
 
 // Toggle the Qt window between windowed and fullscreen.
-export function toggleFullscreen(): void {
-  void fetch('/fullscreen', {method: 'POST'});
+export async function toggleFullscreen(): Promise<ControlResult> {
+  return postControl('/fullscreen');
 }
 
 // Toggle the window between windowed and picture-in-picture mode.
-export function togglePip(): void {
-  void fetch('/pip', {method: 'POST'});
+export async function togglePip(): Promise<ControlResult> {
+  return postControl('/pip');
 }
 
-export function seekPercent(percent: number): void {
-  void fetch('/seek', {method: 'POST', body: JSON.stringify({percent})});
+export async function seekPercent(percent: number): Promise<ControlResult> {
+  return postControl('/seek', {percent});
 }
 
-export function seekRelative(seconds: number): void {
-  void fetch('/seek', {method: 'POST', body: JSON.stringify({seconds})});
+export async function seekRelative(seconds: number): Promise<ControlResult> {
+  return postControl('/seek', {seconds});
 }
 
 export async function setVolume(volume: number): Promise<void> {
@@ -272,12 +285,16 @@ export async function setVolume(volume: number): Promise<void> {
   if (!r.ok) throw new Error(`/volume ${r.status}`);
 }
 
-export function setSub(sid: number | string): void {
-  void fetch('/sub', {method: 'POST', body: JSON.stringify({sid})});
+export async function setSub(sid: number | string): Promise<ControlResult> {
+  return postControl('/sub', {sid});
 }
 
-export function setAudio(aid: number | string): void {
-  void fetch('/audio', {method: 'POST', body: JSON.stringify({aid})});
+export async function setAudio(aid: number | string): Promise<ControlResult> {
+  return postControl('/audio', {aid});
+}
+
+export async function recordPipUiDebug(payload: PipUiDebug): Promise<void> {
+  await postControl('/debug/pip-ui', payload);
 }
 
 // Manual "check connectivity" / reconcile — push queued changes + pull.
@@ -287,6 +304,10 @@ export async function syncNow(): Promise<ControlResult> {
 
 export async function removeRoundEntry(episodeId: string): Promise<ControlResult> {
   return postControl('/round/remove-entry', {episode_id: episodeId});
+}
+
+export async function reloadRound(): Promise<ControlResult> {
+  return postControl('/round/reload');
 }
 
 // ── library management (desktop scans the dir, the change syncs up) ──
@@ -370,21 +391,30 @@ export async function detectNewFolders(parentPath: string): Promise<string[]> {
   return data.unadded || [];
 }
 
-export function removeShow(show_id: string): void {
-  void fetch('/library/remove', {method: 'POST', body: JSON.stringify({show_id})});
+export async function removeShow(show_id: string): Promise<void> {
+  const r = await fetch('/library/remove', {method: 'POST', body: JSON.stringify({show_id})});
+  if (!r.ok) {
+    const msg = await r.json().catch(() => ({}));
+    throw new Error(msg.message || `remove failed (${r.status})`);
+  }
 }
 
-export function updateShow(
+export async function updateShow(
   show_id: string,
   fields: {name?: string; root_path?: string; playlist?: string},
-): void {
-  void fetch('/library/update', {method: 'POST', body: JSON.stringify({show_id, ...fields})});
+): Promise<void> {
+  const r = await fetch('/library/update', {method: 'POST', body: JSON.stringify({show_id, ...fields})});
+  if (!r.ok) {
+    const msg = await r.json().catch(() => ({}));
+    throw new Error(msg.message || `update failed (${r.status})`);
+  }
 }
 
 export async function rescanShow(show_id: string, episodes?: string[]): Promise<{added: number}> {
   const body: any = {show_id};
   if (episodes) body.episodes = episodes;
   const r = await fetch('/library/rescan', {method: 'POST', body: JSON.stringify(body)});
+  if (!r.ok) throw new Error(`rescan failed (${r.status})`);
   return r.json();
 }
 
@@ -392,6 +422,7 @@ export async function rescanWatchedShow(show_id: string, episodes?: string[]): P
   const body: any = {show_id};
   if (episodes) body.episodes = episodes;
   const r = await fetch('/library/rescan-watched', {method: 'POST', body: JSON.stringify(body)});
+  if (!r.ok) throw new Error(`rescan watched failed (${r.status})`);
   return r.json();
 }
 
@@ -446,16 +477,16 @@ export function subscribeStatus(onStatus: (s: Status) => void): () => void {
   };
 }
 
-export function minimizeWindow(): void {
-  void fetch('/window/minimize', {method: 'POST'});
+export async function minimizeWindow(): Promise<ControlResult> {
+  return postControl('/window/minimize');
 }
 
-export function maximizeWindow(): void {
-  void fetch('/window/maximize', {method: 'POST'});
+export async function maximizeWindow(): Promise<ControlResult> {
+  return postControl('/window/maximize');
 }
 
-export function closeWindow(): void {
-  void fetch('/window/close', {method: 'POST'});
+export async function closeWindow(): Promise<ControlResult> {
+  return postControl('/window/close');
 }
 
 

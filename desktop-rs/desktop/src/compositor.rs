@@ -28,7 +28,7 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -68,37 +68,6 @@ impl CursorMotion {
         self.last_pos = Some(next);
         moved
     }
-}
-
-fn pip_hit_test(client_x: i32, client_y: i32, width: i32, height: i32) -> u32 {
-    let resize_border = 6;
-    if client_x < resize_border && client_y < resize_border { return HTTOPLEFT; }
-    if client_x > width - resize_border && client_y < resize_border { return HTTOPRIGHT; }
-    if client_x < resize_border && client_y > height - resize_border { return HTBOTTOMLEFT; }
-    if client_x > width - resize_border && client_y > height - resize_border { return HTBOTTOMRIGHT; }
-    if client_x < resize_border { return HTLEFT; }
-    if client_x > width - resize_border { return HTRIGHT; }
-    if client_y < resize_border { return HTTOP; }
-    if client_y > height - resize_border { return HTBOTTOM; }
-
-    // Top-right buttons: back-to-tab and close.
-    if client_x > width - 96 && client_y < 48 {
-        return HTCLIENT;
-    }
-    // Bottom progress bar area.
-    if client_y > height - 12 {
-        return HTCLIENT;
-    }
-    // Center playback controls.
-    let center_y = height / 2;
-    let center_x = width / 2;
-    if client_x > center_x - 70 && client_x < center_x + 70 {
-        if client_y > center_y - 36 && client_y < center_y + 36 {
-            return HTCLIENT;
-        }
-    }
-
-    HTCAPTION
 }
 
 fn rect_width(rect: RECT) -> i32 {
@@ -165,6 +134,11 @@ fn clamp_pip_rect_to_work_area(rect: RECT, work: RECT) -> RECT {
     }
 }
 
+fn pip_window_style(saved_style: isize) -> isize {
+    let style = saved_style as u32;
+    ((style & !WS_MAXIMIZE.0 & !WS_POPUP.0) | WS_OVERLAPPEDWINDOW.0) as isize
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,27 +163,6 @@ mod tests {
         assert!(motion.observe(point(321, 180)));
         assert!(!motion.observe(point(321, 180)));
         assert!(motion.observe(point(321, 181)));
-    }
-
-    #[test]
-    fn pip_hit_test_keeps_blank_video_draggable() {
-        assert_eq!(pip_hit_test(20, 20, 400, 225), HTCAPTION);
-        assert_eq!(pip_hit_test(200, 30, 400, 225), HTCAPTION);
-    }
-
-    #[test]
-    fn pip_hit_test_keeps_controls_clickable() {
-        assert_eq!(pip_hit_test(380, 24, 400, 225), HTCLIENT);
-        assert_eq!(pip_hit_test(200, 112, 400, 225), HTCLIENT);
-        assert_eq!(pip_hit_test(200, 216, 400, 225), HTCLIENT);
-    }
-
-    #[test]
-    fn pip_hit_test_keeps_edges_resizable() {
-        assert_eq!(pip_hit_test(1, 1, 400, 225), HTTOPLEFT);
-        assert_eq!(pip_hit_test(399, 224, 400, 225), HTBOTTOMRIGHT);
-        assert_eq!(pip_hit_test(200, 1, 400, 225), HTTOP);
-        assert_eq!(pip_hit_test(1, 100, 400, 225), HTLEFT);
     }
 
     #[test]
@@ -246,6 +199,16 @@ mod tests {
         assert_eq!(rect_height(clamped), 225);
         assert_eq!(clamped.right, work.right);
         assert_eq!(clamped.bottom, work.bottom);
+    }
+
+    #[test]
+    fn pip_window_style_uses_normal_windows_chrome() {
+        let style = pip_window_style((WS_POPUP.0 | WS_MAXIMIZE.0 | WS_VISIBLE.0) as isize) as u32;
+
+        assert_eq!(style & WS_OVERLAPPEDWINDOW.0, WS_OVERLAPPEDWINDOW.0);
+        assert_eq!(style & WS_POPUP.0, 0);
+        assert_eq!(style & WS_MAXIMIZE.0, 0);
+        assert_ne!(style & WS_VISIBLE.0, 0);
     }
 }
 
@@ -602,28 +565,19 @@ fn render(s: &State) {
 extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
         match msg {
-            WM_NCLBUTTONDBLCLK => {
+            WM_NCCALCSIZE => {
                 let is_pip = STATE.with(|s| {
                     s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
                 });
                 if is_pip {
-                    let _ = PostMessageW(
-                        Some(hwnd),
-                        WM_TOGGLE_PIP,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
-                    return LRESULT(0);
+                    return DefWindowProcW(hwnd, msg, w, l);
                 }
-                DefWindowProcW(hwnd, msg, w, l)
-            }
-            WM_NCCALCSIZE => {
                 if w.0 != 0 {
-                    let (is_fs, is_pip) = STATE.with(|s| {
-                        s.borrow().as_ref().map(|st| (st.is_fullscreen, st.is_pip)).unwrap_or((false, false))
+                    let is_fs = STATE.with(|s| {
+                        s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
                     });
                     let is_max = IsZoomed(hwnd).as_bool();
-                    if is_max && !is_fs && !is_pip {
+                    if is_max && !is_fs {
                         let params = &mut *(l.0 as *mut NCCALCSIZE_PARAMS);
                         let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                         let mut mi = MONITORINFO {
@@ -641,6 +595,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 let (is_fs, is_pip) = STATE.with(|s| {
                     s.borrow().as_ref().map(|st| (st.is_fullscreen, st.is_pip)).unwrap_or((false, false))
                 });
+                if is_pip {
+                    return DefWindowProcW(hwnd, msg, w, l);
+                }
                 if is_fs {
                     return LRESULT(HTCLIENT as isize);
                 }
@@ -686,15 +643,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     }
                 }
                 
-                if is_pip {
-                    let client_x = x - rect.left;
-                    let client_y = y - rect.top;
-                    let width = rect.right - rect.left;
-                    let height = rect.bottom - rect.top;
-
-                    return LRESULT(pip_hit_test(client_x, client_y, width, height) as isize);
-                }
-
                 if is_max {
                     let client_y = y - rect.top;
                     if client_y >= 0 && client_y < 32 {
@@ -729,28 +677,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             | WM_MBUTTONDOWN | WM_MBUTTONUP => {
                 let lp = l.0 as u32;
                 let point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
-                if msg == WM_LBUTTONDOWN {
-                    let starts_pip_drag = STATE.with(|s| {
-                        if !s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false) {
-                            return false;
-                        }
-                        let mut rc = RECT::default();
-                        if GetClientRect(hwnd, &mut rc).is_err() {
-                            return false;
-                        }
-                        pip_hit_test(point.x, point.y, rc.right - rc.left, rc.bottom - rc.top) == HTCAPTION
-                    });
-                    if starts_pip_drag {
-                        let _ = ReleaseCapture();
-                        let _ = SendMessageW(
-                            hwnd,
-                            WM_NCLBUTTONDOWN,
-                            Some(WPARAM(HTCAPTION as usize)),
-                            Some(LPARAM(0)),
-                        );
-                        return LRESULT(0);
-                    }
-                }
                 if msg == WM_MOUSEMOVE {
                     // Keyboard/media input can synthesize a same-position
                     // WM_MOUSEMOVE. Only real pointer displacement may reveal
@@ -796,6 +722,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(0)
             }
             WM_NCMOUSEMOVE => {
+                let is_pip = STATE.with(|s| {
+                    s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
+                });
+                if is_pip {
+                    return DefWindowProcW(hwnd, msg, w, l);
+                }
+
                 let lp = l.0 as u32;
                 let mut point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
                 let _ = ScreenToClient(hwnd, &mut point);
@@ -823,6 +756,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 DefWindowProcW(hwnd, msg, w, l)
             }
             0x02A2 => { // WM_NCMOUSELEAVE
+                let is_pip = STATE.with(|s| {
+                    s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
+                });
+                if is_pip {
+                    return DefWindowProcW(hwnd, msg, w, l);
+                }
+
                 if !is_cursor_in_window(hwnd) {
                     STATE.with(|s| {
                         if let Some(st) = s.borrow().as_ref() {
@@ -842,9 +782,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 // applies the cursor it requested. Over the client area use the
                 // cached cursor (NULL = hidden — this is how the overlay's idle
                 // auto-hide reaches the OS); returning TRUE stops DefWindowProc
-                // from resetting it to the class arrow. Non-client area (resize
-                // borders, caption) falls through so system cursors still show.
-                if (l.0 as u32 & 0xFFFF) == HTCLIENT {
+                // from resetting it to the class arrow. Non-client areas fall
+                // through so Windows owns titlebar and resize cursors.
+                let hit = l.0 as u32 & 0xFFFF;
+                if hit == HTCLIENT {
                     let handled = STATE.with(|s| {
                         if let Some(st) = s.borrow().as_ref() {
                             SetCursor(if st.cursor.0.is_null() { None } else { Some(st.cursor) });
@@ -1019,6 +960,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                             mr.bottom - mr.top,
                             SWP_FRAMECHANGED | SWP_SHOWWINDOW,
                         );
+                        let _ = SetForegroundWindow(hwnd);
                     }
                     Some(Action::Exit { restore_style, restore_exstyle, restore_rect: r }) => {
                         SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
@@ -1036,6 +978,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                                 SWP_FRAMECHANGED | SWP_SHOWWINDOW,
                             );
                         }
+                        let _ = SetForegroundWindow(hwnd);
                     }
                     None => {}
                 }
@@ -1095,8 +1038,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         if let Some(cb) = &st.status_callback {
                             cb(serde_json::json!({ "window_pip": true }));
                         }
-                        let new_style =
-                            ((saved_style as u32 & !WS_OVERLAPPEDWINDOW.0 & !WS_MAXIMIZE.0) | WS_POPUP.0) as isize;
+                        let new_style = pip_window_style(saved_style);
                         
                         let mon: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                         let mut mi = MONITORINFO {
@@ -1140,6 +1082,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                             mr.bottom - mr.top,
                             SWP_FRAMECHANGED | SWP_SHOWWINDOW,
                         );
+                        let _ = SetForegroundWindow(hwnd);
                     }
                     Some(Action::Exit { restore_style, restore_exstyle, restore_rect: r }) => {
                         SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
@@ -1163,6 +1106,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                                 SWP_FRAMECHANGED | SWP_SHOWWINDOW,
                             );
                         }
+                        let _ = SetForegroundWindow(hwnd);
                     }
                     None => {}
                 }
@@ -1210,6 +1154,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 let is_max = IsZoomed(hwnd).as_bool();
                 let cmd = if is_max { SW_RESTORE } else { SW_MAXIMIZE };
                 let _ = ShowWindow(hwnd, cmd);
+                let _ = SetForegroundWindow(hwnd);
                 LRESULT(0)
             }
             m if m == WM_WINDOW_CLOSE => {

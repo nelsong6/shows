@@ -286,6 +286,11 @@
   border: 1px solid var(--border);
 }
 
+.round-repair-item.removed {
+  opacity: 0.62;
+  border-style: dashed;
+}
+
 .round-repair-copy {
   min-width: 0;
 }
@@ -306,6 +311,15 @@
   white-space: nowrap;
 }
 
+.round-repair-state {
+  color: var(--state-pending-fg);
+  font-size: 10.5px;
+  line-height: 15px;
+  margin-top: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 .round-repair-btn {
   border: 1px solid color-mix(in srgb, var(--state-danger-fg) 45%, var(--border));
   background: color-mix(in srgb, var(--state-danger-fg) 10%, transparent);
@@ -320,6 +334,25 @@
 
 .round-repair-btn:hover {
   background: color-mix(in srgb, var(--state-danger-fg) 18%, transparent);
+}
+
+.round-repair-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  background: transparent;
+}
+
+.round-reload-btn {
+  justify-self: end;
+  border: 1px solid color-mix(in srgb, var(--state-busy-fg) 50%, var(--border));
+  background: color-mix(in srgb, var(--state-busy-fg) 12%, transparent);
+  color: var(--state-busy-fg);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
 }
 
 table.runs {
@@ -1455,7 +1488,7 @@ button.gb.toggle-view-btn {
   pointer-events: auto;
   background: rgba(0, 0, 0, 0.4);
   opacity: 1;
-  transition: opacity 0.2s ease, background 0.2s ease;
+  transition: background 0.2s ease;
   z-index: 10;
   display: flex;
   align-items: center;
@@ -1463,13 +1496,8 @@ button.gb.toggle-view-btn {
 }
 
 .pip-overlay.hidden {
-  opacity: 0;
+  opacity: 1;
   background: transparent;
-}
-
-.pip-overlay.hidden .pip-btn,
-.pip-overlay.hidden .pip-progress-bar {
-  pointer-events: none;
 }
 
 .pip-btn {
@@ -1486,8 +1514,35 @@ button.gb.toggle-view-btn {
   padding: 0;
 }
 
+.pip-btn *,
+.pip-hover-zone,
+.pip-hover-zone * {
+  cursor: pointer;
+}
+
 .pip-btn:hover {
   opacity: 1;
+}
+
+.pip-top-right,
+.pip-center-controls,
+.pip-progress-bar {
+  transition: opacity 0.2s ease;
+}
+
+.pip-overlay.hidden .pip-top-right,
+.pip-overlay.hidden .pip-center-controls,
+.pip-overlay.hidden .pip-progress-bar {
+  opacity: 0;
+}
+
+.overlay-root.window-pip .pip-btn,
+.overlay-root.window-pip .pip-btn *,
+.overlay-root.window-pip .pip-progress-bar,
+.overlay-root.window-pip .pip-progress-bar *,
+.overlay-root.window-pip .pip-center-controls,
+.overlay-root.window-pip .pip-top-right {
+  cursor: pointer !important;
 }
 
 .pip-top-right {

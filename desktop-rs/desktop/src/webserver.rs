@@ -2,7 +2,8 @@
 //! bundle and a same-origin control surface: the overlay subscribes to
 //! `/status/stream`, can read a one-shot `/status` snapshot, reads `/shows`,
 //! `/stats`, `/history`, and POSTs `/pause` `/skip` `/prev` `/defer` `/seek`
-//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/library/*`.
+//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/pip` `/window/*`
+//! `/library/*`.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -100,6 +101,10 @@ impl StatusPatch {
         let mut fields = serde_json::Map::new();
         fields.insert("phase".into(), json!(phase.as_str()));
         fields.insert("message".into(), json!(message.into()));
+        if !matches!(phase, StatusPhase::Error) {
+            fields.insert("error_kind".into(), Value::Null);
+            fields.insert("round_blocked".into(), json!(false));
+        }
         StatusPatch { fields }
     }
 
@@ -160,7 +165,9 @@ impl StatusPatch {
 
     pub fn round_unplayable(message: impl Into<String>) -> StatusPatch {
         let mut patch = StatusPatch::phase(StatusPhase::Error, message);
-        patch.fields.insert("error_kind".into(), json!("round_unplayable"));
+        patch
+            .fields
+            .insert("error_kind".into(), json!("round_unplayable"));
         patch.fields.insert("round_blocked".into(), json!(true));
         patch.fields.insert("round_id".into(), Value::Null);
         patch
@@ -226,6 +233,7 @@ pub struct ControlServer {
     on_fullscreen: Mutex<Option<FullscreenCb>>,
     on_pip: Mutex<Option<PipCb>>,
     on_window_action: Mutex<Option<WindowActionCb>>,
+    pip_debug: bool,
 }
 
 impl ControlServer {
@@ -241,6 +249,8 @@ impl ControlServer {
         status.insert("round".into(), json!([]));
         status.insert("round_pos".into(), json!(0));
         status.insert("round_id".into(), json!(null));
+        status.insert("error_kind".into(), Value::Null);
+        status.insert("round_blocked".into(), json!(false));
         status.insert("window_maximized".into(), json!(false));
         status.insert("window_fullscreen".into(), json!(false));
         status.insert("window_pip".into(), json!(false));
@@ -257,6 +267,7 @@ impl ControlServer {
             on_fullscreen: Mutex::new(None),
             on_pip: Mutex::new(None),
             on_window_action: Mutex::new(None),
+            pip_debug: std::env::var_os("SHOWS_PIP_DEBUG").is_some(),
         })
     }
 
@@ -401,14 +412,21 @@ impl ControlServer {
                 if !did_explicit {
                     self.with_player(|p| p.toggle_pause());
                 }
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(
+                    request,
+                    "pause_updated",
+                    if did_explicit {
+                        "pause state updated"
+                    } else {
+                        "pause toggled"
+                    },
+                );
             }
             "/skip" => {
                 self.respond_runner_outcome(request, |r| r.skip());
             }
             "/prev" => {
-                self.with_runner(|r| r.previous());
-                respond(request, 204, vec![], "text/plain");
+                self.respond_runner_outcome(request, |r| r.previous());
             }
             "/play-show" => {
                 let b = read_body(&mut request);
@@ -438,19 +456,37 @@ impl ControlServer {
             }
             "/library/mark-watched" => {
                 let b = read_body(&mut request);
-                if let Some(id) = b.get("show_id").and_then(Value::as_str) {
-                    self.replica.mark_show_watched(id);
-                    self.push_sync();
-                }
-                respond(request, 204, vec![], "text/plain");
+                let Some(id) = b.get("show_id").and_then(Value::as_str) else {
+                    return respond_json(
+                        request,
+                        400,
+                        &json!({
+                            "ok": false,
+                            "status": "missing_show_id",
+                            "message": "show_id is required",
+                        }),
+                    );
+                };
+                self.replica.mark_show_watched(id);
+                self.push_sync();
+                respond_control_ok(request, "show_marked_watched", "show marked watched");
             }
             "/library/mark-unwatched" => {
                 let b = read_body(&mut request);
-                if let Some(id) = b.get("show_id").and_then(Value::as_str) {
-                    self.replica.mark_show_unwatched(id);
-                    self.push_sync();
-                }
-                respond(request, 204, vec![], "text/plain");
+                let Some(id) = b.get("show_id").and_then(Value::as_str) else {
+                    return respond_json(
+                        request,
+                        400,
+                        &json!({
+                            "ok": false,
+                            "status": "missing_show_id",
+                            "message": "show_id is required",
+                        }),
+                    );
+                };
+                self.replica.mark_show_unwatched(id);
+                self.push_sync();
+                respond_control_ok(request, "show_marked_unwatched", "show marked unwatched");
             }
             "/defer" => {
                 self.respond_runner_outcome(request, |r| r.defer());
@@ -486,39 +522,46 @@ impl ControlServer {
                     &json!({
                         "ok": true,
                         "status": "round_entry_removed",
-                        "message": format!("removed one {playlist} round entry; restart the app to reload the round"),
+                        "message": format!("removed one {playlist} round entry; reload the round to apply it"),
                     }),
                 );
+            }
+            "/round/reload" => {
+                self.push_status(StatusPatch::phase(
+                    StatusPhase::Fetching,
+                    "reloading repaired round",
+                ));
+                self.respond_runner_outcome(request, |r| r.reload_round());
             }
             "/fullscreen" => {
                 if let Some(cb) = self.on_fullscreen.lock().unwrap().as_ref() {
                     cb();
                 }
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(request, "fullscreen_toggled", "fullscreen toggled");
             }
             "/pip" => {
                 if let Some(cb) = self.on_pip.lock().unwrap().as_ref() {
                     cb();
                 }
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(request, "pip_toggled", "picture in picture toggled");
             }
             "/window/minimize" => {
                 if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
                     cb(WindowAction::Minimize);
                 }
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(request, "window_minimized", "window minimized");
             }
             "/window/maximize" => {
                 if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
                     cb(WindowAction::Maximize);
                 }
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(request, "window_maximized", "window maximize toggled");
             }
             "/window/close" => {
                 if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
                     cb(WindowAction::Close);
                 }
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(request, "window_close_requested", "closing window");
             }
             "/sync-now" => {
                 let syncer = self.syncer.lock().unwrap().clone();
@@ -554,7 +597,7 @@ impl ControlServer {
                         p.seek_relative(s);
                     }
                 });
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(request, "seek_updated", "seek updated");
             }
             "/volume" => {
                 let b = read_body(&mut request);
@@ -562,7 +605,7 @@ impl ControlServer {
                     self.with_player(|p| p.set_volume(v));
                     self.replica.set_volume(v);
                 }
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(request, "volume_updated", "volume updated");
             }
             "/sub" => {
                 let b = read_body(&mut request);
@@ -574,7 +617,7 @@ impl ControlServer {
                     "no".to_string()
                 };
                 self.with_player(|p| p.set_sub(&sid));
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(request, "subtitle_updated", "subtitle track updated");
             }
             "/audio" => {
                 let b = read_body(&mut request);
@@ -586,29 +629,67 @@ impl ControlServer {
                 if let Some(aid) = aid {
                     self.with_player(|p| p.set_audio(&aid));
                 }
-                respond(request, 204, vec![], "text/plain");
+                respond_control_ok(request, "audio_updated", "audio track updated");
+            }
+            "/debug/pip-ui" => {
+                let b = read_body(&mut request);
+                if self.pip_debug {
+                    log::info!("pip ui: {b}");
+                    self.push_raw(json!({"pip_ui": b}));
+                }
+                respond_control_ok(request, "pip_ui_debug_recorded", "pip ui debug recorded");
             }
             "/library/add" => self.library_add(request),
             "/library/remove" => {
                 let b = read_body(&mut request);
-                if let Some(id) = b.get("show_id").and_then(Value::as_str) {
-                    self.replica.remove_show(id);
+                let Some(id) = b.get("show_id").and_then(Value::as_str) else {
+                    return respond_json(
+                        request,
+                        400,
+                        &json!({
+                            "ok": false,
+                            "status": "missing_show_id",
+                            "message": "show_id is required",
+                        }),
+                    );
+                };
+                let removed = self.replica.remove_show(id);
+                if removed {
                     self.push_sync();
+                    respond_control_ok(request, "show_removed", "show removed");
+                } else {
+                    respond_json(
+                        request,
+                        404,
+                        &json!({
+                            "ok": false,
+                            "status": "show_not_found",
+                            "message": format!("show {id} was not found"),
+                        }),
+                    );
                 }
-                respond(request, 204, vec![], "text/plain");
             }
             "/library/update" => {
                 let b = read_body(&mut request);
-                if let Some(id) = b.get("show_id").and_then(Value::as_str) {
-                    self.replica.update_show(
-                        id,
-                        b.get("name").and_then(Value::as_str),
-                        b.get("root_path").and_then(Value::as_str),
-                        b.get("playlist").and_then(Value::as_str),
+                let Some(id) = b.get("show_id").and_then(Value::as_str) else {
+                    return respond_json(
+                        request,
+                        400,
+                        &json!({
+                            "ok": false,
+                            "status": "missing_show_id",
+                            "message": "show_id is required",
+                        }),
                     );
-                    self.push_sync();
-                }
-                respond(request, 204, vec![], "text/plain");
+                };
+                self.replica.update_show(
+                    id,
+                    b.get("name").and_then(Value::as_str),
+                    b.get("root_path").and_then(Value::as_str),
+                    b.get("playlist").and_then(Value::as_str),
+                );
+                self.push_sync();
+                respond_control_ok(request, "show_updated", "show updated");
             }
             "/library/pick-folder" => self.library_pick_folder(request),
             "/library/preview" => self.library_preview(request),
@@ -1361,6 +1442,18 @@ fn respond_control_outcome(request: Request, outcome: ControlOutcome) {
     respond_json(request, code, &control_outcome_json(&outcome));
 }
 
+fn respond_control_ok(request: Request, status: &str, message: &str) {
+    respond_json(
+        request,
+        200,
+        &json!({
+            "ok": true,
+            "status": status,
+            "message": message,
+        }),
+    );
+}
+
 fn header(name: &str, value: &str) -> Header {
     Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("static response header")
 }
@@ -1418,6 +1511,39 @@ mod tests {
     }
 
     #[test]
+    fn initial_status_snapshot_has_frontend_contract_fields() {
+        let server = ControlServer::new(
+            None,
+            Arc::new(Replica::new(":memory:")),
+            vec!["nelson".to_string()],
+        );
+        let value = server.status_json();
+
+        assert_eq!(value["phase"], "initializing");
+        assert_eq!(value["message"], "starting up");
+        assert_eq!(value["playlist"], "nelson");
+        assert!(value["round"].is_array());
+        assert_eq!(value["round_pos"], 0);
+        assert!(value["round_id"].is_null());
+        assert!(value["error_kind"].is_null());
+        assert_eq!(value["round_blocked"], false);
+        assert_eq!(value["window_maximized"], false);
+        assert_eq!(value["window_fullscreen"], false);
+        assert_eq!(value["window_pip"], false);
+        assert!(value["alerts"].is_array());
+    }
+
+    #[test]
+    fn non_error_phase_patch_clears_blocked_round_state() {
+        let patch = StatusPatch::phase(StatusPhase::Fetching, "loading round");
+        let value = Value::Object(patch.fields);
+
+        assert_eq!(value["phase"], "fetching");
+        assert!(value["error_kind"].is_null());
+        assert_eq!(value["round_blocked"], false);
+    }
+
+    #[test]
     fn status_alerts_include_sync_offline_guidance() {
         let mut status = serde_json::Map::new();
         status.insert(
@@ -1467,7 +1593,10 @@ mod tests {
     fn status_alerts_promote_unplayable_round_file_sync() {
         let mut status = serde_json::Map::new();
         status.insert("error_kind".into(), json!("round_unplayable"));
-        status.insert("message".into(), json!("no playable media - check that the show files are reachable"));
+        status.insert(
+            "message".into(),
+            json!("no playable media - check that the show files are reachable"),
+        );
         status.insert(
             "file_sync".into(),
             json!({
@@ -1485,7 +1614,12 @@ mod tests {
         let alerts = status_alerts(&status);
         assert_eq!(alerts[0]["level"], "danger");
         assert_eq!(alerts[0]["title"], "Round has no playable media");
-        assert!(alerts[0]["detail"].as_str().unwrap().contains("S:\\missing.mkv"));
+        assert!(
+            alerts[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("S:\\missing.mkv")
+        );
         assert_eq!(alerts.as_array().unwrap().len(), 1);
     }
 
@@ -1510,6 +1644,8 @@ mod tests {
         assert_eq!(value["round_pos"], 0);
         assert_eq!(value["round_id"], 3);
         assert_eq!(value["round"][0]["show_id"], "s1");
+        assert_eq!(value["round_blocked"], false);
+        assert!(value["error_kind"].is_null());
     }
 
     #[test]
