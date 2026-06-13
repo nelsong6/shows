@@ -617,6 +617,45 @@ impl Replica {
         .expect("mark other playlist entries dirty");
     }
 
+    pub fn remove_round_entry(&self, episode_id: &str) -> Option<(String, String)> {
+        let now = now();
+        let conn = self.db.lock().unwrap();
+        let found: Option<(String, String)> = conn
+            .query_row(
+                "SELECT show_id, playlist FROM round_queue WHERE episode_id=?1",
+                params![episode_id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()
+            .expect("lookup round entry");
+        let (show_id, playlist) = found?;
+        conn.execute(
+            "DELETE FROM round_queue WHERE episode_id=?1",
+            params![episode_id],
+        )
+        .expect("delete round entry");
+        conn.execute(
+            "UPDATE round_queue SET updated_at=?1, dirty=1 WHERE playlist=?2",
+            params![now, playlist],
+        )
+        .expect("mark repaired queue dirty");
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM round_queue WHERE playlist=?1",
+                params![playlist],
+                |r| r.get(0),
+            )
+            .expect("count repaired queue");
+        if remaining == 0 {
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+                params![format!("dirty_queue:{playlist}"), now],
+            )
+            .expect("mark empty queue dirty");
+        }
+        Some((show_id, playlist))
+    }
+
     pub fn dirty_queue(&self) -> Option<Value> {
         let conn = self.db.lock().unwrap();
         let dirty_pl: Option<(String, String)> = conn
@@ -627,7 +666,18 @@ impl Replica {
             )
             .optional()
             .expect("lookup dirty playlist");
-        let (playlist, updated_at) = dirty_pl?;
+        let (playlist, updated_at) = match dirty_pl {
+            Some(dirty_pl) => dirty_pl,
+            None => {
+                conn.query_row(
+                    "SELECT substr(key, 13), value FROM meta WHERE key LIKE 'dirty_queue:%' LIMIT 1",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()
+                .expect("lookup dirty empty queue")?
+            }
+        };
         
         let mut stmt = conn
             .prepare("SELECT episode_id, show_id, play_order, state FROM round_queue WHERE playlist=?1 ORDER BY play_order")
@@ -659,6 +709,11 @@ impl Replica {
             params![playlist],
         )
         .expect("mark queue synced");
+        conn.execute(
+            "DELETE FROM meta WHERE key=?1",
+            params![format!("dirty_queue:{playlist}")],
+        )
+        .expect("clear empty queue dirty marker");
     }
 
     // ── dashboard payloads (read-only, offline-capable) ──────────────────
@@ -890,6 +945,16 @@ impl Replica {
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         )
         .optional()?;
+        let dirty_pl = match dirty_pl {
+            Some(dirty_pl) => Some(dirty_pl),
+            None => local_conn
+                .query_row(
+                    "SELECT substr(key, 13), value FROM meta WHERE key LIKE 'dirty_queue:%' LIMIT 1",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()?,
+        };
 
         let queue_data = if let Some((playlist, updated_at)) = dirty_pl {
             let mut stmt = local_conn.prepare("SELECT episode_id, show_id, play_order, state FROM round_queue WHERE playlist=?1 ORDER BY play_order")?;
@@ -1523,5 +1588,39 @@ mod tests {
         assert_eq!(q3.len(), 1);
         assert_eq!(q3[0].3, "watched");
         assert_eq!(q3[0].6, 0); // dirty = 0
+    }
+
+    #[test]
+    fn remove_round_entry_preserves_rest_and_marks_queue_dirty() {
+        let r = Replica::new(":memory:");
+        let entries = vec![
+            ("ep1".to_string(), "s1".to_string(), 0, "pending".to_string(), "nelson".to_string()),
+            ("ep2".to_string(), "s2".to_string(), 1, "pending".to_string(), "nelson".to_string()),
+        ];
+        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", false);
+
+        assert_eq!(
+            r.remove_round_entry("ep1"),
+            Some(("s1".to_string(), "nelson".to_string()))
+        );
+
+        let q = r.get_round_queue();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].0, "ep2");
+        assert_eq!(q[0].6, 1);
+        let dirty = r.dirty_queue().unwrap();
+        assert_eq!(dirty["playlist"], "nelson");
+        assert_eq!(dirty["entries"].as_array().unwrap().len(), 1);
+
+        assert_eq!(
+            r.remove_round_entry("ep2"),
+            Some(("s2".to_string(), "nelson".to_string()))
+        );
+        assert!(r.get_round_queue().is_empty());
+        let empty_dirty = r.dirty_queue().unwrap();
+        assert_eq!(empty_dirty["playlist"], "nelson");
+        assert_eq!(empty_dirty["entries"].as_array().unwrap().len(), 0);
+        r.mark_queue_synced("nelson");
+        assert!(r.dirty_queue().is_none());
     }
 }

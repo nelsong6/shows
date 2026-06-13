@@ -72,6 +72,7 @@ pub struct StatusRemovedShow {
 
 #[derive(Debug, Clone)]
 pub struct StatusFileSyncProblem {
+    pub episode_id: String,
     pub show_name: String,
     pub source_path: String,
     pub local_path: String,
@@ -180,6 +181,7 @@ impl StatusPatch {
                     .into_iter()
                     .map(|p| {
                         json!({
+                            "episode_id": p.episode_id,
                             "show_name": p.show_name,
                             "source_path": p.source_path,
                             "local_path": p.local_path,
@@ -452,6 +454,41 @@ impl ControlServer {
             }
             "/defer" => {
                 self.respond_runner_outcome(request, |r| r.defer());
+            }
+            "/round/remove-entry" => {
+                let b = read_body(&mut request);
+                let Some(episode_id) = b.get("episode_id").and_then(Value::as_str) else {
+                    return respond_json(
+                        request,
+                        400,
+                        &json!({
+                            "ok": false,
+                            "status": "missing_episode_id",
+                            "message": "episode_id is required",
+                        }),
+                    );
+                };
+                let Some((_show_id, playlist)) = self.replica.remove_round_entry(episode_id) else {
+                    return respond_json(
+                        request,
+                        404,
+                        &json!({
+                            "ok": false,
+                            "status": "round_entry_not_found",
+                            "message": format!("episode {episode_id} is not in the current round"),
+                        }),
+                    );
+                };
+                self.push_sync();
+                respond_json(
+                    request,
+                    200,
+                    &json!({
+                        "ok": true,
+                        "status": "round_entry_removed",
+                        "message": format!("removed one {playlist} round entry; restart the app to reload the round"),
+                    }),
+                );
             }
             "/fullscreen" => {
                 if let Some(cb) = self.on_fullscreen.lock().unwrap().as_ref() {

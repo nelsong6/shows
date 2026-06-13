@@ -278,6 +278,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     .iter()
                     .map(|p| {
                         StatusFileSyncProblem {
+                            episode_id: p.episode_id.clone(),
                             show_name: p.show_name.clone(),
                             source_path: p.source_path.clone(),
                             local_path: p.local_path.clone(),

@@ -22,6 +22,7 @@ import {
   setSub,
   setAudio,
   syncNow,
+  removeRoundEntry,
   addShow,
   previewShow,
   detectNewFolders,
@@ -123,6 +124,7 @@ function App() {
   const [displayVolume, setDisplayVolume] = useState(100);
   const [displayPaused, setDisplayPaused] = useState(false);
   const [controlToast, setControlToast] = useState<{message: string; level: 'info' | 'danger'} | null>(null);
+  const [repairedRoundEntries, setRepairedRoundEntries] = useState<Set<string>>(() => new Set());
 
   useEffect(() => subscribeStatus(setStatus), []);
 
@@ -143,10 +145,12 @@ function App() {
         if (options?.success) {
           showControlToast(result.message, 'info');
         }
+        return true;
       } catch (e) {
         const message = e instanceof Error ? e.message : 'control failed';
         showControlToast(message, 'danger');
         console.error(e);
+        return false;
       }
     },
     [showControlToast],
@@ -475,6 +479,9 @@ function App() {
       : 'sync offline'
     : null;
   const alerts = status.alerts ?? [];
+  const repairableRoundProblems = status.round_blocked
+    ? (status.file_sync?.problems ?? []).filter((problem) => !repairedRoundEntries.has(problem.episode_id))
+    : [];
 
   // Library edits mutate the replica but don't change phase/advance, so re-fetch
   // the sidebar shows explicitly after add/remove/rescan.
@@ -490,6 +497,17 @@ function App() {
 
   const handlePlayShow = (showId: string) => {
     void runControl(() => playShow(showId));
+  };
+
+  const handleRemoveRoundEntry = (episodeId: string) => {
+    void runControl(() => removeRoundEntry(episodeId), {success: true}).then((ok) => {
+      if (!ok) return;
+      setRepairedRoundEntries((prev) => {
+        const next = new Set(prev);
+        next.add(episodeId);
+        return next;
+      });
+    });
   };
 
   const handleMarkWatched = async (showId: string) => {
@@ -604,6 +622,24 @@ function App() {
                   </div>
                 ))}
               </div>
+              {repairableRoundProblems.length > 0 && (
+                <div className="round-repair-list">
+                  {repairableRoundProblems.map((problem) => (
+                    <div className="round-repair-item" key={problem.episode_id}>
+                      <div className="round-repair-copy">
+                        <div className="round-repair-title">{problem.show_name}</div>
+                        <div className="round-repair-path">{problem.source_path || problem.local_path}</div>
+                      </div>
+                      <button
+                        className="round-repair-btn"
+                        onClick={() => handleRemoveRoundEntry(problem.episode_id)}
+                      >
+                        remove from round
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
           <Queue round={round} pos={pos} onSelectShow={setSelected} />

@@ -203,6 +203,7 @@ pub struct AdvanceResult {
 
 #[derive(Debug, Clone)]
 pub struct FileSyncProblem {
+    pub episode_id: String,
     pub show_name: String,
     pub source_path: String,
     pub local_path: String,
@@ -301,6 +302,7 @@ fn record_file_sync_problem(
         return;
     }
     report.problems.push(FileSyncProblem {
+        episode_id: entry.episode_id.clone(),
         show_name: entry.show_name.clone(),
         source_path: entry.nas_absolute_path.clone(),
         local_path: local_path.to_string_lossy().into_owned(),

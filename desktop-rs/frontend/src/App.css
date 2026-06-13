@@ -270,6 +270,58 @@
   white-space: pre-line;
 }
 
+.round-repair-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.round-repair-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border: 1px solid var(--border);
+}
+
+.round-repair-copy {
+  min-width: 0;
+}
+
+.round-repair-title {
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 17px;
+}
+
+.round-repair-path {
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  line-height: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.round-repair-btn {
+  border: 1px solid color-mix(in srgb, var(--state-danger-fg) 45%, var(--border));
+  background: color-mix(in srgb, var(--state-danger-fg) 10%, transparent);
+  color: var(--state-danger-fg);
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+
+.round-repair-btn:hover {
+  background: color-mix(in srgb, var(--state-danger-fg) 18%, transparent);
+}
+
 table.runs {
   width: 100%;
   border-collapse: collapse;

@@ -79,6 +79,24 @@ export type StatusAlert = {
   detail?: string;
 };
 
+export type FileSyncProblem = {
+  episode_id: string;
+  show_name: string;
+  source_path: string;
+  local_path: string;
+  reason: string;
+};
+
+export type FileSyncStatus = {
+  copied: number;
+  cached: number;
+  missing: number;
+  failed: number;
+  summary: string;
+  incomplete: boolean;
+  problems: FileSyncProblem[];
+};
+
 // Set by the launch update-check when this build is behind the latest release.
 export type UpdateInfo = {
   available: boolean;
@@ -98,6 +116,7 @@ export type Status = {
   last_advance?: AdvanceResult;
   playback?: Playback;
   sync?: SyncState;
+  file_sync?: FileSyncStatus;
   alerts?: StatusAlert[];
   error_kind?: 'round_unplayable' | string;
   round_blocked?: boolean;
@@ -264,6 +283,10 @@ export function setAudio(aid: number | string): void {
 // Manual "check connectivity" / reconcile — push queued changes + pull.
 export async function syncNow(): Promise<ControlResult> {
   return postControl('/sync-now');
+}
+
+export async function removeRoundEntry(episodeId: string): Promise<ControlResult> {
+  return postControl('/round/remove-entry', {episode_id: episodeId});
 }
 
 // ── library management (desktop scans the dir, the change syncs up) ──
