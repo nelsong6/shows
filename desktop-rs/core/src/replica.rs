@@ -1363,10 +1363,13 @@ mod tests {
     }
 
     #[test]
-    fn add_episodes_appends_positions() {
+    fn rescan_episodes_appends_positions() {
         let r = Replica::new(":memory:");
         let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()]);
-        assert_eq!(r.add_episodes(&sid, &["c.mkv".into()]), 1);
+        assert_eq!(
+            r.rescan_episodes(&sid, &["a.mkv".into(), "b.mkv".into(), "c.mkv".into()]).len(),
+            1
+        );
         let c = r.show(&sid).unwrap().episodes.into_iter().find(|e| e.relative_path == "c.mkv").unwrap();
         assert_eq!(c.position, 2); // continues after a(0), b(1)
     }
