@@ -759,6 +759,7 @@ function App() {
           onHoverChange={setControlsHovered}
           displayPaused={displayPaused}
           onRequestPause={requestPause}
+          onSkip={() => runControl(skip)}
         />
       ) : (
         <BottomControlBar
@@ -2078,6 +2079,7 @@ function PipControlOverlay({
   onHoverChange,
   displayPaused,
   onRequestPause,
+  onSkip,
 }: {
   status: Status;
   pos: number;
@@ -2085,6 +2087,7 @@ function PipControlOverlay({
   onHoverChange: (hovered: boolean) => void;
   displayPaused: boolean;
   onRequestPause: (paused: boolean) => void;
+  onSkip: () => void;
 }) {
   const roundLen = status.round?.length || 1;
   const progressPct = Math.min(100, Math.max(0, (pos / roundLen) * 100));
@@ -2116,7 +2119,7 @@ function PipControlOverlay({
              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
           )}
         </button>
-        <button className="pip-btn center-btn" onClick={skip} title="Next">
+        <button className="pip-btn center-btn" onClick={onSkip} title="Next">
           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" /></svg>
         </button>
       </div>
