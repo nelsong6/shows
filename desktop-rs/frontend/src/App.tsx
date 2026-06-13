@@ -446,6 +446,7 @@ function App() {
       ? `sync offline: cannot reach ${status.sync.shared_db_path}`
       : 'sync offline'
     : null;
+  const alerts = status.alerts ?? [];
 
   // Library edits mutate the replica but don't change phase/advance, so re-fetch
   // the sidebar shows explicitly after add/remove/rescan.
@@ -563,6 +564,20 @@ function App() {
         />
       ) : (
         <>
+          {alerts.length > 0 && (
+            <div className="section status-alerts">
+              <h3>attention</h3>
+              <div className="alert-list">
+                {alerts.map((alert, index) => (
+                  <div className={`status-alert ${alert.level}`} key={`${alert.title}-${index}`}>
+                    <div className="alert-title">{alert.title}</div>
+                    <div className="alert-message">{alert.message}</div>
+                    {alert.detail && <div className="alert-detail">{alert.detail}</div>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <Queue round={round} pos={pos} onSelectShow={setSelected} />
           {round.length === 0 && (
             <div className="section">

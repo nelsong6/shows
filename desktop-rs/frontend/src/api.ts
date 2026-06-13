@@ -29,6 +29,7 @@ export type AdvanceResult = {
 export type Phase =
   | 'initializing'
   | 'auth'
+  | 'syncing'
   | 'fetching'
   | 'playing'
   | 'drained'
@@ -61,8 +62,21 @@ export type Playback = {
 export type SyncState = {
   online: boolean;
   pending: number;
+  pending_breakdown?: {
+    shows: number;
+    episodes: number;
+    history: number;
+    queue: number;
+  };
   last_error?: string | null;
   shared_db_path?: string | null;
+};
+
+export type StatusAlert = {
+  level: 'danger' | 'warning' | 'info';
+  title: string;
+  message: string;
+  detail?: string;
 };
 
 // Set by the launch update-check when this build is behind the latest release.
@@ -84,6 +98,7 @@ export type Status = {
   last_advance?: AdvanceResult;
   playback?: Playback;
   sync?: SyncState;
+  alerts?: StatusAlert[];
   update?: UpdateInfo;
   window_maximized?: boolean;
   window_fullscreen?: boolean;

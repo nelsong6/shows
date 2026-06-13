@@ -224,6 +224,52 @@
   margin: 0 0 12px;
 }
 
+.status-alerts {
+  margin-bottom: 20px;
+}
+
+.alert-list {
+  display: grid;
+  gap: 8px;
+}
+
+.status-alert {
+  border-left: 3px solid var(--fg-dim);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+
+.status-alert.danger {
+  border-left-color: var(--state-danger-fg);
+}
+
+.status-alert.warning {
+  border-left-color: var(--state-pending-fg);
+}
+
+.alert-title {
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.alert-message {
+  color: var(--fg-secondary);
+  font-size: 12px;
+  line-height: 17px;
+  margin-top: 2px;
+}
+
+.alert-detail {
+  color: var(--fg-dim);
+  font-size: 11px;
+  line-height: 16px;
+  margin-top: 6px;
+  white-space: pre-line;
+}
+
 table.runs {
   width: 100%;
   border-collapse: collapse;

@@ -653,16 +653,24 @@ impl ControlServer {
             status.insert("playback".into(), p.playback_state());
         }
         if let Some(s) = self.syncer.lock().unwrap().as_ref() {
+            let pending = s.pending_breakdown();
             status.insert(
                 "sync".into(),
                 json!({
                     "online": s.online(),
-                    "pending": s.pending(),
+                    "pending": pending.total(),
+                    "pending_breakdown": {
+                        "shows": pending.shows,
+                        "episodes": pending.episodes,
+                        "history": pending.history,
+                        "queue": pending.queue,
+                    },
                     "last_error": s.last_error(),
                     "shared_db_path": s.shared_db_path(),
                 }),
             );
         }
+        status.insert("alerts".into(), status_alerts(&status));
         Value::Object(status)
     }
 
@@ -947,6 +955,85 @@ fn read_body(request: &mut Request) -> Value {
     }
 }
 
+fn status_alerts(status: &serde_json::Map<String, Value>) -> Value {
+    let mut alerts = Vec::new();
+
+    if let Some(sync) = status.get("sync").and_then(Value::as_object) {
+        let online = sync.get("online").and_then(Value::as_bool).unwrap_or(true);
+        if !online {
+            let shared = sync.get("shared_db_path").and_then(Value::as_str).unwrap_or("");
+            let message = sync
+                .get("last_error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    if shared.is_empty() {
+                        "Cannot reach the shared shows database.".to_string()
+                    } else {
+                        format!("Cannot reach the shared shows database at {shared}.")
+                    }
+                });
+            let detail = if shared.is_empty() {
+                "Map the NAS share, then use sync now or restart the app.".to_string()
+            } else {
+                format!("Map the NAS share so {shared} exists, then use sync now or restart the app.")
+            };
+            alerts.push(json!({
+                "level": "danger",
+                "title": "Sync offline",
+                "message": message,
+                "detail": detail,
+            }));
+        }
+    }
+
+    if let Some(file_sync) = status.get("file_sync").and_then(Value::as_object) {
+        if file_sync
+            .get("incomplete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            let summary = file_sync
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("some files were not ready");
+            let mut detail_parts = Vec::new();
+            if let Some(problems) = file_sync.get("problems").and_then(Value::as_array) {
+                for problem in problems.iter().take(3) {
+                    let show = problem
+                        .get("show_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown show");
+                    let reason = problem
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("file unavailable");
+                    let source = problem.get("source_path").and_then(Value::as_str).unwrap_or("");
+                    if source.is_empty() {
+                        detail_parts.push(format!("{show}: {reason}"));
+                    } else {
+                        detail_parts.push(format!("{show}: {reason} ({source})"));
+                    }
+                }
+            }
+            let detail = if detail_parts.is_empty() {
+                "Check the show paths in library or open the log for exact file paths.".to_string()
+            } else {
+                detail_parts.join("\n")
+            };
+            alerts.push(json!({
+                "level": "warning",
+                "title": "Round file sync incomplete",
+                "message": summary,
+                "detail": detail,
+            }));
+        }
+    }
+
+    Value::Array(alerts)
+}
+
 fn respond(request: Request, code: u16, body: Vec<u8>, ctype: &str) {
     let mut resp = Response::from_data(body).with_status_code(code);
     if let Ok(h) = Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()) {
@@ -1009,6 +1096,47 @@ mod tests {
         stream.read_exact(&mut buf).unwrap();
 
         assert_eq!(&buf, b"latest");
+    }
+
+    #[test]
+    fn status_alerts_include_sync_offline_guidance() {
+        let mut status = serde_json::Map::new();
+        status.insert(
+            "sync".into(),
+            json!({
+                "online": false,
+                "pending": 0,
+                "last_error": "Failed to open shared DB for seed: unable to open database file: S:\\shows.db",
+                "shared_db_path": "S:\\shows.db",
+            }),
+        );
+
+        let alerts = status_alerts(&status);
+        assert_eq!(alerts[0]["level"], "danger");
+        assert_eq!(alerts[0]["title"], "Sync offline");
+        assert!(alerts[0]["detail"].as_str().unwrap().contains("Map the NAS share"));
+    }
+
+    #[test]
+    fn status_alerts_include_file_sync_problem_examples() {
+        let mut status = serde_json::Map::new();
+        status.insert(
+            "file_sync".into(),
+            json!({
+                "incomplete": true,
+                "summary": "37 copied, 1 missing",
+                "problems": [{
+                    "show_name": "Example",
+                    "source_path": "S:\\missing.mkv",
+                    "local_path": "D:\\Downloads\\Watching\\Example\\missing.mkv",
+                    "reason": "source file missing"
+                }]
+            }),
+        );
+
+        let alerts = status_alerts(&status);
+        assert_eq!(alerts[0]["level"], "warning");
+        assert!(alerts[0]["detail"].as_str().unwrap().contains("Example"));
     }
 }
 

@@ -190,20 +190,29 @@ pub struct AdvanceResult {
     pub removed_shows: Vec<RemovedShow>,
 }
 
-#[derive(Debug, Default)]
-struct FileSyncReport {
-    copied: usize,
-    cached: usize,
-    missing: usize,
-    failed: usize,
+#[derive(Debug, Clone)]
+pub struct FileSyncProblem {
+    pub show_name: String,
+    pub source_path: String,
+    pub local_path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FileSyncReport {
+    pub copied: usize,
+    pub cached: usize,
+    pub missing: usize,
+    pub failed: usize,
+    pub problems: Vec<FileSyncProblem>,
 }
 
 impl FileSyncReport {
-    fn incomplete(&self) -> bool {
+    pub fn incomplete(&self) -> bool {
         self.missing > 0 || self.failed > 0
     }
 
-    fn summary(&self) -> String {
+    pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         if self.copied > 0 {
             parts.push(format!("{} copied", self.copied));
@@ -225,10 +234,29 @@ impl FileSyncReport {
     }
 }
 
+fn record_file_sync_problem(
+    report: &mut FileSyncReport,
+    entry: &RoundEntry,
+    local_path: &std::path::Path,
+    reason: impl Into<String>,
+) {
+    if report.problems.len() >= 5 {
+        return;
+    }
+    report.problems.push(FileSyncProblem {
+        show_name: entry.show_name.clone(),
+        source_path: entry.nas_absolute_path.clone(),
+        local_path: local_path.to_string_lossy().into_owned(),
+        reason: reason.into(),
+    });
+}
+
 pub type OnRound = Box<dyn Fn(&[RoundEntry], usize) + Send + Sync>;
 pub type OnAdvance = Box<dyn Fn(&AdvanceResult) + Send + Sync>;
 pub type OnDrained = Box<dyn Fn() + Send + Sync>;
 pub type OnError = Box<dyn Fn(&str) + Send + Sync>;
+pub type OnFileSync = Box<dyn Fn(&FileSyncReport) + Send + Sync>;
+pub type OnStatus = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 #[derive(Default)]
 pub struct Callbacks {
@@ -236,6 +264,8 @@ pub struct Callbacks {
     pub on_advance: Option<OnAdvance>,
     pub on_drained: Option<OnDrained>,
     pub on_error: Option<OnError>,
+    pub on_file_sync: Option<OnFileSync>,
+    pub on_status: Option<OnStatus>,
 }
 
 struct Inner {
@@ -283,8 +313,14 @@ impl Runner {
     }
 
     pub fn run(&self) {
+        if let Some(cb) = &self.cb.on_status {
+            cb("syncing", "syncing shared database");
+        }
         self.syncer.push(); // push any pending local changes or trigger auto-seed on startup
         self.syncer.seed(); // pull/reconcile once before the first local round
+        if let Some(cb) = &self.cb.on_status {
+            cb("fetching", "loading round");
+        }
         self.run_loop();
     }
 
@@ -312,7 +348,10 @@ impl Runner {
                 inner.loaded_any = false;
             }
             log::info!("round loaded/queued: {} episodes, starting at pos {}", round.len(), pos);
-            self.pull_and_prune_files(&round);
+            let file_sync = self.pull_and_prune_files(&round);
+            if let Some(cb) = &self.cb.on_file_sync {
+                cb(&file_sync);
+            }
             self.queue_round(&round);
             self.player.set_playlist_pos(pos);
             if let Some(cb) = &self.cb.on_round {
@@ -658,6 +697,7 @@ impl Runner {
                     );
                 } else {
                     report.missing += 1;
+                    record_file_sync_problem(&mut report, entry, &local_path, "source file missing");
                     log::error!(
                         "Source file does not exist and no cached copy is available: {:?}",
                         nas_path
@@ -681,6 +721,13 @@ impl Runner {
             log::info!("Copying from NAS: {:?} -> {:?}", nas_path, local_path);
             if let Some(parent) = local_path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
+                    report.failed += 1;
+                    record_file_sync_problem(
+                        &mut report,
+                        entry,
+                        &local_path,
+                        format!("failed to create local folder: {e}"),
+                    );
                     log::error!("Failed to create directory {:?}: {}", parent, e);
                     continue;
                 }
@@ -689,6 +736,7 @@ impl Runner {
             self.player.show_text(&format!("Copying {}...", entry.show_name), 5000);
             if let Err(e) = std::fs::copy(nas_path, &local_path) {
                 report.failed += 1;
+                record_file_sync_problem(&mut report, entry, &local_path, format!("copy failed: {e}"));
                 log::error!("Failed to copy file from {:?} to {:?}: {}", nas_path, local_path, e);
             } else {
                 report.copied += 1;
@@ -886,6 +934,31 @@ mod tests {
     }
 
     // ── interactive controls ─────────────────────────────────────────
+    #[test]
+    fn startup_reports_sync_then_round_loading() {
+        let r = replica(&[]);
+        let p = Arc::new(FakePlayer::default());
+        let stop = StopFlag::new();
+        let statuses: Arc<Mutex<Vec<(String, String)>>> = Default::default();
+        let (statuses2, stop2) = (statuses.clone(), stop.clone());
+        let cb = Callbacks {
+            on_status: Some(Box::new(move |phase, message| {
+                statuses2.lock().unwrap().push((phase.to_string(), message.to_string()));
+            })),
+            on_drained: Some(Box::new(move || {
+                stop2.set();
+            })),
+            ..Default::default()
+        };
+        let run = runner(r, p, &["nelson"], stop, cb);
+
+        run.run();
+
+        let statuses = statuses.lock().unwrap();
+        assert_eq!(statuses[0], ("syncing".into(), "syncing shared database".into()));
+        assert_eq!(statuses[1], ("fetching".into(), "loading round".into()));
+    }
+
     #[test]
     fn skip_advances_current_locally() {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);

@@ -14,6 +14,20 @@ use rusqlite::Connection;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug, Clone)]
+pub struct PendingBreakdown {
+    pub shows: i64,
+    pub episodes: i64,
+    pub history: i64,
+    pub queue: i64,
+}
+
+impl PendingBreakdown {
+    pub fn total(&self) -> i64 {
+        self.shows + self.episodes + self.history + self.queue
+    }
+}
+
 pub struct Syncer {
     replica: Arc<Replica>,
     shared_db_path: Option<String>,
@@ -174,8 +188,17 @@ impl Syncer {
 
     /// Unpushed local changes — the git "ahead" count.
     pub fn pending(&self) -> i64 {
+        self.pending_breakdown().total()
+    }
+
+    pub fn pending_breakdown(&self) -> PendingBreakdown {
         let p = self.replica.pending();
-        p.shows + p.episodes + p.history + i64::from(self.replica.dirty_queue().is_some())
+        PendingBreakdown {
+            shows: p.shows,
+            episodes: p.episodes,
+            history: p.history,
+            queue: i64::from(self.replica.dirty_queue().is_some()),
+        }
     }
 
     fn open_shared(&self) -> Result<Connection, rusqlite::Error> {
@@ -359,6 +382,26 @@ mod tests {
         let active = shared_db.active_shows(&["nelson".into()]);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].name, "S1");
+    }
+
+    #[test]
+    fn pending_breakdown_matches_total() {
+        let r = Arc::new(Replica::new(":memory:"));
+        let show_id = r.create_show("nelson", "S1", "D:\\A", &["a.mkv".into()]);
+        let episode_id = r.show(&show_id).unwrap().episodes[0].id.clone();
+        r.save_round_queue(
+            &[(episode_id, show_id, 0, "pending".into(), "nelson".into())],
+            "2026-01-01T00:00:00Z",
+            true,
+        );
+
+        let s = Syncer::new(r, Some(temp_db_path()), vec!["nelson".into()]);
+        let pending = s.pending_breakdown();
+
+        assert_eq!(pending.shows, 1);
+        assert_eq!(pending.episodes, 1);
+        assert_eq!(pending.queue, 1);
+        assert_eq!(s.pending(), pending.total());
     }
 
     #[test]

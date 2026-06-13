@@ -211,7 +211,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Runner pushes phase/round/advance into the control server's status.
     let stop = StopFlag::new();
     let cb = {
-        let (s_round, s_adv, s_drn, s_err) = (
+        let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status) = (
+            server.clone(),
+            server.clone(),
             server.clone(),
             server.clone(),
             server.clone(),
@@ -259,6 +261,34 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             })),
             on_error: Some(Box::new(move |e| {
                 s_err.push(serde_json::json!({"phase":"error","message":e}));
+            })),
+            on_file_sync: Some(Box::new(move |report| {
+                let problems: Vec<_> = report
+                    .problems
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "show_name": p.show_name,
+                            "source_path": p.source_path,
+                            "local_path": p.local_path,
+                            "reason": p.reason,
+                        })
+                    })
+                    .collect();
+                s_file_sync.push(serde_json::json!({
+                    "file_sync": {
+                        "copied": report.copied,
+                        "cached": report.cached,
+                        "missing": report.missing,
+                        "failed": report.failed,
+                        "summary": report.summary(),
+                        "incomplete": report.incomplete(),
+                        "problems": problems,
+                    }
+                }));
+            })),
+            on_status: Some(Box::new(move |phase, message| {
+                s_status.push(serde_json::json!({"phase": phase, "message": message}));
             })),
         }
     };
