@@ -250,6 +250,18 @@ impl Replica {
     pub fn set_resume(&self, episode_id: &str, pos: Option<f64>) {
         let now = now();
         let conn = self.db.lock().unwrap();
+        let current = conn
+            .query_row(
+                "SELECT resume_pos FROM episodes WHERE id=?1",
+                params![episode_id],
+                |r| r.get::<_, Option<f64>>(0),
+            )
+            .optional()
+            .expect("lookup resume_pos")
+            .flatten();
+        if resume_pos_matches(current, pos) {
+            return;
+        }
         conn.execute(
             "UPDATE episodes SET resume_pos=?1, updated_at=?2, dirty=1 WHERE id=?3",
             params![pos, now, episode_id],
@@ -991,6 +1003,14 @@ impl Replica {
     }
 }
 
+fn resume_pos_matches(a: Option<f64>, b: Option<f64>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => (a - b).abs() < 0.5,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 struct PerShow {
     name: String,
     playlist: String,
@@ -1282,6 +1302,18 @@ mod tests {
         seed(&r);
         r.set_resume("a", Some(123.5));
         assert_eq!(r.resume_pos("a"), Some(123.5));
+    }
+
+    #[test]
+    fn set_resume_unchanged_is_not_dirty() {
+        let r = Replica::new(":memory:");
+        seed(&r);
+        r.set_resume("a", Some(123.5));
+        r.mark_synced("episodes", &["a".into()]);
+
+        r.set_resume("a", Some(123.6));
+
+        assert_eq!(r.pending().episodes, 0);
     }
 
     #[test]
