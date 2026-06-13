@@ -1363,6 +1363,23 @@ mod tests {
     }
 
     #[test]
+    fn remove_show_preserves_queued_round_entry() {
+        let r = Replica::new(":memory:");
+        let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into()]);
+        let show = r.show(&sid).unwrap();
+        let eid = show.episodes[0].id.clone();
+        r.save_round_queue(
+            &[(eid, sid.clone(), 0, "pending".into(), "nelson".into())],
+            T0,
+            false,
+        );
+
+        assert!(r.remove_show(&sid));
+        assert!(r.get_round_queue().iter().any(|(_, show_id, ..)| show_id == &sid));
+        assert!(r.dirty_queue().is_none());
+    }
+
+    #[test]
     fn rescan_episodes_appends_positions() {
         let r = Replica::new(":memory:");
         let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()]);

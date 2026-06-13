@@ -167,6 +167,15 @@ pub fn get_local_path(show_name: &str, relative_path: &str) -> std::path::PathBu
     path
 }
 
+fn comparable_path_key(path: &std::path::Path) -> String {
+    let comparable = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut key = comparable.to_string_lossy().replace('/', "\\");
+    if cfg!(windows) {
+        key.make_ascii_lowercase();
+    }
+    key
+}
+
 #[derive(Debug, Clone)]
 pub struct RemovedShow {
     pub id: String,
@@ -179,6 +188,41 @@ pub struct RemovedShow {
 pub struct AdvanceResult {
     pub advanced_count: usize,
     pub removed_shows: Vec<RemovedShow>,
+}
+
+#[derive(Debug, Default)]
+struct FileSyncReport {
+    copied: usize,
+    cached: usize,
+    missing: usize,
+    failed: usize,
+}
+
+impl FileSyncReport {
+    fn incomplete(&self) -> bool {
+        self.missing > 0 || self.failed > 0
+    }
+
+    fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.copied > 0 {
+            parts.push(format!("{} copied", self.copied));
+        }
+        if self.cached > 0 {
+            parts.push(format!("{} cached", self.cached));
+        }
+        if self.missing > 0 {
+            parts.push(format!("{} missing", self.missing));
+        }
+        if self.failed > 0 {
+            parts.push(format!("{} failed", self.failed));
+        }
+        if parts.is_empty() {
+            "no files needed".to_string()
+        } else {
+            parts.join(", ")
+        }
+    }
 }
 
 pub type OnRound = Box<dyn Fn(&[RoundEntry], usize) + Send + Sync>;
@@ -569,9 +613,10 @@ impl Runner {
         AdvanceResult { advanced_count: advanced, removed_shows }
     }
 
-    fn pull_and_prune_files(&self, round: &[RoundEntry]) {
+    fn pull_and_prune_files(&self, round: &[RoundEntry]) -> FileSyncReport {
+        let mut report = FileSyncReport::default();
         if cfg!(test) {
-            return;
+            return report;
         }
 
         let base_dir = std::env::var("SHOWS_LOCAL_WATCHING_DIR")
@@ -600,18 +645,24 @@ impl Runner {
                 }
             }
 
-            // Canonicalize the local path if it already exists, so our active set comparison matches perfectly
-            let cmp_path = if local_path.exists() {
-                local_path.canonicalize().unwrap_or_else(|_| local_path.clone())
-            } else {
-                local_path.clone()
-            };
-            active_local_paths.insert(cmp_path);
+            active_local_paths.insert(comparable_path_key(&local_path));
 
             // Check if source file exists before trying to copy
             let nas_path = std::path::Path::new(&entry.nas_absolute_path);
             if !nas_path.exists() {
-                log::warn!("Source file does not exist or NAS is offline: {:?}", nas_path);
+                if local_path.exists() {
+                    report.cached += 1;
+                    log::warn!(
+                        "Source file does not exist or NAS is offline, using cached copy: {:?}",
+                        nas_path
+                    );
+                } else {
+                    report.missing += 1;
+                    log::error!(
+                        "Source file does not exist and no cached copy is available: {:?}",
+                        nas_path
+                    );
+                }
                 continue;
             }
 
@@ -620,6 +671,7 @@ impl Runner {
                 let dst_metadata = std::fs::metadata(&local_path);
                 if let (Ok(src_m), Ok(dst_m)) = (src_metadata, dst_metadata) {
                     if src_m.len() == dst_m.len() {
+                        report.cached += 1;
                         log::info!("File already exists and size matches, skipping copy: {:?}", local_path);
                         continue;
                     }
@@ -636,7 +688,10 @@ impl Runner {
 
             self.player.show_text(&format!("Copying {}...", entry.show_name), 5000);
             if let Err(e) = std::fs::copy(nas_path, &local_path) {
+                report.failed += 1;
                 log::error!("Failed to copy file from {:?} to {:?}: {}", nas_path, local_path, e);
+            } else {
+                report.copied += 1;
             }
         }
 
@@ -645,7 +700,16 @@ impl Runner {
             prune_unused_files(base_path, &active_local_paths);
         }
 
-        self.player.show_text("Round files sync complete!", 3000);
+        if report.incomplete() {
+            let message = format!("Round file sync incomplete: {}", report.summary());
+            log::warn!("{message}");
+            self.player.show_text(&message, 8000);
+        } else {
+            let message = format!("Round files sync complete: {}", report.summary());
+            log::info!("{message}");
+            self.player.show_text(&message, 3000);
+        }
+        report
     }
 
     fn queue_round(&self, round: &[RoundEntry]) {
@@ -655,7 +719,7 @@ impl Runner {
     }
 }
 
-fn prune_unused_files(dir: &std::path::Path, active_paths: &std::collections::HashSet<std::path::PathBuf>) {
+fn prune_unused_files(dir: &std::path::Path, active_paths: &std::collections::HashSet<String>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -671,10 +735,10 @@ fn prune_unused_files(dir: &std::path::Path, active_paths: &std::collections::Ha
                 }
             }
         } else if path.is_file() {
-            let cmp_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let cmp_path = comparable_path_key(&path);
             if !active_paths.contains(&cmp_path) {
-                log::info!("Pruning old show file: {:?}", cmp_path);
-                let _ = std::fs::remove_file(&cmp_path);
+                log::info!("Pruning old show file: {:?}", path);
+                let _ = std::fs::remove_file(&path);
             }
         }
     }
@@ -871,6 +935,15 @@ mod tests {
         
         let path = get_local_path(show_name, relative_path);
         assert!(path.ends_with(std::path::Path::new("Dr. Katz").join("S01").join("E01.mkv")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn comparable_path_key_normalizes_windows_case() {
+        let upper = comparable_path_key(std::path::Path::new(r"D:\Downloads\Watching\Show\E01.mkv"));
+        let lower = comparable_path_key(std::path::Path::new(r"d:\downloads\watching\show\e01.mkv"));
+
+        assert_eq!(upper, lower);
     }
 
     #[test]

@@ -61,6 +61,8 @@ export type Playback = {
 export type SyncState = {
   online: boolean;
   pending: number;
+  last_error?: string | null;
+  shared_db_path?: string | null;
 };
 
 // Set by the launch update-check when this build is behind the latest release.
@@ -348,6 +350,12 @@ export function subscribeStatus(onStatus: (s: Status) => void): () => void {
   let stopped = false;
   const events = new EventSource('/status/stream');
 
+  getStatus()
+    .then((status) => {
+      if (!stopped) onStatus(status);
+    })
+    .catch(() => {});
+
   events.addEventListener('status', (event) => {
     if (stopped) return;
     try {
@@ -356,6 +364,14 @@ export function subscribeStatus(onStatus: (s: Status) => void): () => void {
       // Ignore malformed frames; EventSource will keep the stream alive.
     }
   });
+
+  events.onerror = () => {
+    getStatus()
+      .then((status) => {
+        if (!stopped) onStatus(status);
+      })
+      .catch(() => {});
+  };
 
   return () => {
     stopped = true;

@@ -439,6 +439,13 @@ function App() {
   const activeEpisodePath = selectedShow
     ? (selectedRoundEntry ? selectedRoundEntry.absolute_path : null)
     : playingEpisodePath;
+  const syncStatusMessage = status.sync && !status.sync.online
+    ? status.sync.last_error
+      ? `sync offline: ${status.sync.last_error}`
+      : status.sync.shared_db_path
+      ? `sync offline: cannot reach ${status.sync.shared_db_path}`
+      : 'sync offline'
+    : null;
 
   // Library edits mutate the replica but don't change phase/advance, so re-fetch
   // the sidebar shows explicitly after add/remove/rescan.
@@ -560,7 +567,9 @@ function App() {
           {round.length === 0 && (
             <div className="section">
               <h3>status</h3>
-              <div style={{ color: 'var(--fg-secondary)' }}>{status.message || '—'}</div>
+              <div style={{ color: syncStatusMessage ? 'var(--state-danger-fg)' : 'var(--fg-secondary)' }}>
+                {syncStatusMessage || status.message || '—'}
+              </div>
               {status.phase === 'auth' && (
                 <p className="filter-hint">a browser tab should be open. approve, then come back.</p>
               )}

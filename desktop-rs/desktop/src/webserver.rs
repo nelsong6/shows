@@ -655,7 +655,12 @@ impl ControlServer {
         if let Some(s) = self.syncer.lock().unwrap().as_ref() {
             status.insert(
                 "sync".into(),
-                json!({"online": s.online(), "pending": s.pending()}),
+                json!({
+                    "online": s.online(),
+                    "pending": s.pending(),
+                    "last_error": s.last_error(),
+                    "shared_db_path": s.shared_db_path(),
+                }),
             );
         }
         Value::Object(status)

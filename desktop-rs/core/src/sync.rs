@@ -8,26 +8,32 @@
 //! recovers it. The runner never blocks on the network — playback runs entirely
 //! off the replica.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use rusqlite::Connection;
+use crate::model::{LibraryEpisode, LibraryQueue, LibraryShow, RoundQueueEntry};
 use crate::replica::{Replica, SCHEMA};
-use crate::model::{LibraryEpisode, LibraryShow, LibraryQueue, RoundQueueEntry};
+use rusqlite::Connection;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 pub struct Syncer {
     replica: Arc<Replica>,
     shared_db_path: Option<String>,
     playlists: Vec<String>,
     online: AtomicBool,
+    last_error: Mutex<Option<String>>,
 }
 
 impl Syncer {
-    pub fn new(replica: Arc<Replica>, shared_db_path: Option<String>, playlists: Vec<String>) -> Syncer {
+    pub fn new(
+        replica: Arc<Replica>,
+        shared_db_path: Option<String>,
+        playlists: Vec<String>,
+    ) -> Syncer {
         Syncer {
             replica,
             shared_db_path,
             playlists,
             online: AtomicBool::new(true), // optimistic; the first failed attempt flips it
+            last_error: Mutex::new(None),
         }
     }
 
@@ -35,11 +41,31 @@ impl Syncer {
         self.online.load(Ordering::Relaxed)
     }
 
+    pub fn shared_db_path(&self) -> Option<String> {
+        self.shared_db_path.clone()
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error.lock().unwrap().clone()
+    }
+
+    fn mark_online(&self) {
+        self.online.store(true, Ordering::Relaxed);
+        *self.last_error.lock().unwrap() = None;
+    }
+
+    fn mark_offline(&self, message: impl Into<String>) {
+        let message = message.into();
+        log::warn!("{message}");
+        self.online.store(false, Ordering::Relaxed);
+        *self.last_error.lock().unwrap() = Some(message);
+    }
+
     /// Pull the library and reconcile it into the replica (initial seed and later
     /// pulls). Returns the resulting online state.
     pub fn seed(&self) -> bool {
         if self.shared_db_path.is_none() {
-            self.online.store(false, Ordering::Relaxed);
+            self.mark_offline("No shared DB path configured");
             return false;
         }
         match self.open_shared() {
@@ -47,25 +73,22 @@ impl Syncer {
                 match load_library_shows(&conn, &self.playlists) {
                     Ok(shows) => self.replica.merge_shows(&shows),
                     Err(e) => {
-                        log::warn!("Failed to load shows from shared DB: {e}");
-                        self.online.store(false, Ordering::Relaxed);
+                        self.mark_offline(format!("Failed to load shows from shared DB: {e}"));
                         return false;
                     }
                 }
                 match load_library_queues(&conn, &self.playlists) {
                     Ok(queues) => self.replica.merge_queues(&queues),
                     Err(e) => {
-                        log::warn!("Failed to load queues from shared DB: {e}");
-                        self.online.store(false, Ordering::Relaxed);
+                        self.mark_offline(format!("Failed to load queues from shared DB: {e}"));
                         return false;
                     }
                 }
-                self.online.store(true, Ordering::Relaxed);
+                self.mark_online();
                 true
             }
             Err(e) => {
-                log::warn!("Failed to open shared DB for seed: {e}");
-                self.online.store(false, Ordering::Relaxed);
+                self.mark_offline(format!("Failed to open shared DB for seed: {e}"));
                 false
             }
         }
@@ -75,7 +98,7 @@ impl Syncer {
     /// nothing is pending. Returns the resulting online state.
     pub fn push(&self) -> bool {
         if self.shared_db_path.is_none() {
-            self.online.store(false, Ordering::Relaxed);
+            self.mark_offline("No shared DB path configured");
             return false;
         }
         let mut has_dirty = self.pending() > 0 || self.replica.dirty_queue().is_some();
@@ -84,9 +107,13 @@ impl Syncer {
         // mark all local records dirty to write them to the shared database.
         if !self.replica.active_shows(&self.playlists).is_empty() {
             if let Ok(conn) = self.open_shared() {
-                if let Ok(count) = conn.query_row("SELECT COUNT(*) FROM shows", [], |r| r.get::<_, i64>(0)) {
+                if let Ok(count) =
+                    conn.query_row("SELECT COUNT(*) FROM shows", [], |r| r.get::<_, i64>(0))
+                {
                     if count == 0 {
-                        log::info!("Shared DB is empty; auto-marking local database as dirty to seed it.");
+                        log::info!(
+                            "Shared DB is empty; auto-marking local database as dirty to seed it."
+                        );
                         if let Err(e) = self.replica.mark_all_dirty() {
                             log::warn!("Failed to mark all records dirty for seeding: {e}");
                         } else {
@@ -98,31 +125,39 @@ impl Syncer {
         }
 
         if !has_dirty {
-            return self.online();
+            return match self.open_shared() {
+                Ok(_) => {
+                    self.mark_online();
+                    true
+                }
+                Err(e) => {
+                    self.mark_offline(format!("Failed to open shared DB for push: {e}"));
+                    false
+                }
+            };
         }
         match self.open_shared() {
-            Ok(mut conn) => {
-                match self.replica.push_to_shared(&mut conn) {
-                    Ok((show_ids, episode_ids, history_ids, queue_playlist)) => {
-                        self.replica.mark_synced("shows", &show_ids);
-                        self.replica.mark_synced("episodes", &episode_ids);
-                        self.replica.mark_synced("watch_history", &history_ids);
-                        if let Some(ref pl) = queue_playlist {
-                            self.replica.mark_queue_synced(pl);
-                        }
-                        self.online.store(true, Ordering::Relaxed);
-                        true
+            Ok(mut conn) => match self.replica.push_to_shared(&mut conn) {
+                Ok((show_ids, episode_ids, history_ids, queue_playlist)) => {
+                    self.replica.mark_synced("shows", &show_ids);
+                    self.replica.mark_synced("episodes", &episode_ids);
+                    self.replica.mark_synced("watch_history", &history_ids);
+                    if let Some(ref pl) = queue_playlist {
+                        self.replica.mark_queue_synced(pl);
                     }
-                    Err(e) => {
-                        log::warn!("Push failed; {} change(s) stay queued: {e}", self.pending());
-                        self.online.store(false, Ordering::Relaxed);
-                        false
-                    }
+                    self.mark_online();
+                    true
                 }
-            }
+                Err(e) => {
+                    self.mark_offline(format!(
+                        "Push failed; {} change(s) stay queued: {e}",
+                        self.pending()
+                    ));
+                    false
+                }
+            },
             Err(e) => {
-                log::warn!("Failed to open shared DB for push: {e}");
-                self.online.store(false, Ordering::Relaxed);
+                self.mark_offline(format!("Failed to open shared DB for push: {e}"));
                 false
             }
         }
@@ -140,7 +175,7 @@ impl Syncer {
     /// Unpushed local changes — the git "ahead" count.
     pub fn pending(&self) -> i64 {
         let p = self.replica.pending();
-        p.shows + p.episodes + p.history
+        p.shows + p.episodes + p.history + i64::from(self.replica.dirty_queue().is_some())
     }
 
     fn open_shared(&self) -> Result<Connection, rusqlite::Error> {
@@ -154,7 +189,10 @@ impl Syncer {
     }
 }
 
-fn load_library_shows(conn: &Connection, playlists: &[String]) -> Result<Vec<LibraryShow>, rusqlite::Error> {
+fn load_library_shows(
+    conn: &Connection,
+    playlists: &[String],
+) -> Result<Vec<LibraryShow>, rusqlite::Error> {
     if playlists.is_empty() {
         return Ok(vec![]);
     }
@@ -164,43 +202,51 @@ fn load_library_shows(conn: &Connection, playlists: &[String]) -> Result<Vec<Lib
         marks
     );
     let mut stmt = conn.prepare(&sql)?;
-    
-    let params_vec: Vec<&dyn rusqlite::ToSql> = playlists.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
-    let mut shows = stmt.query_map(rusqlite::params_from_iter(params_vec), |r| {
-        Ok(LibraryShow {
-            id: r.get(0)?,
-            playlist: r.get(1)?,
-            name: r.get(2)?,
-            root_path: r.get(3)?,
-            date_added: r.get(4)?,
-            removed_at: r.get(5)?,
-            updated_at: r.get(6)?,
-            episodes: vec![],
-        })
-    })?
-    .collect::<Result<Vec<LibraryShow>, _>>()?;
+
+    let params_vec: Vec<&dyn rusqlite::ToSql> = playlists
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let mut shows = stmt
+        .query_map(rusqlite::params_from_iter(params_vec), |r| {
+            Ok(LibraryShow {
+                id: r.get(0)?,
+                playlist: r.get(1)?,
+                name: r.get(2)?,
+                root_path: r.get(3)?,
+                date_added: r.get(4)?,
+                removed_at: r.get(5)?,
+                updated_at: r.get(6)?,
+                episodes: vec![],
+            })
+        })?
+        .collect::<Result<Vec<LibraryShow>, _>>()?;
 
     for show in &mut shows {
         let mut ep_stmt = conn.prepare(
             "SELECT id, relative_path, position, watched_at, resume_pos, updated_at FROM episodes WHERE show_id = ? ORDER BY position"
         )?;
-        show.episodes = ep_stmt.query_map([&show.id], |r| {
-            Ok(LibraryEpisode {
-                id: r.get(0)?,
-                relative_path: r.get(1)?,
-                position: r.get(2)?,
-                watched_at: r.get(3)?,
-                resume_pos: r.get(4)?,
-                updated_at: r.get(5)?,
-            })
-        })?
-        .collect::<Result<Vec<LibraryEpisode>, _>>()?;
+        show.episodes = ep_stmt
+            .query_map([&show.id], |r| {
+                Ok(LibraryEpisode {
+                    id: r.get(0)?,
+                    relative_path: r.get(1)?,
+                    position: r.get(2)?,
+                    watched_at: r.get(3)?,
+                    resume_pos: r.get(4)?,
+                    updated_at: r.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<LibraryEpisode>, _>>()?;
     }
 
     Ok(shows)
 }
 
-fn load_library_queues(conn: &Connection, playlists: &[String]) -> Result<Vec<LibraryQueue>, rusqlite::Error> {
+fn load_library_queues(
+    conn: &Connection,
+    playlists: &[String],
+) -> Result<Vec<LibraryQueue>, rusqlite::Error> {
     let mut queues = Vec::new();
     for pl in playlists {
         let mut stmt = conn.prepare(
@@ -245,42 +291,70 @@ fn load_library_queues(conn: &Connection, playlists: &[String]) -> Result<Vec<Li
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use crate::replica::Replica;
+    use tempfile::NamedTempFile;
 
     fn temp_db_path() -> String {
-        NamedTempFile::new().unwrap().path().to_string_lossy().to_string()
+        NamedTempFile::new()
+            .unwrap()
+            .path()
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn missing_parent_db_path() -> String {
+        let dir = tempfile::tempdir().unwrap();
+        dir.path()
+            .join("missing-parent")
+            .join("shows.db")
+            .to_string_lossy()
+            .to_string()
     }
 
     #[test]
     fn seed_pulls_into_replica() {
         let r = Arc::new(Replica::new(":memory:"));
         let shared_path = temp_db_path();
-        
+
         let shared_db = Replica::new(&shared_path);
         shared_db.create_show("nelson", "S1", "D:\\A", &["a.mkv".into(), "b.mkv".into()]);
-        
+
         let s = Syncer::new(r.clone(), Some(shared_path), vec!["nelson".into()]);
         assert!(s.seed());
         assert!(s.online());
-        
+
         let active = r.active_shows(&["nelson".into()]);
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].name, "S1");
     }
 
     #[test]
+    fn seed_failure_records_last_error_and_source_path() {
+        let r = Arc::new(Replica::new(":memory:"));
+        let shared_path = missing_parent_db_path();
+        let s = Syncer::new(r, Some(shared_path.clone()), vec!["nelson".into()]);
+
+        assert!(!s.seed());
+        assert!(!s.online());
+        assert_eq!(s.shared_db_path(), Some(shared_path));
+        assert!(
+            s.last_error()
+                .is_some_and(|e| e.contains("Failed to open shared DB for seed"))
+        );
+    }
+
+    #[test]
     fn push_sends_dirty_and_clears() {
         let r = Arc::new(Replica::new(":memory:"));
         let shared_path = temp_db_path();
-        
+
         r.create_show("nelson", "S1", "D:\\A", &["a.mkv".into()]);
         assert_eq!(r.pending().shows, 1);
-        
+
         let s = Syncer::new(r.clone(), Some(shared_path.clone()), vec!["nelson".into()]);
         assert!(s.push());
         assert_eq!(s.pending(), 0);
-        
+
         let shared_db = Replica::new(&shared_path);
         let active = shared_db.active_shows(&["nelson".into()]);
         assert_eq!(active.len(), 1);
@@ -288,23 +362,49 @@ mod tests {
     }
 
     #[test]
+    fn push_without_dirty_still_refreshes_connectivity() {
+        let r = Arc::new(Replica::new(":memory:"));
+        let dir = tempfile::tempdir().unwrap();
+        let shared_path = dir.path().join("missing-parent").join("shows.db");
+        let s = Syncer::new(
+            r,
+            Some(shared_path.to_string_lossy().to_string()),
+            vec!["nelson".into()],
+        );
+
+        assert!(!s.push());
+        assert!(s.last_error().is_some());
+
+        std::fs::create_dir_all(shared_path.parent().unwrap()).unwrap();
+        assert!(s.push());
+        assert!(s.online());
+        assert!(s.last_error().is_none());
+    }
+
+    #[test]
     fn auto_seed_empty_shared_db() {
         let r = Arc::new(Replica::new(":memory:"));
         let shared_path = temp_db_path();
-        
+
         r.create_show("nelson", "S1", "D:\\A", &["a.mkv".into()]);
         let show_id = r.active_shows(&["nelson".into()])[0].id.clone();
         r.mark_synced("shows", &[show_id.clone()]);
-        let ep_ids: Vec<String> = r.show(&show_id).unwrap().episodes.iter().map(|e| e.id.clone()).collect();
+        let ep_ids: Vec<String> = r
+            .show(&show_id)
+            .unwrap()
+            .episodes
+            .iter()
+            .map(|e| e.id.clone())
+            .collect();
         r.mark_synced("episodes", &ep_ids);
-        
+
         assert_eq!(r.pending().shows, 0);
         assert_eq!(r.pending().episodes, 0);
-        
+
         let s = Syncer::new(r.clone(), Some(shared_path.clone()), vec!["nelson".into()]);
         assert!(s.push());
         assert_eq!(s.pending(), 0);
-        
+
         let shared_db = Replica::new(&shared_path);
         let active = shared_db.active_shows(&["nelson".into()]);
         assert_eq!(active.len(), 1);
