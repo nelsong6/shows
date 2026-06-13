@@ -35,7 +35,10 @@ pub struct StopFlag {
 
 impl StopFlag {
     pub fn new() -> Arc<StopFlag> {
-        Arc::new(StopFlag { state: Mutex::new(false), cv: Condvar::new() })
+        Arc::new(StopFlag {
+            state: Mutex::new(false),
+            cv: Condvar::new(),
+        })
     }
     pub fn is_set(&self) -> bool {
         *self.state.lock().unwrap()
@@ -207,6 +210,52 @@ pub struct FileSyncReport {
     pub problems: Vec<FileSyncProblem>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlOutcome {
+    Applied {
+        status: &'static str,
+        message: String,
+    },
+    Noop {
+        status: &'static str,
+        message: String,
+    },
+}
+
+impl ControlOutcome {
+    fn applied(status: &'static str, message: impl Into<String>) -> ControlOutcome {
+        ControlOutcome::Applied {
+            status,
+            message: message.into(),
+        }
+    }
+
+    fn noop(status: &'static str, message: impl Into<String>) -> ControlOutcome {
+        ControlOutcome::Noop {
+            status,
+            message: message.into(),
+        }
+    }
+
+    pub fn ok(&self) -> bool {
+        matches!(self, ControlOutcome::Applied { .. })
+    }
+
+    pub fn status(&self) -> &'static str {
+        match self {
+            ControlOutcome::Applied { status, .. } | ControlOutcome::Noop { status, .. } => status,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            ControlOutcome::Applied { message, .. } | ControlOutcome::Noop { message, .. } => {
+                message
+            }
+        }
+    }
+}
+
 impl FileSyncReport {
     pub fn incomplete(&self) -> bool {
         self.missing > 0 || self.failed > 0
@@ -347,7 +396,11 @@ impl Runner {
                 inner.playing = None;
                 inner.loaded_any = false;
             }
-            log::info!("round loaded/queued: {} episodes, starting at pos {}", round.len(), pos);
+            log::info!(
+                "round loaded/queued: {} episodes, starting at pos {}",
+                round.len(),
+                pos
+            );
             let file_sync = self.pull_and_prune_files(&round);
             if let Some(cb) = &self.cb.on_file_sync {
                 cb(&file_sync);
@@ -403,12 +456,16 @@ impl Runner {
     }
 
     /// Skip the current episode: jump forward now and mark it watched (I7).
-    pub fn skip(&self) {
+    pub fn skip(&self) -> ControlOutcome {
         let cur = self.current();
         self.player.skip();
         if let Some(cur) = cur {
+            let show_name = cur.show_name.clone();
             self.apply_advance(&[cur]);
             self.syncer.push();
+            ControlOutcome::applied("skipped", format!("skipped {show_name}"))
+        } else {
+            ControlOutcome::noop("no_current_episode", "nothing is currently selected")
         }
     }
 
@@ -423,29 +480,41 @@ impl Runner {
 
     /// Defer the current show's pick: bump it locally (D1-D3, not watched), push,
     /// and jump forward.
-    pub fn defer(&self) {
+    pub fn defer(&self) -> ControlOutcome {
         let Some(cur) = self.current() else {
-            return;
+            return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
         };
         if !self.replica.defer(&cur.show_id, &cur.episode_id) {
             log::warn!("defer no-op for {:?}", cur.show_name);
-            return;
+            return ControlOutcome::noop(
+                "not_deferred",
+                format!("{} could not be deferred", cur.show_name),
+            );
         }
-        self.inner.lock().unwrap().deferred.insert(cur.episode_id.clone());
-        self.replica.update_round_entry_state(&cur.episode_id, "deferred", &cur.playlist);
+        let show_name = cur.show_name.clone();
+        self.inner
+            .lock()
+            .unwrap()
+            .deferred
+            .insert(cur.episode_id.clone());
+        self.replica
+            .update_round_entry_state(&cur.episode_id, "deferred", &cur.playlist);
         self.syncer.push();
         self.player.skip();
+        ControlOutcome::applied("deferred", format!("deferred {show_name}"))
     }
 
     /// Play a specific show immediately by navigating to it in the current round playlist.
-    pub fn play_show(&self, show_id: &str) {
+    pub fn play_show(&self, show_id: &str) -> ControlOutcome {
         let raw = self.replica.get_round_queue();
         let filtered_raw: Vec<_> = raw
             .iter()
             .filter(|(_, _, _, _, playlist, _, _)| self.playlists.contains(playlist))
             .collect();
 
-        let existing_pos = filtered_raw.iter().position(|(_, s_id, _, _, _, _, _)| s_id == show_id);
+        let existing_pos = filtered_raw
+            .iter()
+            .position(|(_, s_id, _, _, _, _, _)| s_id == show_id);
 
         if let Some(idx) = existing_pos {
             // Reset previous playing episode to pending if it was playing in the DB
@@ -453,7 +522,8 @@ impl Runner {
             if old_pos < filtered_raw.len() && old_pos != idx {
                 let (old_ep_id, _, _, old_state, old_playlist, _, _) = filtered_raw[old_pos];
                 if old_state == "playing" {
-                    self.replica.update_round_entry_state(old_ep_id, "pending", old_playlist);
+                    self.replica
+                        .update_round_entry_state(old_ep_id, "pending", old_playlist);
                 }
             }
 
@@ -464,8 +534,16 @@ impl Runner {
             }
             self.player.set_playlist_pos(idx);
             self.syncer.push();
+            ControlOutcome::applied("playing_selected_show", format!("selected show {show_id}"))
         } else {
-            log::warn!("Manual play ignored: show {} is not in the current round queue", show_id);
+            log::warn!(
+                "Manual play ignored: show {} is not in the current round queue",
+                show_id
+            );
+            ControlOutcome::noop(
+                "show_not_in_round",
+                format!("show {show_id} is not in the current round"),
+            )
         }
     }
 
@@ -481,7 +559,8 @@ impl Runner {
             inner.playing = Some(cur.clone());
             inner.loaded_any = true;
         }
-        self.replica.update_round_entry_state(&cur.episode_id, "playing", &cur.playlist);
+        self.replica
+            .update_round_entry_state(&cur.episode_id, "playing", &cur.playlist);
         if let Some(pos) = self.replica.resume_pos(&cur.episode_id) {
             if pos > 1.0 {
                 self.player.seek_absolute(pos);
@@ -523,7 +602,7 @@ impl Runner {
         let raw = self.replica.get_round_queue();
         let mut round = Vec::new();
         let mut first_pending_pos = None;
-        
+
         for (ep_id, show_id, play_order, state, playlist, _updated_at, _dirty) in raw {
             if !self.playlists.contains(&playlist) {
                 continue;
@@ -550,7 +629,7 @@ impl Runner {
                 playlist: show.playlist.clone(),
                 position: ep.position,
             };
-            
+
             if state == "pending" || state == "playing" {
                 if first_pending_pos.is_none() {
                     first_pending_pos = Some(round.len());
@@ -558,7 +637,7 @@ impl Runner {
             }
             round.push(entry);
         }
-        
+
         match first_pending_pos {
             Some(pos) => (round, pos),
             None => (vec![], 0),
@@ -592,10 +671,14 @@ impl Runner {
     fn fetch_round(&self) -> Vec<RoundEntry> {
         let shows = self.replica.active_shows(&self.playlists);
         let ordered = engine::next_round(&shows);
-        let name_by: std::collections::HashMap<&str, &str> =
-            shows.iter().map(|s| (s.id.as_str(), s.name.as_str())).collect();
-        let pl_by: std::collections::HashMap<&str, &str> =
-            shows.iter().map(|s| (s.id.as_str(), s.playlist.as_str())).collect();
+        let name_by: std::collections::HashMap<&str, &str> = shows
+            .iter()
+            .map(|s| (s.id.as_str(), s.name.as_str()))
+            .collect();
+        let pl_by: std::collections::HashMap<&str, &str> = shows
+            .iter()
+            .map(|s| (s.id.as_str(), s.playlist.as_str()))
+            .collect();
         let mut ep_pos_by = std::collections::HashMap::new();
         let mut ep_rel_path_by = std::collections::HashMap::new();
         for s in &shows {
@@ -607,16 +690,31 @@ impl Runner {
         ordered
             .iter()
             .map(|o| {
-                let position = ep_pos_by.get(o.episode_id.as_str()).copied().expect("episode position must exist");
-                let relative_path = ep_rel_path_by.get(o.episode_id.as_str()).copied().expect("relative path must exist").to_string();
+                let position = ep_pos_by
+                    .get(o.episode_id.as_str())
+                    .copied()
+                    .expect("episode position must exist");
+                let relative_path = ep_rel_path_by
+                    .get(o.episode_id.as_str())
+                    .copied()
+                    .expect("relative path must exist")
+                    .to_string();
                 let nas_absolute_path = o.absolute_path.clone();
-                let show_name = name_by.get(o.show_id.as_str()).copied().expect("show name must exist").to_string();
+                let show_name = name_by
+                    .get(o.show_id.as_str())
+                    .copied()
+                    .expect("show name must exist")
+                    .to_string();
                 let absolute_path = get_local_path(&show_name, &relative_path)
                     .to_string_lossy()
                     .into_owned();
                 RoundEntry {
                     show_name,
-                    playlist: pl_by.get(o.show_id.as_str()).copied().expect("playlist must exist").to_string(),
+                    playlist: pl_by
+                        .get(o.show_id.as_str())
+                        .copied()
+                        .expect("playlist must exist")
+                        .to_string(),
                     show_id: o.show_id.clone(),
                     episode_id: o.episode_id.clone(),
                     absolute_path,
@@ -631,10 +729,13 @@ impl Runner {
 
     fn apply_advance(&self, entries: &[RoundEntry]) -> AdvanceResult {
         for entry in entries {
-            self.replica.update_round_entry_state(&entry.episode_id, "watched", &entry.playlist);
+            self.replica
+                .update_round_entry_state(&entry.episode_id, "watched", &entry.playlist);
         }
-        let pairs: Vec<(String, String)> =
-            entries.iter().map(|e| (e.show_id.clone(), e.episode_id.clone())).collect();
+        let pairs: Vec<(String, String)> = entries
+            .iter()
+            .map(|e| (e.show_id.clone(), e.episode_id.clone()))
+            .collect();
         let (advanced, removed_ids) = self.replica.advance(&pairs);
         let removed_shows = removed_ids
             .iter()
@@ -649,7 +750,10 @@ impl Runner {
                 }
             })
             .collect();
-        AdvanceResult { advanced_count: advanced, removed_shows }
+        AdvanceResult {
+            advanced_count: advanced,
+            removed_shows,
+        }
     }
 
     fn pull_and_prune_files(&self, round: &[RoundEntry]) -> FileSyncReport {
@@ -664,13 +768,16 @@ impl Runner {
 
         // Canonicalize base path if it exists to make canonicalization comparisons exact
         let canonical_base = if base_path.exists() {
-            base_path.canonicalize().unwrap_or_else(|_| base_path.to_path_buf())
+            base_path
+                .canonicalize()
+                .unwrap_or_else(|_| base_path.to_path_buf())
         } else {
             base_path.to_path_buf()
         };
 
         log::info!("Starting file sync for new round to {:?}", canonical_base);
-        self.player.show_text("Syncing new round files to SSD...", 10000);
+        self.player
+            .show_text("Syncing new round files to SSD...", 10000);
 
         let mut active_local_paths = std::collections::HashSet::new();
 
@@ -697,7 +804,12 @@ impl Runner {
                     );
                 } else {
                     report.missing += 1;
-                    record_file_sync_problem(&mut report, entry, &local_path, "source file missing");
+                    record_file_sync_problem(
+                        &mut report,
+                        entry,
+                        &local_path,
+                        "source file missing",
+                    );
                     log::error!(
                         "Source file does not exist and no cached copy is available: {:?}",
                         nas_path
@@ -712,7 +824,10 @@ impl Runner {
                 if let (Ok(src_m), Ok(dst_m)) = (src_metadata, dst_metadata) {
                     if src_m.len() == dst_m.len() {
                         report.cached += 1;
-                        log::info!("File already exists and size matches, skipping copy: {:?}", local_path);
+                        log::info!(
+                            "File already exists and size matches, skipping copy: {:?}",
+                            local_path
+                        );
                         continue;
                     }
                 }
@@ -733,11 +848,22 @@ impl Runner {
                 }
             }
 
-            self.player.show_text(&format!("Copying {}...", entry.show_name), 5000);
+            self.player
+                .show_text(&format!("Copying {}...", entry.show_name), 5000);
             if let Err(e) = std::fs::copy(nas_path, &local_path) {
                 report.failed += 1;
-                record_file_sync_problem(&mut report, entry, &local_path, format!("copy failed: {e}"));
-                log::error!("Failed to copy file from {:?} to {:?}: {}", nas_path, local_path, e);
+                record_file_sync_problem(
+                    &mut report,
+                    entry,
+                    &local_path,
+                    format!("copy failed: {e}"),
+                );
+                log::error!(
+                    "Failed to copy file from {:?} to {:?}: {}",
+                    nas_path,
+                    local_path,
+                    e
+                );
             } else {
                 report.copied += 1;
             }
@@ -762,7 +888,10 @@ impl Runner {
 
     fn queue_round(&self, round: &[RoundEntry]) {
         for (i, ep) in round.iter().enumerate() {
-            self.player.play(&ep.absolute_path, if i == 0 { "replace" } else { "append-play" });
+            self.player.play(
+                &ep.absolute_path,
+                if i == 0 { "replace" } else { "append-play" },
+            );
         }
     }
 }
@@ -943,7 +1072,10 @@ mod tests {
         let (statuses2, stop2) = (statuses.clone(), stop.clone());
         let cb = Callbacks {
             on_status: Some(Box::new(move |phase, message| {
-                statuses2.lock().unwrap().push((phase.to_string(), message.to_string()));
+                statuses2
+                    .lock()
+                    .unwrap()
+                    .push((phase.to_string(), message.to_string()));
             })),
             on_drained: Some(Box::new(move || {
                 stop2.set();
@@ -955,7 +1087,10 @@ mod tests {
         run.run();
 
         let statuses = statuses.lock().unwrap();
-        assert_eq!(statuses[0], ("syncing".into(), "syncing shared database".into()));
+        assert_eq!(
+            statuses[0],
+            ("syncing".into(), "syncing shared database".into())
+        );
         assert_eq!(statuses[1], ("fetching".into(), "loading round".into()));
     }
 
@@ -963,11 +1098,19 @@ mod tests {
     fn skip_advances_current_locally() {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&run);
         run.set_pos(0);
         let cur = run.current().unwrap();
-        run.skip();
+        let outcome = run.skip();
+        assert!(outcome.ok());
+        assert_eq!(outcome.status(), "skipped");
         assert_eq!(p.skips.load(Ordering::SeqCst), 1);
         assert!(watched(&r, &cur.episode_id).is_some());
     }
@@ -976,12 +1119,26 @@ mod tests {
     fn defer_bumps_without_watching() {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&run);
         run.set_pos(0);
         let cur = run.current().unwrap();
-        run.defer();
-        let ep = r.show("s1").unwrap().episodes.into_iter().find(|e| e.id == cur.episode_id).unwrap();
+        let outcome = run.defer();
+        assert!(outcome.ok());
+        assert_eq!(outcome.status(), "deferred");
+        let ep = r
+            .show("s1")
+            .unwrap()
+            .episodes
+            .into_iter()
+            .find(|e| e.id == cur.episode_id)
+            .unwrap();
         assert!(ep.watched_at.is_none() && ep.position == 2);
         assert!(run.inner.lock().unwrap().deferred.contains(&cur.episode_id));
         assert_eq!(p.skips.load(Ordering::SeqCst), 1);
@@ -991,7 +1148,13 @@ mod tests {
     fn previous_steps_back_without_watching() {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&run);
         run.set_pos(0);
         let cur = run.current().unwrap();
@@ -1005,7 +1168,7 @@ mod tests {
     fn local_path_mapping_matches_env_or_default() {
         let show_name = "Dr. Katz";
         let relative_path = "S01\\E01.mkv";
-        
+
         let path = get_local_path(show_name, relative_path);
         assert!(path.ends_with(std::path::Path::new("Dr. Katz").join("S01").join("E01.mkv")));
     }
@@ -1013,8 +1176,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn comparable_path_key_normalizes_windows_case() {
-        let upper = comparable_path_key(std::path::Path::new(r"D:\Downloads\Watching\Show\E01.mkv"));
-        let lower = comparable_path_key(std::path::Path::new(r"d:\downloads\watching\show\e01.mkv"));
+        let upper =
+            comparable_path_key(std::path::Path::new(r"D:\Downloads\Watching\Show\E01.mkv"));
+        let lower =
+            comparable_path_key(std::path::Path::new(r"d:\downloads\watching\show\e01.mkv"));
 
         assert_eq!(upper, lower);
     }
@@ -1023,16 +1188,25 @@ mod tests {
     fn round_entry_contains_nas_and_relative_paths() {
         let r = replica(&[show("s1", "nelson", &["ep-a"])]);
         let p = Arc::new(FakePlayer::default());
-        
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         let round = run.fetch_round();
-        
+
         assert_eq!(round.len(), 1);
         let entry = &round[0];
         assert_eq!(entry.show_name, "s1");
         assert_eq!(entry.relative_path, "ep-a.mkv");
         assert_eq!(entry.nas_absolute_path, r"D:\s1\ep-a.mkv");
-        let expected_suffix = std::path::Path::new("s1").join("ep-a.mkv").to_string_lossy().into_owned();
+        let expected_suffix = std::path::Path::new("s1")
+            .join("ep-a.mkv")
+            .to_string_lossy()
+            .into_owned();
         assert!(entry.absolute_path.ends_with(&expected_suffix));
     }
 
@@ -1040,11 +1214,27 @@ mod tests {
     fn no_round_is_safe() {
         let r = replica(&[show("s1", "nelson", &["a"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         run.defer(); // no round in progress -> no-op
         run.skip(); // skip still nudges the player
         assert_eq!(p.skips.load(Ordering::SeqCst), 1);
         assert!(r.show("s1").unwrap().episodes[0].watched_at.is_none());
+    }
+
+    #[test]
+    fn controls_report_noop_without_current_round() {
+        let r = replica(&[show("s1", "nelson", &["a"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r, p, &["nelson"], StopFlag::new(), Callbacks::default());
+
+        assert_eq!(run.defer().status(), "no_current_episode");
+        assert_eq!(run.play_show("s1").status(), "show_not_in_round");
     }
 
     // ── per-episode advance (the "watch what's next" model) ───────────
@@ -1053,10 +1243,23 @@ mod tests {
         let r = replica(&[show("s1", "nelson", &["a"]), show("s2", "nelson", &["b"])]);
         let p = Arc::new(FakePlayer::default());
         let stop = StopFlag::new();
-        let run = runner(r.clone(), p.clone(), &["nelson"], stop.clone(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            stop.clone(),
+            Callbacks::default(),
+        );
         let (run2, stop2) = (run.clone(), stop.clone());
         p.set_on_wait(Box::new(move || {
-            let n = run2.inner.lock().unwrap().round.as_ref().map(Vec::len).unwrap_or(0);
+            let n = run2
+                .inner
+                .lock()
+                .unwrap()
+                .round
+                .as_ref()
+                .map(Vec::len)
+                .unwrap_or(0);
             for i in 0..n {
                 play_sim(&run2, i);
             }
@@ -1071,10 +1274,19 @@ mod tests {
     fn unfinished_episode_is_not_watched() {
         // Watch the Simpsons to the end, turn off before Malcolm plays: Simpsons
         // is done; Malcolm wasn't watched, so it stays the next pick.
-        let r = replica(&[show("s1", "nelson", &["simpsons"]), show("s2", "nelson", &["malcolm"])]);
+        let r = replica(&[
+            show("s1", "nelson", &["simpsons"]),
+            show("s2", "nelson", &["malcolm"]),
+        ]);
         let p = Arc::new(FakePlayer::default());
         let stop = StopFlag::new();
-        let run = runner(r.clone(), p.clone(), &["nelson"], stop.clone(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            stop.clone(),
+            Callbacks::default(),
+        );
         let (run2, stop2) = (run.clone(), stop.clone());
         p.set_on_wait(Box::new(move || {
             let round = run2.inner.lock().unwrap().round.clone().unwrap_or_default();
@@ -1095,7 +1307,13 @@ mod tests {
         let r = replica(&[show("s1", "nelson", &["a"]), show("s2", "nelson", &["b"])]);
         let p = Arc::new(FakePlayer::default());
         let stop = StopFlag::new();
-        let run = runner(r.clone(), p.clone(), &["nelson"], stop.clone(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            stop.clone(),
+            Callbacks::default(),
+        );
         let (run2, stop2) = (run.clone(), stop.clone());
         p.set_on_wait(Box::new(move || {
             let round = run2.inner.lock().unwrap().round.clone().unwrap_or_default();
@@ -1115,14 +1333,26 @@ mod tests {
     fn deferred_episode_is_not_advanced_on_finish() {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&run);
         run.set_pos(0);
         run.on_file_loaded();
         let cur = run.current().unwrap();
         run.defer(); // bumps + marks deferred + player.skip()
         run.on_natural_end(); // a stray EOF for the deferred entry -> no-op
-        let ep = r.show("s1").unwrap().episodes.into_iter().find(|e| e.id == cur.episode_id).unwrap();
+        let ep = r
+            .show("s1")
+            .unwrap()
+            .episodes
+            .into_iter()
+            .find(|e| e.id == cur.episode_id)
+            .unwrap();
         assert!(ep.watched_at.is_none() && ep.position == 2);
     }
 
@@ -1146,7 +1376,13 @@ mod tests {
         };
         let run = runner(r.clone(), p, &["nelson"], stop, cb);
         run.run_loop();
-        assert!(errors.lock().unwrap().first().is_some_and(|e| e.contains("no playable media")));
+        assert!(
+            errors
+                .lock()
+                .unwrap()
+                .first()
+                .is_some_and(|e| e.contains("no playable media"))
+        );
         assert_eq!(advances.load(Ordering::SeqCst), 0);
         assert!(watched(&r, "a").is_none() && watched(&r, "b").is_none());
     }
@@ -1172,7 +1408,13 @@ mod tests {
     #[test]
     fn cross_playlist_round_spans_playlists() {
         let r = replica(&[show("s1", "nelson", &["a"]), show("s2", "couple", &["b"])]);
-        let run = runner(r, Arc::new(FakePlayer::default()), &["nelson", "couple"], StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r,
+            Arc::new(FakePlayer::default()),
+            &["nelson", "couple"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         let rnd = run.fetch_round();
         let ids: BTreeSet<&str> = rnd.iter().map(|e| e.show_id.as_str()).collect();
         assert_eq!(ids, ["s1", "s2"].into_iter().collect());
@@ -1184,7 +1426,13 @@ mod tests {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
         *p.time.lock().unwrap() = Some(100.0);
-        let run = runner(r.clone(), p, &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p,
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&run);
         run.set_pos(0);
         let cur = run.current().unwrap();
@@ -1196,14 +1444,29 @@ mod tests {
     fn on_file_loaded_seeks_to_resume() {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&run);
         run.set_pos(0);
         let cur = run.current().unwrap();
         r.set_resume(&cur.episode_id, Some(200.0));
         run.on_file_loaded();
         assert_eq!(*p.seeked.lock().unwrap(), Some(200.0));
-        assert_eq!(run.inner.lock().unwrap().playing.as_ref().unwrap().episode_id, cur.episode_id);
+        assert_eq!(
+            run.inner
+                .lock()
+                .unwrap()
+                .playing
+                .as_ref()
+                .unwrap()
+                .episode_id,
+            cur.episode_id
+        );
     }
 
     // ── round-end detection (playlist-pos -> -1) ───────────────────────
@@ -1261,9 +1524,18 @@ mod tests {
 
     #[test]
     fn play_episode_navigates_within_existing_round() {
-        let r = replica(&[show("s1", "nelson", &["a", "b"]), show("s2", "nelson", &["c"])]);
+        let r = replica(&[
+            show("s1", "nelson", &["a", "b"]),
+            show("s2", "nelson", &["c"]),
+        ]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
 
         // Compute and save round
         let round = run.fetch_round();
@@ -1271,7 +1543,7 @@ mod tests {
 
         let idx_c = round.iter().position(|r| r.episode_id == "c").unwrap();
         let idx_a = round.iter().position(|r| r.episode_id == "a").unwrap();
-        
+
         let entries: Vec<(String, String, i32, String, String)> = round
             .iter()
             .enumerate()
@@ -1280,7 +1552,11 @@ mod tests {
                     r.episode_id.clone(),
                     r.show_id.clone(),
                     i as i32,
-                    if i == idx_a { "playing".to_string() } else { "pending".to_string() },
+                    if i == idx_a {
+                        "playing".to_string()
+                    } else {
+                        "pending".to_string()
+                    },
                     r.playlist.clone(),
                 )
             })
@@ -1297,7 +1573,9 @@ mod tests {
         // Manual play for s2's "c" (which is in the existing queue at idx_c)
         let s2 = r.show("s2").unwrap();
 
-        run.play_show(&s2.id);
+        let outcome = run.play_show(&s2.id);
+        assert!(outcome.ok());
+        assert_eq!(outcome.status(), "playing_selected_show");
 
         // Verify that:
         // 1. inner.pos is now idx_c

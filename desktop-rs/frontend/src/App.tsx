@@ -291,13 +291,13 @@ function App() {
           requestPause(!pauseRef.current);
           break;
         case 'n':
-          skip();
+          void skip().catch(console.error);
           break;
         case 'p':
           previous();
           break;
         case 'd':
-          defer();
+          void defer().catch(console.error);
           break;
         case 'f':
           toggleFullscreen();
@@ -461,7 +461,7 @@ function App() {
       .catch(() => setShowDetails(null));
 
   const handlePlayShow = (showId: string) => {
-    playShow(showId);
+    void playShow(showId).catch(console.error);
   };
 
   const handleMarkWatched = async (showId: string) => {
@@ -1047,7 +1047,9 @@ function BottomControlBar({
 
           <button
             className="control-btn"
-            onClick={() => skip()}
+            onClick={() => {
+              void skip().catch(console.error);
+            }}
             disabled={!playing}
             title="Skip Show (n)"
           >
@@ -1059,7 +1061,9 @@ function BottomControlBar({
         <div className="controls-group right-controls">
           <button
             className="control-btn defer-btn"
-            onClick={() => defer()}
+            onClick={() => {
+              void defer().catch(console.error);
+            }}
             disabled={!playing}
             title="Defer Episode (d)"
           >
@@ -1132,7 +1136,9 @@ function BottomControlBar({
 
           <button
             className="control-btn sync-btn"
-            onClick={() => syncNow()}
+            onClick={() => {
+              void syncNow().catch(console.error);
+            }}
             title="Sync Now"
           >
             <SyncIcon />

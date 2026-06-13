@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use shows_core::replica::Replica;
-use shows_core::runner::Runner;
+use shows_core::runner::{ControlOutcome, Runner};
 use shows_core::scan;
 use shows_core::sync::Syncer;
 
@@ -103,7 +103,8 @@ impl StatusPatch {
     }
 
     pub fn playing(round: Vec<StatusRoundEntry>, pos: usize, round_id: i64) -> StatusPatch {
-        let mut patch = StatusPatch::phase(StatusPhase::Playing, format!("round of {}", round.len()));
+        let mut patch =
+            StatusPatch::phase(StatusPhase::Playing, format!("round of {}", round.len()));
         patch.fields.insert(
             "round".into(),
             Value::Array(
@@ -393,8 +394,7 @@ impl ControlServer {
                 respond(request, 204, vec![], "text/plain");
             }
             "/skip" => {
-                self.with_runner(|r| r.skip());
-                respond(request, 204, vec![], "text/plain");
+                self.respond_runner_outcome(request, |r| r.skip());
             }
             "/prev" => {
                 self.with_runner(|r| r.previous());
@@ -402,14 +402,29 @@ impl ControlServer {
             }
             "/play-show" => {
                 let b = read_body(&mut request);
-                if let Some(show_id) = b.get("show_id").and_then(Value::as_str) {
-                    if let Some(show) = self.replica.show(show_id) {
-                        self.with_runner(|r| {
-                            r.play_show(&show.id);
-                        });
-                    }
-                }
-                respond(request, 204, vec![], "text/plain");
+                let Some(show_id) = b.get("show_id").and_then(Value::as_str) else {
+                    return respond_json(
+                        request,
+                        400,
+                        &json!({
+                            "ok": false,
+                            "status": "missing_show_id",
+                            "message": "show_id is required",
+                        }),
+                    );
+                };
+                let Some(show) = self.replica.show(show_id) else {
+                    return respond_json(
+                        request,
+                        404,
+                        &json!({
+                            "ok": false,
+                            "status": "show_not_found",
+                            "message": format!("show {show_id} was not found"),
+                        }),
+                    );
+                };
+                self.respond_runner_outcome(request, |r| r.play_show(&show.id));
             }
             "/library/mark-watched" => {
                 let b = read_body(&mut request);
@@ -428,8 +443,7 @@ impl ControlServer {
                 respond(request, 204, vec![], "text/plain");
             }
             "/defer" => {
-                self.with_runner(|r| r.defer());
-                respond(request, 204, vec![], "text/plain");
+                self.respond_runner_outcome(request, |r| r.defer());
             }
             "/fullscreen" => {
                 if let Some(cb) = self.on_fullscreen.lock().unwrap().as_ref() {
@@ -462,15 +476,29 @@ impl ControlServer {
                 respond(request, 204, vec![], "text/plain");
             }
             "/sync-now" => {
-                // Manual reconcile, off-thread so the response is instant.
-                if let Some(s) = self.syncer.lock().unwrap().clone() {
-                    let srv = self.clone();
-                    std::thread::spawn(move || {
-                        s.sync();
-                        srv.notify();
-                    });
-                }
-                respond(request, 204, vec![], "text/plain");
+                let syncer = self.syncer.lock().unwrap().clone();
+                let Some(syncer) = syncer else {
+                    return respond_json(
+                        request,
+                        503,
+                        &json!({
+                            "ok": false,
+                            "status": "sync_unavailable",
+                            "message": "sync is not ready",
+                        }),
+                    );
+                };
+                let ok = syncer.sync();
+                self.notify();
+                respond_json(
+                    request,
+                    if ok { 200 } else { 503 },
+                    &json!({
+                        "ok": ok,
+                        "status": if ok { "synced" } else { "sync_failed" },
+                        "message": if ok { "sync complete" } else { "sync failed; check the status panel" },
+                    }),
+                );
             }
             "/seek" => {
                 let b = read_body(&mut request);
@@ -605,11 +633,7 @@ impl ControlServer {
             .trim()
             .to_string();
         if root.is_empty() {
-            return respond_json(
-                request,
-                400,
-                &json!({"error":"root_path is required"}),
-            );
+            return respond_json(request, 400, &json!({"error":"root_path is required"}));
         }
         let eps = scan::scan_episodes(&root);
         respond_json(request, 200, &json!({"episodes": eps}));
@@ -620,11 +644,15 @@ impl ControlServer {
         // Let's just use the active shows for all playlists we know about, or default to nelson.
         let shows = self.replica.active_shows(&["nelson".to_string()]);
         let round = shows_core::engine::next_round(&shows);
-        
+
         let mut results = Vec::new();
         for r in round {
             // Find the show name to return
-            let show_name = shows.iter().find(|s| s.id == r.show_id).map(|s| s.name.clone()).unwrap_or_default();
+            let show_name = shows
+                .iter()
+                .find(|s| s.id == r.show_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_default();
             results.push(json!({
                 "show_id": r.show_id,
                 "show_name": show_name,
@@ -644,11 +672,7 @@ impl ControlServer {
             .trim()
             .to_string();
         if parent.is_empty() {
-            return respond_json(
-                request,
-                400,
-                &json!({"error":"parent_path is required"}),
-            );
+            return respond_json(request, 400, &json!({"error":"parent_path is required"}));
         }
 
         let mut unadded = Vec::new();
@@ -663,7 +687,9 @@ impl ControlServer {
                         // This handles the migration from D:\Downloads\Group-Nelson to S:\Group-Nelson
                         let is_added = existing_shows.iter().any(|s| {
                             let s_path = std::path::Path::new(&s.root_path);
-                            if let (Some(s_name), Some(p_name)) = (s_path.file_name(), path.file_name()) {
+                            if let (Some(s_name), Some(p_name)) =
+                                (s_path.file_name(), path.file_name())
+                            {
                                 s_name == p_name
                             } else {
                                 s_path == path.as_path()
@@ -729,12 +755,16 @@ impl ControlServer {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let specific_episodes: Option<Vec<String>> = b.get("episodes").and_then(Value::as_array).map(|arr| {
-            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
-        });
+        let specific_episodes: Option<Vec<String>> =
+            b.get("episodes").and_then(Value::as_array).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
         let mut added = 0usize;
         if let Some(show) = self.replica.show(&sid) {
-            let full_sorted: Vec<String> = specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
+            let full_sorted: Vec<String> =
+                specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
             let added_ids = self.replica.rescan_episodes(&sid, &full_sorted);
             added = added_ids.len();
             self.push_sync();
@@ -749,12 +779,16 @@ impl ControlServer {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let specific_episodes: Option<Vec<String>> = b.get("episodes").and_then(Value::as_array).map(|arr| {
-            arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
-        });
+        let specific_episodes: Option<Vec<String>> =
+            b.get("episodes").and_then(Value::as_array).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            });
         let mut added = 0usize;
         if let Some(show) = self.replica.show(&sid) {
-            let full_sorted: Vec<String> = specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
+            let full_sorted: Vec<String> =
+                specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
             let added_ids = self.replica.rescan_episodes(&sid, &full_sorted);
             added = added_ids.len();
             if added > 0 {
@@ -775,7 +809,8 @@ impl ControlServer {
 
         if let Some(show) = self.replica.show(&sid) {
             let history = self.replica.show_history(&sid);
-            let first_unwatched_id = shows_core::engine::first_unwatched(&show.episodes).map(|e| e.id.clone());
+            let first_unwatched_id =
+                shows_core::engine::first_unwatched(&show.episodes).map(|e| e.id.clone());
 
             let mut all_episodes = Vec::new();
             let mut previous = Vec::new();
@@ -789,7 +824,7 @@ impl ControlServer {
                     "watched_at": ep.watched_at,
                     "resume_pos": ep.resume_pos,
                 });
-                
+
                 all_episodes.push(ep_val.clone());
 
                 if ep.watched_at.is_some() {
@@ -801,23 +836,26 @@ impl ControlServer {
                 }
             }
 
-            respond_json(request, 200, &json!({
-                "show": {
-                    "id": show.id,
-                    "name": show.name,
-                    "playlist": show.playlist,
-                    "root_path": show.root_path,
-                },
-                "all_episodes": all_episodes,
-                "previous_episodes": previous,
-                "upcoming_episodes": upcoming,
-                "history": history,
-            }));
+            respond_json(
+                request,
+                200,
+                &json!({
+                    "show": {
+                        "id": show.id,
+                        "name": show.name,
+                        "playlist": show.playlist,
+                        "root_path": show.root_path,
+                    },
+                    "all_episodes": all_episodes,
+                    "previous_episodes": previous,
+                    "upcoming_episodes": upcoming,
+                    "history": history,
+                }),
+            );
         } else {
             respond_json(request, 404, &json!({"error": "not found"}));
         }
     }
-
 
     fn status_json(&self) -> Value {
         let mut status = self.status.lock().unwrap().clone();
@@ -873,6 +911,21 @@ impl ControlServer {
     fn with_runner(&self, f: impl FnOnce(&Runner)) {
         if let Some(r) = self.runner.lock().unwrap().as_ref() {
             f(r);
+        }
+    }
+    fn respond_runner_outcome(&self, request: Request, f: impl FnOnce(&Runner) -> ControlOutcome) {
+        let outcome = self.runner.lock().unwrap().as_ref().map(|r| f(r.as_ref()));
+        match outcome {
+            Some(outcome) => respond_control_outcome(request, outcome),
+            None => respond_json(
+                request,
+                503,
+                &json!({
+                    "ok": false,
+                    "status": "runner_unavailable",
+                    "message": "runner is not ready",
+                }),
+            ),
         }
     }
     fn push_sync(&self) {
@@ -1133,7 +1186,10 @@ fn status_alerts(status: &serde_json::Map<String, Value>) -> Value {
     if let Some(sync) = status.get("sync").and_then(Value::as_object) {
         let online = sync.get("online").and_then(Value::as_bool).unwrap_or(true);
         if !online {
-            let shared = sync.get("shared_db_path").and_then(Value::as_str).unwrap_or("");
+            let shared = sync
+                .get("shared_db_path")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let message = sync
                 .get("last_error")
                 .and_then(Value::as_str)
@@ -1149,7 +1205,9 @@ fn status_alerts(status: &serde_json::Map<String, Value>) -> Value {
             let detail = if shared.is_empty() {
                 "Map the NAS share, then use sync now or restart the app.".to_string()
             } else {
-                format!("Map the NAS share so {shared} exists, then use sync now or restart the app.")
+                format!(
+                    "Map the NAS share so {shared} exists, then use sync now or restart the app."
+                )
             };
             alerts.push(json!({
                 "level": "danger",
@@ -1181,7 +1239,10 @@ fn status_alerts(status: &serde_json::Map<String, Value>) -> Value {
                         .get("reason")
                         .and_then(Value::as_str)
                         .unwrap_or("file unavailable");
-                    let source = problem.get("source_path").and_then(Value::as_str).unwrap_or("");
+                    let source = problem
+                        .get("source_path")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
                     if source.is_empty() {
                         detail_parts.push(format!("{show}: {reason}"));
                     } else {
@@ -1224,6 +1285,19 @@ fn respond_json(request: Request, code: u16, v: &Value) {
         serde_json::to_vec(v).unwrap_or_default(),
         "application/json",
     );
+}
+
+fn control_outcome_json(outcome: &ControlOutcome) -> Value {
+    json!({
+        "ok": outcome.ok(),
+        "status": outcome.status(),
+        "message": outcome.message(),
+    })
+}
+
+fn respond_control_outcome(request: Request, outcome: ControlOutcome) {
+    let code = if outcome.ok() { 200 } else { 409 };
+    respond_json(request, code, &control_outcome_json(&outcome));
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -1271,6 +1345,18 @@ mod tests {
     }
 
     #[test]
+    fn control_outcome_json_reports_noop_status() {
+        let value = control_outcome_json(&ControlOutcome::Noop {
+            status: "show_not_in_round",
+            message: "show s1 is not in the current round".into(),
+        });
+
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["status"], "show_not_in_round");
+        assert_eq!(value["message"], "show s1 is not in the current round");
+    }
+
+    #[test]
     fn status_alerts_include_sync_offline_guidance() {
         let mut status = serde_json::Map::new();
         status.insert(
@@ -1286,7 +1372,12 @@ mod tests {
         let alerts = status_alerts(&status);
         assert_eq!(alerts[0]["level"], "danger");
         assert_eq!(alerts[0]["title"], "Sync offline");
-        assert!(alerts[0]["detail"].as_str().unwrap().contains("Map the NAS share"));
+        assert!(
+            alerts[0]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("Map the NAS share")
+        );
     }
 
     #[test]
@@ -1344,4 +1435,3 @@ mod tests {
         assert!(value["round_id"].is_null());
     }
 }
-

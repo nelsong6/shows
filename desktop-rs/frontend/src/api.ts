@@ -172,8 +172,35 @@ export async function pause(paused?: boolean): Promise<void> {
   if (!r.ok) throw new Error(`/pause ${r.status}`);
 }
 
-export function skip(): void {
-  void fetch('/skip', {method: 'POST'});
+export type ControlResult = {
+  ok: boolean;
+  status: string;
+  message: string;
+};
+
+async function postControl(path: string, body?: unknown): Promise<ControlResult> {
+  const r = await fetch(path, {
+    method: 'POST',
+    ...(body === undefined
+      ? {}
+      : {
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+        }),
+  });
+  const data = await r.json().catch(() => ({
+    ok: false,
+    status: 'invalid_response',
+    message: `${path} returned ${r.status}`,
+  }));
+  if (!r.ok || !data.ok) {
+    throw new Error(data.message || `${path} ${r.status}`);
+  }
+  return data;
+}
+
+export async function skip(): Promise<ControlResult> {
+  return postControl('/skip');
 }
 
 // Step back to the previous show in the current round (navigation only — going
@@ -182,8 +209,8 @@ export function previous(): void {
   void fetch('/prev', {method: 'POST'});
 }
 
-export function playShow(showId: string): void {
-  void fetch('/play-show', {method: 'POST', body: JSON.stringify({show_id: showId})});
+export async function playShow(showId: string): Promise<ControlResult> {
+  return postControl('/play-show', {show_id: showId});
 }
 
 export async function markShowWatched(showId: string): Promise<void> {
@@ -197,8 +224,8 @@ export async function markShowUnwatched(showId: string): Promise<void> {
 }
 // Re-roll the current show's next-round pick without marking it watched
 // (server contract D1-D3). The runner jumps to the next entry too.
-export function defer(): void {
-  void fetch('/defer', {method: 'POST'});
+export async function defer(): Promise<ControlResult> {
+  return postControl('/defer');
 }
 
 // Toggle the Qt window between windowed and fullscreen.
@@ -233,8 +260,8 @@ export function setAudio(aid: number | string): void {
 }
 
 // Manual "check connectivity" / reconcile — push queued changes + pull.
-export function syncNow(): void {
-  void fetch('/sync-now', {method: 'POST'});
+export async function syncNow(): Promise<ControlResult> {
+  return postControl('/sync-now');
 }
 
 // ── library management (desktop scans the dir, the change syncs up) ──
