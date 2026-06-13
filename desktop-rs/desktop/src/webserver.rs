@@ -31,6 +31,173 @@ pub enum WindowAction {
     Close,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusPhase {
+    Syncing,
+    Fetching,
+    Playing,
+    Drained,
+    Error,
+}
+
+impl StatusPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            StatusPhase::Syncing => "syncing",
+            StatusPhase::Fetching => "fetching",
+            StatusPhase::Playing => "playing",
+            StatusPhase::Drained => "drained",
+            StatusPhase::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusRoundEntry {
+    pub show_id: String,
+    pub show_name: String,
+    pub episode_id: String,
+    pub playlist: String,
+    pub order_value: u32,
+    pub absolute_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusRemovedShow {
+    pub id: String,
+    pub name: String,
+    pub date_added: String,
+    pub last_played_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusFileSyncProblem {
+    pub show_name: String,
+    pub source_path: String,
+    pub local_path: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusFileSync {
+    pub copied: usize,
+    pub cached: usize,
+    pub missing: usize,
+    pub failed: usize,
+    pub summary: String,
+    pub incomplete: bool,
+    pub problems: Vec<StatusFileSyncProblem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusPatch {
+    fields: serde_json::Map<String, Value>,
+}
+
+impl StatusPatch {
+    pub fn phase(phase: StatusPhase, message: impl Into<String>) -> StatusPatch {
+        let mut fields = serde_json::Map::new();
+        fields.insert("phase".into(), json!(phase.as_str()));
+        fields.insert("message".into(), json!(message.into()));
+        StatusPatch { fields }
+    }
+
+    pub fn playing(round: Vec<StatusRoundEntry>, pos: usize, round_id: i64) -> StatusPatch {
+        let mut patch = StatusPatch::phase(StatusPhase::Playing, format!("round of {}", round.len()));
+        patch.fields.insert(
+            "round".into(),
+            Value::Array(
+                round
+                    .into_iter()
+                    .map(|e| {
+                        json!({
+                            "show_id": e.show_id,
+                            "show_name": e.show_name,
+                            "episode_id": e.episode_id,
+                            "playlist": e.playlist,
+                            "order_value": e.order_value,
+                            "absolute_path": e.absolute_path,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+        patch.fields.insert("round_pos".into(), json!(pos));
+        patch.fields.insert("round_id".into(), json!(round_id));
+        patch
+    }
+
+    pub fn advance(removed_shows: Vec<StatusRemovedShow>, advanced_count: usize) -> StatusPatch {
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            "last_advance".into(),
+            json!({
+                "advanced_count": advanced_count,
+                "removed_shows": removed_shows
+                    .into_iter()
+                    .map(|r| {
+                        json!({
+                            "id": r.id,
+                            "name": r.name,
+                            "date_added": r.date_added,
+                            "last_played_at": r.last_played_at,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        );
+        StatusPatch { fields }
+    }
+
+    pub fn drained() -> StatusPatch {
+        let mut patch = StatusPatch::phase(StatusPhase::Drained, "every show finished");
+        patch.fields.insert("round".into(), json!([]));
+        patch.fields.insert("round_id".into(), Value::Null);
+        patch
+    }
+
+    pub fn file_sync(report: StatusFileSync) -> StatusPatch {
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            "file_sync".into(),
+            json!({
+                "copied": report.copied,
+                "cached": report.cached,
+                "missing": report.missing,
+                "failed": report.failed,
+                "summary": report.summary,
+                "incomplete": report.incomplete,
+                "problems": report.problems
+                    .into_iter()
+                    .map(|p| {
+                        json!({
+                            "show_name": p.show_name,
+                            "source_path": p.source_path,
+                            "local_path": p.local_path,
+                            "reason": p.reason,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }),
+        );
+        StatusPatch { fields }
+    }
+
+    pub fn round_pos(pos: usize) -> StatusPatch {
+        let mut fields = serde_json::Map::new();
+        fields.insert("round_pos".into(), json!(pos));
+        StatusPatch { fields }
+    }
+
+    pub fn window_state(maximized: bool, fullscreen: bool, pip: bool) -> StatusPatch {
+        let mut fields = serde_json::Map::new();
+        fields.insert("window_maximized".into(), json!(maximized));
+        fields.insert("window_fullscreen".into(), json!(fullscreen));
+        fields.insert("window_pip".into(), json!(pip));
+        StatusPatch { fields }
+    }
+}
+
 pub type WindowActionCb = Box<dyn Fn(WindowAction) + Send + Sync>;
 type FullscreenCb = Box<dyn Fn() + Send + Sync>;
 type PipCb = Box<dyn Fn() + Send + Sync>;
@@ -103,8 +270,13 @@ impl ControlServer {
         *self.on_window_action.lock().unwrap() = Some(f);
     }
 
-    /// Merge an object's keys into the live status (what the runner pushes).
-    pub fn push(&self, updates: Value) {
+    pub fn push_status(&self, patch: StatusPatch) {
+        self.push_raw(Value::Object(patch.fields));
+    }
+
+    /// Merge an object's keys into the live status. Prefer [`StatusPatch`];
+    /// this remains for compositor callbacks that already produce window-state JSON.
+    pub fn push_raw(&self, updates: Value) {
         let mut changed = false;
         if let Value::Object(map) = updates {
             let mut s = self.status.lock().unwrap();
@@ -1137,6 +1309,39 @@ mod tests {
         let alerts = status_alerts(&status);
         assert_eq!(alerts[0]["level"], "warning");
         assert!(alerts[0]["detail"].as_str().unwrap().contains("Example"));
+    }
+
+    #[test]
+    fn status_patch_playing_has_required_round_fields() {
+        let patch = StatusPatch::playing(
+            vec![StatusRoundEntry {
+                show_id: "s1".into(),
+                show_name: "Show".into(),
+                episode_id: "e1".into(),
+                playlist: "nelson".into(),
+                order_value: 7,
+                absolute_path: "D:\\Watching\\Show\\e1.mkv".into(),
+            }],
+            0,
+            3,
+        );
+        let value = Value::Object(patch.fields);
+
+        assert_eq!(value["phase"], "playing");
+        assert_eq!(value["message"], "round of 1");
+        assert_eq!(value["round_pos"], 0);
+        assert_eq!(value["round_id"], 3);
+        assert_eq!(value["round"][0]["show_id"], "s1");
+    }
+
+    #[test]
+    fn status_patch_drained_clears_round_identity() {
+        let patch = StatusPatch::drained();
+        let value = Value::Object(patch.fields);
+
+        assert_eq!(value["phase"], "drained");
+        assert_eq!(value["round"].as_array().unwrap().len(), 0);
+        assert!(value["round_id"].is_null());
     }
 }
 

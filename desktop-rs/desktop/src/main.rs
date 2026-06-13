@@ -24,6 +24,10 @@ use shows_core::replica::Replica;
 use shows_core::roundlogic::parse_playlists;
 use shows_core::runner::{Callbacks, PlayerOps, Runner, StopFlag, SyncOps};
 use shows_core::sync::Syncer;
+use webserver::{
+    StatusFileSync, StatusFileSyncProblem, StatusPatch, StatusPhase, StatusRemovedShow,
+    StatusRoundEntry,
+};
 
 use compositor::Compositor;
 use player::Player;
@@ -224,11 +228,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 let entries: Vec<_> = round
                     .iter()
                     .map(|e| {
-                        serde_json::json!({
-                            "show_id": e.show_id, "show_name": e.show_name, "episode_id": e.episode_id,
-                            "playlist": e.playlist, "order_value": e.order_value,
-                            "absolute_path": e.absolute_path,
-                        })
+                        StatusRoundEntry {
+                            show_id: e.show_id.clone(),
+                            show_name: e.show_name.clone(),
+                            episode_id: e.episode_id.clone(),
+                            playlist: e.playlist.clone(),
+                            order_value: e.order_value,
+                            absolute_path: e.absolute_path.clone(),
+                        }
                     })
                     .collect();
                 let round_id = round
@@ -237,58 +244,59 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     .min()
                     .expect("round is not empty")
                     + 1;
-                s_round.push(serde_json::json!({
-                    "phase": "playing", "message": format!("round of {}", round.len()),
-                    "round": entries, "round_pos": pos, "round_id": round_id,
-                }));
+                s_round.push_status(StatusPatch::playing(entries, pos, round_id));
             })),
             on_advance: Some(Box::new(move |res| {
                 let removed: Vec<_> = res
                     .removed_shows
                     .iter()
                     .map(|r| {
-                        serde_json::json!({
-                            "id": r.id, "name": r.name, "date_added": r.date_added, "last_played_at": r.last_played_at,
-                        })
+                        StatusRemovedShow {
+                            id: r.id.clone(),
+                            name: r.name.clone(),
+                            date_added: r.date_added.clone(),
+                            last_played_at: r.last_played_at.clone(),
+                        }
                     })
                     .collect();
-                s_adv.push(serde_json::json!({
-                    "last_advance": {"advanced_count": res.advanced_count, "removed_shows": removed}
-                }));
+                s_adv.push_status(StatusPatch::advance(removed, res.advanced_count));
             })),
             on_drained: Some(Box::new(move || {
-                s_drn.push(serde_json::json!({"phase":"drained","message":"every show finished","round":[],"round_id":null}));
+                s_drn.push_status(StatusPatch::drained());
             })),
             on_error: Some(Box::new(move |e| {
-                s_err.push(serde_json::json!({"phase":"error","message":e}));
+                s_err.push_status(StatusPatch::phase(StatusPhase::Error, e));
             })),
             on_file_sync: Some(Box::new(move |report| {
                 let problems: Vec<_> = report
                     .problems
                     .iter()
                     .map(|p| {
-                        serde_json::json!({
-                            "show_name": p.show_name,
-                            "source_path": p.source_path,
-                            "local_path": p.local_path,
-                            "reason": p.reason,
-                        })
+                        StatusFileSyncProblem {
+                            show_name: p.show_name.clone(),
+                            source_path: p.source_path.clone(),
+                            local_path: p.local_path.clone(),
+                            reason: p.reason.clone(),
+                        }
                     })
                     .collect();
-                s_file_sync.push(serde_json::json!({
-                    "file_sync": {
-                        "copied": report.copied,
-                        "cached": report.cached,
-                        "missing": report.missing,
-                        "failed": report.failed,
-                        "summary": report.summary(),
-                        "incomplete": report.incomplete(),
-                        "problems": problems,
-                    }
+                s_file_sync.push_status(StatusPatch::file_sync(StatusFileSync {
+                    copied: report.copied,
+                    cached: report.cached,
+                    missing: report.missing,
+                    failed: report.failed,
+                    summary: report.summary(),
+                    incomplete: report.incomplete(),
+                    problems,
                 }));
             })),
             on_status: Some(Box::new(move |phase, message| {
-                s_status.push(serde_json::json!({"phase": phase, "message": message}));
+                let phase = match phase {
+                    "syncing" => StatusPhase::Syncing,
+                    "fetching" => StatusPhase::Fetching,
+                    _ => StatusPhase::Fetching,
+                };
+                s_status.push_status(StatusPatch::phase(phase, message));
             })),
         }
     };
@@ -314,15 +322,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let s_clone = server.clone();
     compositor.set_status_callback(Box::new(move |updates| {
-        s_clone.push(updates);
+        s_clone.push_raw(updates);
     }));
 
     // Push initial window states
-    server.push(serde_json::json!({
-        "window_maximized": compositor.maximized(),
-        "window_fullscreen": false,
-        "window_pip": false,
-    }));
+    server.push_status(StatusPatch::window_state(compositor.maximized(), false, false));
 
     // Player events (mpv's thread) -> runner.
     {
@@ -349,7 +353,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let (r, s) = (runner.clone(), server.clone());
         player.set_on_pos(Box::new(move |i| {
             r.set_pos(i);
-            s.push(serde_json::json!({"round_pos": i}));
+            s.push_status(StatusPatch::round_pos(i));
         }));
     }
     {
