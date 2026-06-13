@@ -173,8 +173,16 @@ pub fn get_local_path(show_name: &str, relative_path: &str) -> std::path::PathBu
 fn comparable_path_key(path: &std::path::Path) -> String {
     let comparable = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut key = comparable.to_string_lossy().replace('/', "\\");
+    if let Some(rest) = key.strip_prefix(r"\\?\UNC\") {
+        key = format!(r"\\{rest}");
+    } else if let Some(rest) = key.strip_prefix(r"\\?\") {
+        key = rest.to_string();
+    }
     if cfg!(windows) {
         key.make_ascii_lowercase();
+    }
+    while key.ends_with('\\') && key.len() > 3 {
+        key.pop();
     }
     key
 }
@@ -1182,6 +1190,37 @@ mod tests {
             comparable_path_key(std::path::Path::new(r"d:\downloads\watching\show\e01.mkv"));
 
         assert_eq!(upper, lower);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn comparable_path_key_normalizes_verbatim_windows_prefix() {
+        let normal =
+            comparable_path_key(std::path::Path::new(r"D:\Downloads\Watching\Show\E01.mkv"));
+        let verbatim = comparable_path_key(std::path::Path::new(
+            r"\\?\D:\Downloads\Watching\Show\E01.mkv",
+        ));
+
+        assert_eq!(normal, verbatim);
+    }
+
+    #[test]
+    fn prune_keeps_file_marked_active_before_it_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        let active_file = base.join("Show").join("S01").join("E01.mkv");
+        let stale_file = base.join("Stale").join("old.mkv");
+
+        let active_key = comparable_path_key(&active_file);
+        std::fs::create_dir_all(active_file.parent().unwrap()).unwrap();
+        std::fs::write(&active_file, b"active").unwrap();
+        std::fs::create_dir_all(stale_file.parent().unwrap()).unwrap();
+        std::fs::write(&stale_file, b"stale").unwrap();
+
+        prune_unused_files(base, &std::collections::HashSet::from([active_key]));
+
+        assert!(active_file.exists());
+        assert!(!stale_file.exists());
     }
 
     #[test]
