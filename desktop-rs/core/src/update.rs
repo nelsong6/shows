@@ -8,7 +8,7 @@
 //! (set by `.github/workflows/build-desktop.yaml`); a dev `cargo build` has none,
 //! so it's treated as "version unknown" and skips the check.
 
-const RELEASES_LATEST: &str = "https://api.github.com/repos/romaine-life/shows/releases/latest";
+const RELEASES_LATEST: &str = "https://api.github.com/repos/nelsong6/shows/releases/latest";
 const TAG_PREFIX: &str = "desktop-"; // release tags are desktop-<short-sha>
 
 #[derive(Debug, Clone, PartialEq, Eq)]
