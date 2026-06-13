@@ -99,6 +99,8 @@ export type Status = {
   playback?: Playback;
   sync?: SyncState;
   alerts?: StatusAlert[];
+  error_kind?: 'round_unplayable' | string;
+  round_blocked?: boolean;
   update?: UpdateInfo;
   window_maximized?: boolean;
   window_fullscreen?: boolean;

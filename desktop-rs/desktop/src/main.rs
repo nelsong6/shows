@@ -265,7 +265,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 s_drn.push_status(StatusPatch::drained());
             })),
             on_error: Some(Box::new(move |e| {
-                s_err.push_status(StatusPatch::phase(StatusPhase::Error, e));
+                let patch = if e.contains("no playable media") {
+                    StatusPatch::round_unplayable(e)
+                } else {
+                    StatusPatch::phase(StatusPhase::Error, e)
+                };
+                s_err.push_status(patch);
             })),
             on_file_sync: Some(Box::new(move |report| {
                 let problems: Vec<_> = report

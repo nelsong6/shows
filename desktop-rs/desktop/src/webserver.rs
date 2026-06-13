@@ -157,6 +157,14 @@ impl StatusPatch {
         patch
     }
 
+    pub fn round_unplayable(message: impl Into<String>) -> StatusPatch {
+        let mut patch = StatusPatch::phase(StatusPhase::Error, message);
+        patch.fields.insert("error_kind".into(), json!("round_unplayable"));
+        patch.fields.insert("round_blocked".into(), json!(true));
+        patch.fields.insert("round_id".into(), Value::Null);
+        patch
+    }
+
     pub fn file_sync(report: StatusFileSync) -> StatusPatch {
         let mut fields = serde_json::Map::new();
         fields.insert(
@@ -1182,6 +1190,10 @@ fn read_body(request: &mut Request) -> Value {
 
 fn status_alerts(status: &serde_json::Map<String, Value>) -> Value {
     let mut alerts = Vec::new();
+    let round_unplayable = status
+        .get("error_kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "round_unplayable");
 
     if let Some(sync) = status.get("sync").and_then(Value::as_object) {
         let online = sync.get("online").and_then(Value::as_bool).unwrap_or(true);
@@ -1255,6 +1267,18 @@ fn status_alerts(status: &serde_json::Map<String, Value>) -> Value {
             } else {
                 detail_parts.join("\n")
             };
+            if round_unplayable {
+                alerts.push(json!({
+                    "level": "danger",
+                    "title": "Round has no playable media",
+                    "message": status
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("No files in this round could be opened."),
+                    "detail": detail,
+                }));
+                return Value::Array(alerts);
+            }
             alerts.push(json!({
                 "level": "warning",
                 "title": "Round file sync incomplete",
@@ -1403,6 +1427,32 @@ mod tests {
     }
 
     #[test]
+    fn status_alerts_promote_unplayable_round_file_sync() {
+        let mut status = serde_json::Map::new();
+        status.insert("error_kind".into(), json!("round_unplayable"));
+        status.insert("message".into(), json!("no playable media - check that the show files are reachable"));
+        status.insert(
+            "file_sync".into(),
+            json!({
+                "incomplete": true,
+                "summary": "1 missing",
+                "problems": [{
+                    "show_name": "Example",
+                    "source_path": "S:\\missing.mkv",
+                    "local_path": "D:\\Downloads\\Watching\\Example\\missing.mkv",
+                    "reason": "source file missing"
+                }]
+            }),
+        );
+
+        let alerts = status_alerts(&status);
+        assert_eq!(alerts[0]["level"], "danger");
+        assert_eq!(alerts[0]["title"], "Round has no playable media");
+        assert!(alerts[0]["detail"].as_str().unwrap().contains("S:\\missing.mkv"));
+        assert_eq!(alerts.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn status_patch_playing_has_required_round_fields() {
         let patch = StatusPatch::playing(
             vec![StatusRoundEntry {
@@ -1423,6 +1473,18 @@ mod tests {
         assert_eq!(value["round_pos"], 0);
         assert_eq!(value["round_id"], 3);
         assert_eq!(value["round"][0]["show_id"], "s1");
+    }
+
+    #[test]
+    fn status_patch_round_unplayable_marks_blocked_round() {
+        let patch = StatusPatch::round_unplayable("no playable media");
+        let value = Value::Object(patch.fields);
+
+        assert_eq!(value["phase"], "error");
+        assert_eq!(value["message"], "no playable media");
+        assert_eq!(value["error_kind"], "round_unplayable");
+        assert_eq!(value["round_blocked"], true);
+        assert!(value["round_id"].is_null());
     }
 
     #[test]
