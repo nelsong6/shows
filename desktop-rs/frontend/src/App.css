@@ -1530,10 +1530,18 @@ button.gb.toggle-view-btn {
   transition: opacity 0.2s ease;
 }
 
+.pip-overlay:not(.hidden) .pip-top-right,
+.pip-overlay:not(.hidden) .pip-center-controls,
+.pip-overlay:not(.hidden) .pip-progress-bar {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .pip-overlay.hidden .pip-top-right,
 .pip-overlay.hidden .pip-center-controls,
 .pip-overlay.hidden .pip-progress-bar {
   opacity: 0;
+  pointer-events: none;
 }
 
 .overlay-root.window-pip .pip-btn,

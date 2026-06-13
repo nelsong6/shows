@@ -399,7 +399,8 @@ function App() {
   // playback. Any movement brings it back and re-arms the timer.
   useEffect(() => {
     const playing = status.phase === 'playing';
-    if (!playing || showSettings || controlsHovered) {
+    const isPip = Boolean(status.window_pip);
+    if (!playing || showSettings || (controlsHovered && !isPip)) {
       lastMousePos.current = null;
       setControlsIdle(false);
       return;
@@ -2212,6 +2213,7 @@ function PipControlOverlay({
   return (
     <div 
       className={`pip-overlay${controlsIdle ? ' hidden' : ''}`}
+      onMouseEnter={onActivity}
       onMouseMove={handlePointerMove}
       onMouseLeave={onIdle}
     >
