@@ -50,6 +50,8 @@ import './App.css';
 const VOLUME_MIN = 0;
 const VOLUME_MAX = 130;
 const VOLUME_STEP = 5;
+const CONTROLS_IDLE_MS = 2000;
+const MINI_CONTROLS_MAX_VISIBLE_MS = 2500;
 
 function clampVolume(volume: number): number {
   if (!Number.isFinite(volume)) return VOLUME_MIN;
@@ -208,6 +210,7 @@ function App() {
   // handler can re-arm it without re-binding.
   const volOsdTimer = useRef<number | undefined>(undefined);
   const controlsIdleTimer = useRef<number | undefined>(undefined);
+  const miniControlsVisibleCapTimer = useRef<number | undefined>(undefined);
   const wheelVolumeRemainder = useRef(0);
   const controlsIdleRef = useRef(controlsIdle);
 
@@ -221,7 +224,7 @@ function App() {
     volOsdTimer.current = window.setTimeout(() => setVolOsd(null), 1400);
   }, []);
 
-  const armControlsIdle = useCallback((delayMs = 2000) => {
+  const armControlsIdle = useCallback((delayMs = CONTROLS_IDLE_MS) => {
     window.clearTimeout(controlsIdleTimer.current);
     controlsIdleTimer.current = window.setTimeout(() => {
       setControlsHovered(false);
@@ -316,6 +319,16 @@ function App() {
   // Last physical mouse position to prevent synthetic mousemove events from waking up controls.
   const lastMousePos = useRef<{ x: number; y: number } | null>(null);
 
+  const hideControlsNow = useCallback(() => {
+    window.clearTimeout(controlsIdleTimer.current);
+    window.clearTimeout(miniControlsVisibleCapTimer.current);
+    controlsIdleTimer.current = undefined;
+    miniControlsVisibleCapTimer.current = undefined;
+    lastMousePos.current = null;
+    setControlsHovered(false);
+    setControlsIdle(true);
+  }, []);
+
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
   // n=next show, p=previous show, d=defer, f=fullscreen, i=mini player, h=hide all chrome,
@@ -400,6 +413,7 @@ function App() {
       window.removeEventListener('keydown', onKey);
       window.clearTimeout(volOsdTimer.current);
       window.clearTimeout(controlsIdleTimer.current);
+      window.clearTimeout(miniControlsVisibleCapTimer.current);
     };
   }, [adjustVolume, runControl]);
 
@@ -456,6 +470,51 @@ function App() {
       window.removeEventListener('blur', clearPointerDown);
     };
   }, []);
+
+  useEffect(() => {
+    if (!status.window_pip) return;
+    const onPointerLeavesDocument = (event: MouseEvent | PointerEvent) => {
+      if (controlsPointerDown) return;
+      const related = event.relatedTarget;
+      if (related instanceof Node && document.contains(related)) {
+        return;
+      }
+      hideControlsNow();
+    };
+    document.addEventListener('mouseleave', onPointerLeavesDocument);
+    window.addEventListener('mouseout', onPointerLeavesDocument);
+    window.addEventListener('pointerout', onPointerLeavesDocument);
+    return () => {
+      document.removeEventListener('mouseleave', onPointerLeavesDocument);
+      window.removeEventListener('mouseout', onPointerLeavesDocument);
+      window.removeEventListener('pointerout', onPointerLeavesDocument);
+    };
+  }, [status.window_pip, controlsPointerDown, hideControlsNow]);
+
+  useEffect(() => {
+    window.clearTimeout(miniControlsVisibleCapTimer.current);
+    if (
+      status.phase !== 'playing' ||
+      !status.window_pip ||
+      controlsIdle ||
+      showSettings ||
+      controlsPointerDown
+    ) {
+      return;
+    }
+    miniControlsVisibleCapTimer.current = window.setTimeout(
+      hideControlsNow,
+      MINI_CONTROLS_MAX_VISIBLE_MS,
+    );
+    return () => window.clearTimeout(miniControlsVisibleCapTimer.current);
+  }, [
+    status.phase,
+    status.window_pip,
+    controlsIdle,
+    showSettings,
+    controlsPointerDown,
+    hideControlsNow,
+  ]);
 
   useEffect(() => {
     // Re-fetch shows whenever the playlist gains a round or advance — a
