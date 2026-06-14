@@ -120,6 +120,7 @@ function App() {
   const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
   const [controlsIdle, setControlsIdle] = useState(false);
   const [controlsHovered, setControlsHovered] = useState(false);
+  const [controlsPointerDown, setControlsPointerDown] = useState(false);
   // Volume to flash in the transient OSD, or null when hidden.
   const [volOsd, setVolOsd] = useState<number | null>(null);
   const [displayVolume, setDisplayVolume] = useState(100);
@@ -405,11 +406,15 @@ function App() {
 
 
   // Auto-hide the control bar (and cursor) after a short mouse idle during active
-  // playback. Any movement brings it back and re-arms the timer.
+  // playback. Any movement brings it back and re-arms the timer. Mini-player
+  // mode deliberately ignores hover as a keep-open signal because WebView/native
+  // hit testing can miss the matching leave event.
   useEffect(() => {
     const playing = status.phase === 'playing';
+    const miniPlayer = Boolean(status.window_pip);
+    const keepOpen = showSettings || controlsPointerDown || (!miniPlayer && controlsHovered);
     window.clearTimeout(controlsIdleTimer.current);
-    if (!playing || showSettings || controlsHovered) {
+    if (!playing || keepOpen) {
       lastMousePos.current = null;
       setControlsIdle(false);
       return;
@@ -436,7 +441,21 @@ function App() {
       window.clearTimeout(controlsIdleTimer.current);
       window.removeEventListener('mousemove', onActivity);
     };
-  }, [status.phase, showSettings, controlsHovered, armControlsIdle]);
+  }, [status.phase, status.window_pip, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
+
+  useEffect(() => {
+    const clearPointerDown = () => setControlsPointerDown(false);
+    window.addEventListener('mouseup', clearPointerDown);
+    window.addEventListener('pointerup', clearPointerDown);
+    window.addEventListener('pointercancel', clearPointerDown);
+    window.addEventListener('blur', clearPointerDown);
+    return () => {
+      window.removeEventListener('mouseup', clearPointerDown);
+      window.removeEventListener('pointerup', clearPointerDown);
+      window.removeEventListener('pointercancel', clearPointerDown);
+      window.removeEventListener('blur', clearPointerDown);
+    };
+  }, []);
 
   useEffect(() => {
     // Re-fetch shows whenever the playlist gains a round or advance — a
@@ -817,6 +836,7 @@ function App() {
         }}
         controlsIdle={controlsIdle}
         onHoverChange={setControlsHovered}
+        onPointerActiveChange={setControlsPointerDown}
         volume={displayVolume}
         onVolumeChange={requestVolume}
         onVolumeWheel={handleVolumeWheel}
@@ -1030,6 +1050,7 @@ function BottomControlBar({
   onToggleSettings,
   controlsIdle,
   onHoverChange,
+  onPointerActiveChange,
   volume,
   onVolumeChange,
   onVolumeWheel,
@@ -1052,6 +1073,7 @@ function BottomControlBar({
   onToggleSettings: () => void;
   controlsIdle: boolean;
   onHoverChange: (hovered: boolean) => void;
+  onPointerActiveChange: (active: boolean) => void;
   volume: number;
   onVolumeChange: (volume: number, flash?: boolean) => void;
   onVolumeWheel: WheelEventHandler<HTMLDivElement>;
@@ -1109,6 +1131,9 @@ function BottomControlBar({
       className={`bottom-controls${controlsIdle ? ' hidden' : ''}`}
       onMouseEnter={() => onHoverChange(true)}
       onMouseLeave={() => onHoverChange(false)}
+      onPointerDown={() => onPointerActiveChange(true)}
+      onPointerUp={() => onPointerActiveChange(false)}
+      onPointerCancel={() => onPointerActiveChange(false)}
       onWheel={onVolumeWheel}
     >
       {/* 1. Scrub Container */}
