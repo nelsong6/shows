@@ -616,8 +616,12 @@ impl ControlServer {
                 } else {
                     "no".to_string()
                 };
-                self.with_player(|p| p.set_sub(&sid));
-                respond_control_ok(request, "subtitle_updated", "subtitle track updated");
+                if let Some(runner) = self.runner.lock().unwrap().clone() {
+                    respond_control_outcome(request, runner.set_current_subtitle_track(&sid));
+                } else {
+                    self.with_player(|p| p.set_sub(&sid));
+                    respond_control_ok(request, "subtitle_updated", "subtitle track updated");
+                }
             }
             "/audio" => {
                 let b = read_body(&mut request);
@@ -627,9 +631,15 @@ impl ControlServer {
                     b.get("aid").and_then(Value::as_i64).map(|n| n.to_string())
                 };
                 if let Some(aid) = aid {
-                    self.with_player(|p| p.set_audio(&aid));
+                    if let Some(runner) = self.runner.lock().unwrap().clone() {
+                        respond_control_outcome(request, runner.set_current_audio_track(&aid));
+                    } else {
+                        self.with_player(|p| p.set_audio(&aid));
+                        respond_control_ok(request, "audio_updated", "audio track updated");
+                    }
+                } else {
+                    respond_control_ok(request, "audio_updated", "audio track updated");
                 }
-                respond_control_ok(request, "audio_updated", "audio track updated");
             }
             "/library/add" => self.library_add(request),
             "/library/remove" => {
