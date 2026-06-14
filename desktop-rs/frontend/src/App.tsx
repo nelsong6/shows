@@ -207,6 +207,7 @@ function App() {
   // Auto-hide timer for the volume OSD, held in a ref so the mount-once key
   // handler can re-arm it without re-binding.
   const volOsdTimer = useRef<number | undefined>(undefined);
+  const controlsIdleTimer = useRef<number | undefined>(undefined);
   const wheelVolumeRemainder = useRef(0);
   const controlsIdleRef = useRef(controlsIdle);
 
@@ -219,6 +220,26 @@ function App() {
     window.clearTimeout(volOsdTimer.current);
     volOsdTimer.current = window.setTimeout(() => setVolOsd(null), 1400);
   }, []);
+
+  const hideControlsNow = useCallback(() => {
+    window.clearTimeout(controlsIdleTimer.current);
+    controlsIdleTimer.current = undefined;
+    setControlsHovered(false);
+    setControlsIdle(true);
+  }, []);
+
+  const armControlsIdle = useCallback((delayMs = 2000) => {
+    window.clearTimeout(controlsIdleTimer.current);
+    controlsIdleTimer.current = window.setTimeout(() => {
+      setControlsHovered(false);
+      setControlsIdle(true);
+    }, delayMs);
+  }, []);
+
+  const showControlsBriefly = useCallback((delayMs = 2000) => {
+    setControlsIdle(false);
+    armControlsIdle(delayMs);
+  }, [armControlsIdle]);
 
   const pumpVolumeQueue = useCallback(() => {
     const sync = volumeSync.current;
@@ -390,6 +411,7 @@ function App() {
     return () => {
       window.removeEventListener('keydown', onKey);
       window.clearTimeout(volOsdTimer.current);
+      window.clearTimeout(controlsIdleTimer.current);
     };
   }, [adjustVolume, runControl]);
 
@@ -400,6 +422,7 @@ function App() {
   useEffect(() => {
     const playing = status.phase === 'playing';
     const isPip = Boolean(status.window_pip);
+    window.clearTimeout(controlsIdleTimer.current);
     if (!playing || showSettings || (controlsHovered && !isPip)) {
       lastMousePos.current = null;
       setControlsIdle(false);
@@ -409,30 +432,33 @@ function App() {
     setControlsIdle(true);
     lastMousePos.current = null;
     
-    let timer: number | undefined;
-    const arm = () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => setControlsIdle(true), 2000);
-    };
     const onActivity = (e?: MouseEvent) => {
       if (e) {
         const previous = lastMousePos.current;
         const current = { x: e.screenX, y: e.screenY };
         lastMousePos.current = current;
-        if (!previous || (current.x === previous.x && current.y === previous.y)) {
+        if (!isPip && !previous) {
+          return;
+        }
+        if (previous && current.x === previous.x && current.y === previous.y) {
           return;
         }
       }
-      setControlsIdle(false);
-      arm();
+      let idleDelay = 2000;
+      if (isPip) {
+        const target = e?.target;
+        const overControls = target instanceof HTMLElement && Boolean(target.closest('.pip-hover-zone'));
+        idleDelay = overControls ? 2000 : 700;
+      }
+      showControlsBriefly(idleDelay);
     };
     window.addEventListener('mousemove', onActivity);
-    arm();
+    armControlsIdle();
     return () => {
-      window.clearTimeout(timer);
+      window.clearTimeout(controlsIdleTimer.current);
       window.removeEventListener('mousemove', onActivity);
     };
-  }, [status.phase, showSettings, controlsHovered]);
+  }, [status.phase, status.window_pip, showSettings, controlsHovered, armControlsIdle, showControlsBriefly]);
 
   useEffect(() => {
     if (!status.window_pip) return;
@@ -814,11 +840,8 @@ function App() {
           pos={pos}
           controlsIdle={controlsIdle}
           onHoverChange={setControlsHovered}
-          onActivity={() => setControlsIdle(false)}
-          onIdle={() => {
-            setControlsHovered(false);
-            setControlsIdle(true);
-          }}
+          onActivity={showControlsBriefly}
+          onIdle={hideControlsNow}
           displayPaused={displayPaused}
           onRequestPause={requestPause}
           onPrevious={() => runControl(previous)}
@@ -2193,7 +2216,7 @@ function PipControlOverlay({
   pos: number;
   controlsIdle: boolean;
   onHoverChange: (hovered: boolean) => void;
-  onActivity: () => void;
+  onActivity: (delayMs?: number) => void;
   onIdle: () => void;
   displayPaused: boolean;
   onRequestPause: (paused: boolean) => void;
@@ -2204,16 +2227,29 @@ function PipControlOverlay({
 }) {
   const roundLen = status.round?.length || 1;
   const progressPct = Math.min(100, Math.max(0, (pos / roundLen) * 100));
+  const upgradeTimerIfPointerLandsOnControls = (clientX: number, clientY: number) => {
+    window.setTimeout(() => {
+      const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      if (target?.closest('.pip-hover-zone')) {
+        onHoverChange(true);
+        onActivity(2000);
+      }
+    }, 40);
+  };
   const handlePointerMove = (event: ReactMouseEvent<HTMLDivElement>) => {
-    onActivity();
     const target = event.target as HTMLElement | null;
-    onHoverChange(Boolean(target?.closest('.pip-hover-zone')));
+    const overControls = Boolean(target?.closest('.pip-hover-zone'));
+    onHoverChange(overControls);
+    onActivity(overControls ? 2000 : 700);
+    if (!overControls) {
+      upgradeTimerIfPointerLandsOnControls(event.clientX, event.clientY);
+    }
   };
 
   return (
     <div 
       className={`pip-overlay${controlsIdle ? ' hidden' : ''}`}
-      onMouseEnter={onActivity}
+      onMouseEnter={handlePointerMove}
       onMouseMove={handlePointerMove}
       onMouseLeave={onIdle}
     >
