@@ -472,6 +472,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!status.window_pip || status.mini_pointer_inside !== false) return;
+    setControlsPointerDown(false);
+    hideControlsNow();
+  }, [status.window_pip, status.mini_pointer_inside, hideControlsNow]);
+
+  useEffect(() => {
     if (!status.window_pip) return;
     const onPointerLeavesDocument = (event: MouseEvent | PointerEvent) => {
       if (controlsPointerDown) return;

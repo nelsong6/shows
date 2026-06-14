@@ -212,6 +212,7 @@ impl StatusPatch {
         fields.insert("window_maximized".into(), json!(maximized));
         fields.insert("window_fullscreen".into(), json!(fullscreen));
         fields.insert("window_pip".into(), json!(pip));
+        fields.insert("mini_pointer_inside".into(), json!(false));
         StatusPatch { fields }
     }
 }
@@ -253,6 +254,7 @@ impl ControlServer {
         status.insert("window_maximized".into(), json!(false));
         status.insert("window_fullscreen".into(), json!(false));
         status.insert("window_pip".into(), json!(false));
+        status.insert("mini_pointer_inside".into(), json!(false));
         Arc::new(ControlServer {
             dist_dir,
             playlists,
@@ -1520,6 +1522,7 @@ mod tests {
         assert_eq!(value["window_maximized"], false);
         assert_eq!(value["window_fullscreen"], false);
         assert_eq!(value["window_pip"], false);
+        assert_eq!(value["mini_pointer_inside"], false);
         assert!(value["alerts"].is_array());
     }
 

@@ -228,6 +228,7 @@ struct State {
     cursor: HCURSOR,
     arrow: HCURSOR,
     cursor_motion: CursorMotion,
+    mini_pointer_inside: bool,
     _target: IDCompositionTarget,
     _root: IDCompositionVisual,
     _bottom: IDCompositionVisual,
@@ -401,6 +402,7 @@ impl Compositor {
                 cursor: arrow,
                 arrow,
                 cursor_motion: CursorMotion::new(current_cursor_screen_pos()),
+                mini_pointer_inside: false,
                 _target: target,
                 _root: root,
                 _bottom: bottom,
@@ -550,6 +552,18 @@ fn is_cursor_in_window(hwnd: HWND) -> bool {
     }
 }
 
+fn set_mini_pointer_inside(st: &mut State, inside: bool, reason: &str) -> bool {
+    if !st.is_pip || st.mini_pointer_inside == inside {
+        return false;
+    }
+    st.mini_pointer_inside = inside;
+    log::info!("mini pointer inside={inside} reason={reason}");
+    if let Some(cb) = &st.status_callback {
+        cb(serde_json::json!({ "mini_pointer_inside": inside }));
+    }
+    true
+}
+
 fn render(s: &State) {
     unsafe {
         s.gl.render(); // mpv OpenGL render -> the shared D3D texture
@@ -690,6 +704,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                                 SetCursor(Some(st.arrow));
                                 st.cursor = st.arrow;
                             }
+                            set_mini_pointer_inside(st, true, "client-mousemove");
                         }
                     });
                 }
@@ -726,6 +741,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
                 });
                 if is_pip {
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: TME_LEAVE | windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT_FLAGS(0x00000010), // TME_NONCLIENT
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0,
+                    };
+                    let _ = TrackMouseEvent(&mut tme);
+                    STATE.with(|s| {
+                        if let Some(st) = s.borrow_mut().as_mut() {
+                            let changed = set_mini_pointer_inside(st, false, "nonclient-mousemove");
+                            if changed {
+                                let _ = st.controller.SendMouseInput(
+                                    COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+                                    COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
+                                    0,
+                                    POINT { x: 0, y: 0 },
+                                );
+                            }
+                        }
+                    });
                     return DefWindowProcW(hwnd, msg, w, l);
                 }
 
@@ -756,16 +791,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 DefWindowProcW(hwnd, msg, w, l)
             }
             0x02A2 => { // WM_NCMOUSELEAVE
-                let is_pip = STATE.with(|s| {
-                    s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
-                });
-                if is_pip {
-                    return DefWindowProcW(hwnd, msg, w, l);
-                }
-
-                if !is_cursor_in_window(hwnd) {
-                    STATE.with(|s| {
-                        if let Some(st) = s.borrow().as_ref() {
+                let cursor_in_window = is_cursor_in_window(hwnd);
+                STATE.with(|s| {
+                    if let Some(st) = s.borrow_mut().as_mut() {
+                        if st.is_pip || !cursor_in_window {
+                            set_mini_pointer_inside(st, false, "nonclient-mouseleave");
                             let _ = st.controller.SendMouseInput(
                                 COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
                                 COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
@@ -773,8 +803,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                                 POINT { x: 0, y: 0 },
                             );
                         }
-                    });
-                }
+                    }
+                });
                 DefWindowProcW(hwnd, msg, w, l)
             }
             WM_SETCURSOR => {
@@ -823,9 +853,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
-                if !is_cursor_in_window(hwnd) {
-                    STATE.with(|s| {
-                        if let Some(st) = s.borrow().as_ref() {
+                let cursor_in_window = is_cursor_in_window(hwnd);
+                STATE.with(|s| {
+                    if let Some(st) = s.borrow_mut().as_mut() {
+                        if st.is_pip || !cursor_in_window {
+                            set_mini_pointer_inside(st, false, "client-mouseleave");
                             let _ = st.controller.SendMouseInput(
                                 COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
                                 COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
@@ -833,8 +865,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                                 POINT { x: 0, y: 0 },
                             );
                         }
-                    });
-                }
+                    }
+                });
                 LRESULT(0)
             }
             WM_SETFOCUS => {
@@ -1035,8 +1067,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         st.saved_style = saved_style;
                         st.saved_exstyle = saved_exstyle;
                         st.is_pip = true;
+                        st.mini_pointer_inside = true;
+                        log::info!("mini pointer inside=true reason=enter-mini");
                         if let Some(cb) = &st.status_callback {
-                            cb(serde_json::json!({ "window_pip": true }));
+                            cb(serde_json::json!({
+                                "window_pip": true,
+                                "mini_pointer_inside": true,
+                            }));
                         }
                         let new_style = pip_window_style(saved_style);
                         
@@ -1064,8 +1101,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                             restore_rect: st.saved_rect,
                         };
                         st.is_pip = false;
+                        st.mini_pointer_inside = false;
+                        log::info!("mini pointer inside=false reason=exit-mini");
                         if let Some(cb) = &st.status_callback {
-                            cb(serde_json::json!({ "window_pip": false }));
+                            cb(serde_json::json!({
+                                "window_pip": false,
+                                "mini_pointer_inside": false,
+                            }));
                         }
                         Some(action)
                     }

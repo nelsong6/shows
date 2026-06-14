@@ -18,6 +18,9 @@ This contract is intentionally frontend-facing. Any field used by
 - `round_id`: monotonically increasing desktop-local round identity, or `null` when no round is active.
 - `window_maximized`, `window_fullscreen`, `window_pip`: current shell state.
   `window_pip` means the native mini-player/always-on-top mode is active.
+- `mini_pointer_inside`: true only while mini-player mode is active and native
+  input tracking reports the pointer inside the mini player's WebView/client
+  content area. Native titlebar/chrome counts as outside for control hiding.
 
 ## Round Entry
 

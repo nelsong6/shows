@@ -124,6 +124,7 @@ export type Status = {
   window_maximized?: boolean;
   window_fullscreen?: boolean;
   window_pip?: boolean;
+  mini_pointer_inside?: boolean;
 };
 
 export type Show = {
