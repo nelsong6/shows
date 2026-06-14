@@ -837,7 +837,6 @@ function App() {
       {status.window_pip ? (
         <PipControlOverlay
           status={status}
-          pos={pos}
           controlsIdle={controlsIdle}
           onHoverChange={setControlsHovered}
           onActivity={showControlsBriefly}
@@ -1031,6 +1030,17 @@ function fmtTime(s: number | null | undefined): string {
   return (h > 0 ? `${h}:` : '') + `${mm}:${String(sec).padStart(2, '0')}`;
 }
 
+function playbackProgressPercent(pb: Playback | undefined): number {
+  if (!pb) return 0;
+  const pct = pb.percent_pos ?? (
+    pb.duration && pb.duration > 0 && pb.time_pos != null
+      ? (pb.time_pos / pb.duration) * 100
+      : 0
+  );
+  if (!Number.isFinite(pct)) return 0;
+  return Math.min(100, Math.max(0, pct));
+}
+
 // Transient volume indicator. Flashes bottom-center on ↑/↓ and auto-hides —
 // the only volume feedback when chrome ('h') or the dashboard is hidden and the
 // PlaybackBar's slider isn't on screen. Display-only (pointer-events:none); the
@@ -1103,9 +1113,7 @@ function BottomControlBar({
   onToggleFullscreen: () => void;
 }) {
   const pb = status.playback;
-  const pct = pb
-    ? pb.percent_pos ?? (pb.duration && pb.time_pos != null ? (pb.time_pos / pb.duration) * 100 : 0)
-    : 0;
+  const pct = playbackProgressPercent(pb);
 
   const [lastVolume, setLastVolume] = useState(100);
 
@@ -2200,7 +2208,6 @@ function NextRoundTab({ currentRound, onSelectShow }: { currentRound: any[], onS
 
 function PipControlOverlay({
   status,
-  pos,
   controlsIdle,
   onHoverChange,
   onActivity,
@@ -2213,7 +2220,6 @@ function PipControlOverlay({
   onCloseWindow,
 }: {
   status: Status;
-  pos: number;
   controlsIdle: boolean;
   onHoverChange: (hovered: boolean) => void;
   onActivity: (delayMs?: number) => void;
@@ -2225,8 +2231,7 @@ function PipControlOverlay({
   onTogglePip: () => void;
   onCloseWindow: () => void;
 }) {
-  const roundLen = status.round?.length || 1;
-  const progressPct = Math.min(100, Math.max(0, (pos / roundLen) * 100));
+  const progressPct = playbackProgressPercent(status.playback);
   const upgradeTimerIfPointerLandsOnControls = (clientX: number, clientY: number) => {
     window.setTimeout(() => {
       const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
