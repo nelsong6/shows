@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type WheelEventHandler } from 'react';
+import { useCallback, useEffect, useRef, useState, type WheelEventHandler } from 'react';
 import {
   subscribeStatus,
   listShows,
@@ -24,7 +24,6 @@ import {
   syncNow,
   removeRoundEntry,
   reloadRound,
-  recordPipUiDebug,
   addShow,
   previewShow,
   detectNewFolders,
@@ -221,13 +220,6 @@ function App() {
     volOsdTimer.current = window.setTimeout(() => setVolOsd(null), 1400);
   }, []);
 
-  const hideControlsNow = useCallback(() => {
-    window.clearTimeout(controlsIdleTimer.current);
-    controlsIdleTimer.current = undefined;
-    setControlsHovered(false);
-    setControlsIdle(true);
-  }, []);
-
   const armControlsIdle = useCallback((delayMs = 2000) => {
     window.clearTimeout(controlsIdleTimer.current);
     controlsIdleTimer.current = window.setTimeout(() => {
@@ -235,11 +227,6 @@ function App() {
       setControlsIdle(true);
     }, delayMs);
   }, []);
-
-  const showControlsBriefly = useCallback((delayMs = 2000) => {
-    setControlsIdle(false);
-    armControlsIdle(delayMs);
-  }, [armControlsIdle]);
 
   const pumpVolumeQueue = useCallback(() => {
     const sync = volumeSync.current;
@@ -330,7 +317,7 @@ function App() {
 
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
-  // n=next show, p=previous show, d=defer, f=fullscreen, i=pip, h=hide all chrome,
+  // n=next show, p=previous show, d=defer, f=fullscreen, i=mini player, h=hide all chrome,
   // c=toggle closed captions, ←/→ (or j/l)=seek -/+10s, ↑/↓=volume, v/Tab=dashboard,
   // Esc=hide dashboard.
   useEffect(() => {
@@ -421,9 +408,8 @@ function App() {
   // playback. Any movement brings it back and re-arms the timer.
   useEffect(() => {
     const playing = status.phase === 'playing';
-    const isPip = Boolean(status.window_pip);
     window.clearTimeout(controlsIdleTimer.current);
-    if (!playing || showSettings || (controlsHovered && !isPip)) {
+    if (!playing || showSettings || controlsHovered) {
       lastMousePos.current = null;
       setControlsIdle(false);
       return;
@@ -437,20 +423,12 @@ function App() {
         const previous = lastMousePos.current;
         const current = { x: e.screenX, y: e.screenY };
         lastMousePos.current = current;
-        if (!isPip && !previous) {
-          return;
-        }
-        if (previous && current.x === previous.x && current.y === previous.y) {
+        if (!previous || (current.x === previous.x && current.y === previous.y)) {
           return;
         }
       }
-      let idleDelay = 2000;
-      if (isPip) {
-        const target = e?.target;
-        const overControls = target instanceof HTMLElement && Boolean(target.closest('.pip-hover-zone'));
-        idleDelay = overControls ? 2000 : 700;
-      }
-      showControlsBriefly(idleDelay);
+      setControlsIdle(false);
+      armControlsIdle();
     };
     window.addEventListener('mousemove', onActivity);
     armControlsIdle();
@@ -458,16 +436,7 @@ function App() {
       window.clearTimeout(controlsIdleTimer.current);
       window.removeEventListener('mousemove', onActivity);
     };
-  }, [status.phase, status.window_pip, showSettings, controlsHovered, armControlsIdle, showControlsBriefly]);
-
-  useEffect(() => {
-    if (!status.window_pip) return;
-    void recordPipUiDebug({
-      controls_idle: controlsIdle,
-      controls_hovered: controlsHovered,
-      window_pip: true,
-    }).catch(() => {});
-  }, [status.window_pip, controlsIdle, controlsHovered]);
+  }, [status.phase, showSettings, controlsHovered, armControlsIdle]);
 
   useEffect(() => {
     // Re-fetch shows whenever the playlist gains a round or advance — a
@@ -834,49 +803,33 @@ function App() {
           onWheel={handleVolumeWheel}
         />
       )}
-      {status.window_pip ? (
-        <PipControlOverlay
-          status={status}
-          controlsIdle={controlsIdle}
-          onHoverChange={setControlsHovered}
-          onActivity={showControlsBriefly}
-          onIdle={hideControlsNow}
-          displayPaused={displayPaused}
-          onRequestPause={requestPause}
-          onPrevious={() => runControl(previous)}
-          onSkip={() => runControl(skip)}
-          onTogglePip={() => runControl(togglePip)}
-          onCloseWindow={() => runControl(closeWindow)}
-        />
-      ) : (
-        <BottomControlBar
-          status={status}
-          pos={pos}
-          playing={playing}
-          viewing={showSettings}
-          onToggleView={() => {
-            setShowSettings((v) => !v);
-          }}
-          viewingSettings={showSettings}
-          onToggleSettings={() => {
-            setShowSettings((v) => !v);
-          }}
-          controlsIdle={controlsIdle}
-          onHoverChange={setControlsHovered}
-          volume={displayVolume}
-          onVolumeChange={requestVolume}
-          onVolumeWheel={handleVolumeWheel}
-          displayPaused={displayPaused}
-          onRequestPause={requestPause}
-          onPrevious={() => runControl(previous)}
-          onSeekRelative={(seconds) => runControl(() => seekRelative(seconds))}
-          onSkip={() => runControl(skip)}
-          onDefer={() => runControl(defer)}
-          onSyncNow={() => runControl(syncNow, {success: true})}
-          onTogglePip={() => runControl(togglePip)}
-          onToggleFullscreen={() => runControl(toggleFullscreen)}
-        />
-      )}
+      <BottomControlBar
+        status={status}
+        pos={pos}
+        playing={playing}
+        viewing={showSettings}
+        onToggleView={() => {
+          setShowSettings((v) => !v);
+        }}
+        viewingSettings={showSettings}
+        onToggleSettings={() => {
+          setShowSettings((v) => !v);
+        }}
+        controlsIdle={controlsIdle}
+        onHoverChange={setControlsHovered}
+        volume={displayVolume}
+        onVolumeChange={requestVolume}
+        onVolumeWheel={handleVolumeWheel}
+        displayPaused={displayPaused}
+        onRequestPause={requestPause}
+        onPrevious={() => runControl(previous)}
+        onSeekRelative={(seconds) => runControl(() => seekRelative(seconds))}
+        onSkip={() => runControl(skip)}
+        onDefer={() => runControl(defer)}
+        onSyncNow={() => runControl(syncNow, {success: true})}
+        onTogglePip={() => runControl(togglePip)}
+        onToggleFullscreen={() => runControl(toggleFullscreen)}
+      />
     </div>
   );
 }
@@ -1348,9 +1301,9 @@ function BottomControlBar({
           </button>
 
           <button
-            className="control-btn pip-btn"
+            className={`control-btn pip-btn${status.window_pip ? ' active' : ''}`}
             onClick={onTogglePip}
-            title="Picture in Picture (i)"
+            title={status.window_pip ? 'Exit Mini Player (i)' : 'Mini Player / Always on Top (i)'}
           >
             <PipIcon />
           </button>
@@ -2203,96 +2156,6 @@ function NextRoundTab({ currentRound, onSelectShow }: { currentRound: any[], onS
         )}
       </div>
     </>
-  );
-}
-
-function PipControlOverlay({
-  status,
-  controlsIdle,
-  onHoverChange,
-  onActivity,
-  onIdle,
-  displayPaused,
-  onRequestPause,
-  onPrevious,
-  onSkip,
-  onTogglePip,
-  onCloseWindow,
-}: {
-  status: Status;
-  controlsIdle: boolean;
-  onHoverChange: (hovered: boolean) => void;
-  onActivity: (delayMs?: number) => void;
-  onIdle: () => void;
-  displayPaused: boolean;
-  onRequestPause: (paused: boolean) => void;
-  onPrevious: () => void;
-  onSkip: () => void;
-  onTogglePip: () => void;
-  onCloseWindow: () => void;
-}) {
-  const progressPct = playbackProgressPercent(status.playback);
-  const upgradeTimerIfPointerLandsOnControls = (clientX: number, clientY: number) => {
-    window.setTimeout(() => {
-      const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-      if (target?.closest('.pip-hover-zone')) {
-        onHoverChange(true);
-        onActivity(2000);
-      }
-    }, 40);
-  };
-  const handlePointerMove = (event: ReactMouseEvent<HTMLDivElement>) => {
-    const target = event.target as HTMLElement | null;
-    const overControls = Boolean(target?.closest('.pip-hover-zone'));
-    onHoverChange(overControls);
-    onActivity(overControls ? 2000 : 700);
-    if (!overControls) {
-      upgradeTimerIfPointerLandsOnControls(event.clientX, event.clientY);
-    }
-  };
-
-  return (
-    <div 
-      className={`pip-overlay${controlsIdle ? ' hidden' : ''}`}
-      onMouseEnter={handlePointerMove}
-      onMouseMove={handlePointerMove}
-      onMouseLeave={onIdle}
-    >
-      <div
-        className="pip-top-right pip-hover-zone"
-      >
-        <button className="pip-btn" onClick={onTogglePip} title="Back to tab">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H3V5h18v14zm-10-7h9v6h-9z" /></svg>
-        </button>
-        <button className="pip-btn" onClick={onCloseWindow} title="Close">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-        </button>
-      </div>
-
-      <div
-        className="pip-center-controls pip-hover-zone"
-      >
-        <button className="pip-btn center-btn" onClick={onPrevious} title="Previous">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" /></svg>
-        </button>
-        <button className="pip-btn center-btn play-btn" onClick={() => onRequestPause(!displayPaused)}>
-          {displayPaused ? (
-             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
-          ) : (
-             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
-          )}
-        </button>
-        <button className="pip-btn center-btn" onClick={onSkip} title="Next">
-          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z" /></svg>
-        </button>
-      </div>
-
-      <div
-        className="pip-progress-bar pip-hover-zone"
-      >
-        <div className="pip-progress-fill" style={{ width: `${progressPct}%` }} />
-      </div>
-    </div>
   );
 }
 

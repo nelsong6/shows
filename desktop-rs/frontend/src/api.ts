@@ -97,12 +97,6 @@ export type FileSyncStatus = {
   problems: FileSyncProblem[];
 };
 
-export type PipUiDebug = {
-  controls_idle: boolean;
-  controls_hovered: boolean;
-  window_pip: boolean;
-};
-
 // Set by the launch update-check when this build is behind the latest release.
 export type UpdateInfo = {
   available: boolean;
@@ -130,7 +124,6 @@ export type Status = {
   window_maximized?: boolean;
   window_fullscreen?: boolean;
   window_pip?: boolean;
-  pip_ui?: PipUiDebug;
 };
 
 export type Show = {
@@ -267,7 +260,7 @@ export async function toggleFullscreen(): Promise<ControlResult> {
   return postControl('/fullscreen');
 }
 
-// Toggle the window between windowed and picture-in-picture mode.
+// Toggle the window between normal and mini-player always-on-top mode.
 export async function togglePip(): Promise<ControlResult> {
   return postControl('/pip');
 }
@@ -291,10 +284,6 @@ export async function setSub(sid: number | string): Promise<ControlResult> {
 
 export async function setAudio(aid: number | string): Promise<ControlResult> {
   return postControl('/audio', {aid});
-}
-
-export async function recordPipUiDebug(payload: PipUiDebug): Promise<void> {
-  await postControl('/debug/pip-ui', payload);
 }
 
 // Manual "check connectivity" / reconcile — push queued changes + pull.

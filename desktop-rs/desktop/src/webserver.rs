@@ -233,7 +233,6 @@ pub struct ControlServer {
     on_fullscreen: Mutex<Option<FullscreenCb>>,
     on_pip: Mutex<Option<PipCb>>,
     on_window_action: Mutex<Option<WindowActionCb>>,
-    pip_debug: bool,
 }
 
 impl ControlServer {
@@ -267,7 +266,6 @@ impl ControlServer {
             on_fullscreen: Mutex::new(None),
             on_pip: Mutex::new(None),
             on_window_action: Mutex::new(None),
-            pip_debug: std::env::var_os("SHOWS_PIP_DEBUG").is_some(),
         })
     }
 
@@ -543,7 +541,7 @@ impl ControlServer {
                 if let Some(cb) = self.on_pip.lock().unwrap().as_ref() {
                     cb();
                 }
-                respond_control_ok(request, "pip_toggled", "picture in picture toggled");
+                respond_control_ok(request, "pip_toggled", "mini player toggled");
             }
             "/window/minimize" => {
                 if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
@@ -630,14 +628,6 @@ impl ControlServer {
                     self.with_player(|p| p.set_audio(&aid));
                 }
                 respond_control_ok(request, "audio_updated", "audio track updated");
-            }
-            "/debug/pip-ui" => {
-                let b = read_body(&mut request);
-                if self.pip_debug {
-                    log::info!("pip ui: {b}");
-                    self.push_raw(json!({"pip_ui": b}));
-                }
-                respond_control_ok(request, "pip_ui_debug_recorded", "pip ui debug recorded");
             }
             "/library/add" => self.library_add(request),
             "/library/remove" => {

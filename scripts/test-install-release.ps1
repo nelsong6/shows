@@ -135,9 +135,9 @@ Invoke-Control "pause?state=true" | Out-Null
 
 if (-not $SkipSmoke) {
   Invoke-Control "pip" | Out-Null
-  Wait-StatusField "window_pip" $true "PIP to turn on"
+  Wait-StatusField "window_pip" $true "mini player to turn on"
   Invoke-Control "pip" | Out-Null
-  Wait-StatusField "window_pip" $false "PIP to turn off"
+  Wait-StatusField "window_pip" $false "mini player to turn off"
 
   $beforeMaximize = [bool](Get-DesktopStatus).window_maximized
   Invoke-Control "window/maximize" | Out-Null

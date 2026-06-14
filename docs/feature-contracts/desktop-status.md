@@ -17,6 +17,7 @@ This contract is intentionally frontend-facing. Any field used by
 - `round_pos`: zero-based index into `round`. Valid when `phase == "playing"` and `round` is non-empty.
 - `round_id`: monotonically increasing desktop-local round identity, or `null` when no round is active.
 - `window_maximized`, `window_fullscreen`, `window_pip`: current shell state.
+  `window_pip` means the native mini-player/always-on-top mode is active.
 
 ## Round Entry
 
@@ -93,12 +94,3 @@ The frontend must then call `POST /round/reload`. Reload interrupts the player,
 causing the runner to rebuild from the repaired `round_queue` without restarting
 the app. Reload is deliberate; removing entries alone does not mutate the
 already-loaded in-memory playlist.
-
-## Debug Fields
-
-When the desktop is launched with `SHOWS_PIP_DEBUG=1`, status may include:
-
-- `pip_ui`: React overlay diagnostics with `controls_idle`, `controls_hovered`,
-  and `window_pip`.
-
-This field is diagnostic only. Frontend behavior must not depend on it.
