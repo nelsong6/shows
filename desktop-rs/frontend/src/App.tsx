@@ -1190,6 +1190,123 @@ function BottomControlBar({
 
   const isMuted = pb ? volume === 0 : false;
   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
+  const miniPlayer = Boolean(status.window_pip);
+  const [compactViewport, setCompactViewport] = useState(() => window.innerWidth <= 900);
+
+  useEffect(() => {
+    const onResize = () => setCompactViewport(window.innerWidth <= 900);
+    window.addEventListener('resize', onResize);
+    onResize();
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const renderScrub = (compact: boolean) => (
+    <div className={`scrub-container${compact ? ' mini-scrub-container' : ''}`}>
+      {!compact && <span className="time-display">{pb ? fmtTime(pb.time_pos) : '--:--'}</span>}
+      <div
+        className={`scrub-bar${!pb ? ' disabled' : ''}`}
+        onClick={(e) => {
+          if (!pb) return;
+          const r = e.currentTarget.getBoundingClientRect();
+          void seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
+        }}
+      >
+        <div className="scrub-fill" style={{ width: `${pct}%` }} />
+        <div className="scrub-handle" style={{ left: `${pct}%` }} />
+      </div>
+      {!compact && <span className="time-display">{pb ? fmtTime(pb.duration) : '--:--'}</span>}
+    </div>
+  );
+
+  if (miniPlayer || compactViewport) {
+    return (
+      <div
+        className={`bottom-controls mini-controls${miniPlayer ? ' pip-mini-controls' : ''}${controlsIdle ? ' hidden' : ''}`}
+        onMouseEnter={() => onHoverChange(true)}
+        onMouseLeave={() => onHoverChange(false)}
+        onPointerDown={() => onPointerActiveChange(true)}
+        onPointerUp={() => onPointerActiveChange(false)}
+        onPointerCancel={() => onPointerActiveChange(false)}
+        onWheel={onVolumeWheel}
+      >
+        {renderScrub(true)}
+
+        <div className="mini-controls-row">
+          <button
+            className="control-btn"
+            onClick={onPrevious}
+            disabled={!playing}
+            title="Previous Show (p)"
+          >
+            <PrevIcon />
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={() => onSeekRelative(-10)}
+            disabled={!pb}
+            title="Rewind 10s (j / ←)"
+          >
+            <RewindIcon />
+          </button>
+
+          <button
+            className="control-btn play-pause-btn"
+            onClick={() => onRequestPause(!displayPaused)}
+            disabled={!playing}
+            title="Play / Pause (Space)"
+          >
+            {displayPaused ? <PlayIcon /> : <PauseIcon />}
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={() => onSeekRelative(10)}
+            disabled={!pb}
+            title="Forward 10s (l / →)"
+          >
+            <ForwardIcon />
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={onSkip}
+            disabled={!playing}
+            title="Skip Show (n)"
+          >
+            <NextIcon />
+          </button>
+
+          {pb && pb.sub_tracks.length > 0 && (
+            <button
+              className={`control-btn cc-btn${ccActive ? ' active' : ''}`}
+              onClick={handleToggleCc}
+              title="Toggle Captions (c)"
+            >
+              <CcIcon />
+            </button>
+          )}
+
+          <button
+            className="control-btn volume-btn"
+            onClick={handleToggleMute}
+            disabled={!pb}
+            title="Mute / Unmute (Up/Down Arrows or mouse wheel to adjust)"
+          >
+            {isMuted ? <VolumeMuteIcon /> : <VolumeIcon />}
+          </button>
+
+          <button
+            className={`control-btn pip-btn${miniPlayer ? ' active' : ''}`}
+            onClick={onTogglePip}
+            title={miniPlayer ? 'Exit Mini Player (i)' : 'Mini Player / Always on Top (i)'}
+          >
+            <PipIcon />
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1202,21 +1319,7 @@ function BottomControlBar({
       onWheel={onVolumeWheel}
     >
       {/* 1. Scrub Container */}
-      <div className="scrub-container">
-        <span className="time-display">{pb ? fmtTime(pb.time_pos) : '--:--'}</span>
-        <div
-          className={`scrub-bar${!pb ? ' disabled' : ''}`}
-          onClick={(e) => {
-            if (!pb) return;
-            const r = e.currentTarget.getBoundingClientRect();
-            void seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
-          }}
-        >
-          <div className="scrub-fill" style={{ width: `${pct}%` }} />
-          <div className="scrub-handle" style={{ left: `${pct}%` }} />
-        </div>
-        <span className="time-display">{pb ? fmtTime(pb.duration) : '--:--'}</span>
-      </div>
+      {renderScrub(false)}
 
       {/* 2. Controls Row */}
       <div className="controls-row">
