@@ -16,8 +16,10 @@ This contract is intentionally frontend-facing. Any field used by
 - `round`: array of current round entries. Empty when no round is active.
 - `round_pos`: zero-based index into `round`. Valid when `phase == "playing"` and `round` is non-empty.
 - `round_id`: monotonically increasing desktop-local round identity, or `null` when no round is active.
-- `window_maximized`, `window_fullscreen`, `window_pip`: current shell state.
-  `window_pip` means the native mini-player/always-on-top mode is active.
+- `window_maximized`, `window_fullscreen`, `window_on_top`: current shell state.
+  `window_on_top` means the window floats above others (topmost Z-order); chrome
+  and layout are otherwise identical to windowed mode. See
+  [`desktop-shell.md`](desktop-shell.md) for the full shell contract.
 
 ## Round Entry
 

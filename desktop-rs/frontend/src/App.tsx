@@ -12,7 +12,7 @@ import {
   markShowUnwatched,
   defer,
   toggleFullscreen,
-  togglePip,
+  toggleStayOnTop,
   minimizeWindow,
   maximizeWindow,
   closeWindow,
@@ -51,7 +51,6 @@ const VOLUME_MIN = 0;
 const VOLUME_MAX = 130;
 const VOLUME_STEP = 5;
 const CONTROLS_IDLE_MS = 2000;
-const MINI_CONTROLS_MAX_VISIBLE_MS = 2500;
 
 function clampVolume(volume: number): number {
   if (!Number.isFinite(volume)) return VOLUME_MIN;
@@ -210,7 +209,6 @@ function App() {
   // handler can re-arm it without re-binding.
   const volOsdTimer = useRef<number | undefined>(undefined);
   const controlsIdleTimer = useRef<number | undefined>(undefined);
-  const miniControlsVisibleCapTimer = useRef<number | undefined>(undefined);
   const wheelVolumeRemainder = useRef(0);
   const controlsIdleRef = useRef(controlsIdle);
 
@@ -319,19 +317,9 @@ function App() {
   // Last physical mouse position to prevent synthetic mousemove events from waking up controls.
   const lastMousePos = useRef<{ x: number; y: number } | null>(null);
 
-  const hideControlsNow = useCallback(() => {
-    window.clearTimeout(controlsIdleTimer.current);
-    window.clearTimeout(miniControlsVisibleCapTimer.current);
-    controlsIdleTimer.current = undefined;
-    miniControlsVisibleCapTimer.current = undefined;
-    lastMousePos.current = null;
-    setControlsHovered(false);
-    setControlsIdle(true);
-  }, []);
-
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
-  // n=next show, p=previous show, d=defer, f=fullscreen, i=mini player, h=hide all chrome,
+  // n=next show, p=previous show, d=defer, f=fullscreen, i=stay on top, h=hide all chrome,
   // c=toggle closed captions, ←/→ (or j/l)=seek -/+10s, ↑/↓=volume, v/Tab=dashboard,
   // Esc=hide dashboard.
   useEffect(() => {
@@ -359,7 +347,7 @@ function App() {
           void runControl(toggleFullscreen);
           break;
         case 'i':
-          void runControl(togglePip);
+          void runControl(toggleStayOnTop);
           break;
 
         case 'c': {
@@ -413,35 +401,36 @@ function App() {
       window.removeEventListener('keydown', onKey);
       window.clearTimeout(volOsdTimer.current);
       window.clearTimeout(controlsIdleTimer.current);
-      window.clearTimeout(miniControlsVisibleCapTimer.current);
     };
   }, [adjustVolume, runControl]);
 
 
 
-  // Auto-hide the control bar (and cursor) after a short mouse idle during active
-  // playback. Any movement brings it back and re-arms the timer. Mini-player
-  // mode deliberately ignores hover as a keep-open signal because WebView/native
-  // hit testing can miss the matching leave event.
+  // The single owner of control-bar (and cursor) visibility. During playback the
+  // bar hides after a short pointer idle; movement reveals it and re-arms the
+  // timer. It is pinned open while the dashboard is open, while scrubbing, or
+  // while the pointer hovers the controls; the pointer leaving the window hides
+  // it. See docs/feature-contracts/desktop-shell.md.
   useEffect(() => {
     const playing = status.phase === 'playing';
-    const miniPlayer = Boolean(status.window_pip);
-    const keepOpen = showSettings || controlsPointerDown || (!miniPlayer && controlsHovered);
+    const keepOpen = showSettings || controlsPointerDown || controlsHovered;
     window.clearTimeout(controlsIdleTimer.current);
     if (!playing || keepOpen) {
       lastMousePos.current = null;
       setControlsIdle(false);
       return;
     }
-    // Default controls to hidden when entering the playback view
+    // Default to hidden on entering playback; movement brings the bar back.
     setControlsIdle(true);
     lastMousePos.current = null;
-    
+
     const onActivity = (e?: MouseEvent) => {
       if (e) {
         const previous = lastMousePos.current;
         const current = { x: e.screenX, y: e.screenY };
         lastMousePos.current = current;
+        // Ignore synthetic same-position moves (keyboard/media can emit them),
+        // so idle-hidden controls stay hidden while the mouse is physically still.
         if (!previous || (current.x === previous.x && current.y === previous.y)) {
           return;
         }
@@ -449,13 +438,19 @@ function App() {
       setControlsIdle(false);
       armControlsIdle();
     };
+    const onLeaveWindow = () => {
+      lastMousePos.current = null;
+      setControlsIdle(true);
+    };
     window.addEventListener('mousemove', onActivity);
+    document.addEventListener('mouseleave', onLeaveWindow);
     armControlsIdle();
     return () => {
       window.clearTimeout(controlsIdleTimer.current);
       window.removeEventListener('mousemove', onActivity);
+      document.removeEventListener('mouseleave', onLeaveWindow);
     };
-  }, [status.phase, status.window_pip, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
+  }, [status.phase, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
 
   useEffect(() => {
     const clearPointerDown = () => setControlsPointerDown(false);
@@ -470,51 +465,6 @@ function App() {
       window.removeEventListener('blur', clearPointerDown);
     };
   }, []);
-
-  useEffect(() => {
-    if (!status.window_pip) return;
-    const onPointerLeavesDocument = (event: MouseEvent | PointerEvent) => {
-      if (controlsPointerDown) return;
-      const related = event.relatedTarget;
-      if (related instanceof Node && document.contains(related)) {
-        return;
-      }
-      hideControlsNow();
-    };
-    document.addEventListener('mouseleave', onPointerLeavesDocument);
-    window.addEventListener('mouseout', onPointerLeavesDocument);
-    window.addEventListener('pointerout', onPointerLeavesDocument);
-    return () => {
-      document.removeEventListener('mouseleave', onPointerLeavesDocument);
-      window.removeEventListener('mouseout', onPointerLeavesDocument);
-      window.removeEventListener('pointerout', onPointerLeavesDocument);
-    };
-  }, [status.window_pip, controlsPointerDown, hideControlsNow]);
-
-  useEffect(() => {
-    window.clearTimeout(miniControlsVisibleCapTimer.current);
-    if (
-      status.phase !== 'playing' ||
-      !status.window_pip ||
-      controlsIdle ||
-      showSettings ||
-      controlsPointerDown
-    ) {
-      return;
-    }
-    miniControlsVisibleCapTimer.current = window.setTimeout(
-      hideControlsNow,
-      MINI_CONTROLS_MAX_VISIBLE_MS,
-    );
-    return () => window.clearTimeout(miniControlsVisibleCapTimer.current);
-  }, [
-    status.phase,
-    status.window_pip,
-    controlsIdle,
-    showSettings,
-    controlsPointerDown,
-    hideControlsNow,
-  ]);
 
   useEffect(() => {
     // Re-fetch shows whenever the playlist gains a round or advance — a
@@ -812,8 +762,8 @@ function App() {
   );
 
   return (
-    <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}${status.window_maximized ? ' window-maximized' : ''}${status.window_fullscreen ? ' window-fullscreen' : ''}${status.window_pip ? ' window-pip' : ''}`}>
-      {!status.window_fullscreen && !status.window_pip && (
+    <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}${status.window_maximized ? ' window-maximized' : ''}${status.window_fullscreen ? ' window-fullscreen' : ''}`}>
+      {!status.window_fullscreen && (
         <div className="titlebar">
           <div className="titlebar-logo">
             <img src="/favicon.ico" className="titlebar-logo-img" alt="" />
@@ -844,7 +794,7 @@ function App() {
           pointerEvents: 'auto',
           zIndex: -1,
         }}
-        onDoubleClick={() => void runControl(status.window_pip ? togglePip : toggleFullscreen)}
+        onDoubleClick={() => void runControl(toggleFullscreen)}
         onWheel={handleVolumeWheel}
       />
       <VolumeOsd volume={volOsd} />
@@ -877,7 +827,7 @@ function App() {
       ) : (
         <div
           style={{ flex: 1 }}
-          onDoubleClick={() => void runControl(status.window_pip ? togglePip : toggleFullscreen)}
+          onDoubleClick={() => void runControl(toggleFullscreen)}
           onWheel={handleVolumeWheel}
         />
       )}
@@ -906,7 +856,7 @@ function App() {
         onSkip={() => runControl(skip)}
         onDefer={() => runControl(defer)}
         onSyncNow={() => runControl(syncNow, {success: true})}
-        onTogglePip={() => runControl(togglePip)}
+        onToggleStayOnTop={() => runControl(toggleStayOnTop)}
         onToggleFullscreen={() => runControl(toggleFullscreen)}
       />
     </div>
@@ -1037,10 +987,11 @@ const FullscreenIcon = () => (
   </svg>
 );
 
-const PipIcon = () => (
+// Stay-on-top (pin) toggle icon — a thumbtack.
+const PinIcon = () => (
   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-    <rect x="12" y="12" width="7" height="5" />
+    <path d="M9 3h6M10 3v6l-3 3v2h10v-2l-3-3V3" />
+    <path d="M12 14v7" />
   </svg>
 );
 
@@ -1120,7 +1071,7 @@ function BottomControlBar({
   onSkip,
   onDefer,
   onSyncNow,
-  onTogglePip,
+  onToggleStayOnTop,
   onToggleFullscreen,
 }: {
   status: Status;
@@ -1143,7 +1094,7 @@ function BottomControlBar({
   onSkip: () => void;
   onDefer: () => void;
   onSyncNow: () => void;
-  onTogglePip: () => void;
+  onToggleStayOnTop: () => void;
   onToggleFullscreen: () => void;
 }) {
   const pb = status.playback;
@@ -1184,6 +1135,125 @@ function BottomControlBar({
 
   const isMuted = pb ? volume === 0 : false;
   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
+  const onTop = Boolean(status.window_on_top);
+  // The compact control layout follows window *width*, not any window mode — a
+  // small window gets it whether or not it is pinned on top.
+  const [compactViewport, setCompactViewport] = useState(() => window.innerWidth <= 900);
+
+  useEffect(() => {
+    const onResize = () => setCompactViewport(window.innerWidth <= 900);
+    window.addEventListener('resize', onResize);
+    onResize();
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  const renderScrub = (compact: boolean) => (
+    <div className={`scrub-container${compact ? ' mini-scrub-container' : ''}`}>
+      {!compact && <span className="time-display">{pb ? fmtTime(pb.time_pos) : '--:--'}</span>}
+      <div
+        className={`scrub-bar${!pb ? ' disabled' : ''}`}
+        onClick={(e) => {
+          if (!pb) return;
+          const r = e.currentTarget.getBoundingClientRect();
+          void seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
+        }}
+      >
+        <div className="scrub-fill" style={{ width: `${pct}%` }} />
+        <div className="scrub-handle" style={{ left: `${pct}%` }} />
+      </div>
+      {!compact && <span className="time-display">{pb ? fmtTime(pb.duration) : '--:--'}</span>}
+    </div>
+  );
+
+  if (compactViewport) {
+    return (
+      <div
+        className={`bottom-controls mini-controls${controlsIdle ? ' hidden' : ''}`}
+        onMouseEnter={() => onHoverChange(true)}
+        onMouseLeave={() => onHoverChange(false)}
+        onPointerDown={() => onPointerActiveChange(true)}
+        onPointerUp={() => onPointerActiveChange(false)}
+        onPointerCancel={() => onPointerActiveChange(false)}
+        onWheel={onVolumeWheel}
+      >
+        {renderScrub(true)}
+
+        <div className="mini-controls-row">
+          <button
+            className="control-btn"
+            onClick={onPrevious}
+            disabled={!playing}
+            title="Previous Show (p)"
+          >
+            <PrevIcon />
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={() => onSeekRelative(-10)}
+            disabled={!pb}
+            title="Rewind 10s (j / ←)"
+          >
+            <RewindIcon />
+          </button>
+
+          <button
+            className="control-btn play-pause-btn"
+            onClick={() => onRequestPause(!displayPaused)}
+            disabled={!playing}
+            title="Play / Pause (Space)"
+          >
+            {displayPaused ? <PlayIcon /> : <PauseIcon />}
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={() => onSeekRelative(10)}
+            disabled={!pb}
+            title="Forward 10s (l / →)"
+          >
+            <ForwardIcon />
+          </button>
+
+          <button
+            className="control-btn"
+            onClick={onSkip}
+            disabled={!playing}
+            title="Skip Show (n)"
+          >
+            <NextIcon />
+          </button>
+
+          {pb && pb.sub_tracks.length > 0 && (
+            <button
+              className={`control-btn cc-btn${ccActive ? ' active' : ''}`}
+              onClick={handleToggleCc}
+              title="Toggle Captions (c)"
+            >
+              <CcIcon />
+            </button>
+          )}
+
+          <button
+            className="control-btn volume-btn"
+            onClick={handleToggleMute}
+            disabled={!pb}
+            title="Mute / Unmute (Up/Down Arrows or mouse wheel to adjust)"
+          >
+            {isMuted ? <VolumeMuteIcon /> : <VolumeIcon />}
+          </button>
+
+          <button
+            className={`control-btn stay-on-top-btn${onTop ? ' active' : ''}`}
+            onClick={onToggleStayOnTop}
+            title={onTop ? 'Stop Staying on Top (i)' : 'Stay on Top (i)'}
+          >
+            <PinIcon />
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -1196,21 +1266,7 @@ function BottomControlBar({
       onWheel={onVolumeWheel}
     >
       {/* 1. Scrub Container */}
-      <div className="scrub-container">
-        <span className="time-display">{pb ? fmtTime(pb.time_pos) : '--:--'}</span>
-        <div
-          className={`scrub-bar${!pb ? ' disabled' : ''}`}
-          onClick={(e) => {
-            if (!pb) return;
-            const r = e.currentTarget.getBoundingClientRect();
-            void seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
-          }}
-        >
-          <div className="scrub-fill" style={{ width: `${pct}%` }} />
-          <div className="scrub-handle" style={{ left: `${pct}%` }} />
-        </div>
-        <span className="time-display">{pb ? fmtTime(pb.duration) : '--:--'}</span>
-      </div>
+      {renderScrub(false)}
 
       {/* 2. Controls Row */}
       <div className="controls-row">
@@ -1385,11 +1441,11 @@ function BottomControlBar({
           </button>
 
           <button
-            className={`control-btn pip-btn${status.window_pip ? ' active' : ''}`}
-            onClick={onTogglePip}
-            title={status.window_pip ? 'Exit Mini Player (i)' : 'Mini Player / Always on Top (i)'}
+            className={`control-btn stay-on-top-btn${onTop ? ' active' : ''}`}
+            onClick={onToggleStayOnTop}
+            title={onTop ? 'Stop Staying on Top (i)' : 'Stay on Top (i)'}
           >
-            <PipIcon />
+            <PinIcon />
           </button>
 
           <button

@@ -338,6 +338,12 @@ impl PlayerOps for Player {
         self.handle
             .command(&["seek", &seconds.to_string(), "absolute"]);
     }
+    fn set_sub(&self, sid: &str) {
+        Player::set_sub(self, sid);
+    }
+    fn set_audio(&self, aid: &str) {
+        Player::set_audio(self, aid);
+    }
     fn set_playlist_pos(&self, idx: usize) {
         self.handle.set_property("playlist-pos", &idx.to_string());
     }

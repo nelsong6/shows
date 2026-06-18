@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS round_queue (
   updated_at     TEXT NOT NULL,
   dirty          INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS episode_playback_preferences (
+  episode_id     TEXT PRIMARY KEY,
+  subtitle_track TEXT,
+  audio_track    TEXT,
+  updated_at     TEXT NOT NULL
+);
 ";
 
 fn now() -> String {
@@ -96,6 +102,12 @@ pub struct Dirty {
     pub shows: Vec<Value>,
     pub episodes: Vec<Value>,
     pub history: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EpisodePlaybackPreferences {
+    pub subtitle_track: Option<String>,
+    pub audio_track: Option<String>,
 }
 
 pub struct Replica {
@@ -155,6 +167,23 @@ impl Replica {
         .optional()
         .expect("resume_pos")
         .flatten()
+    }
+
+    pub fn playback_preferences(&self, episode_id: &str) -> EpisodePlaybackPreferences {
+        let conn = self.db.lock().unwrap();
+        conn.query_row(
+            "SELECT subtitle_track, audio_track FROM episode_playback_preferences WHERE episode_id=?1",
+            params![episode_id],
+            |r| {
+                Ok(EpisodePlaybackPreferences {
+                    subtitle_track: r.get(0)?,
+                    audio_track: r.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .expect("playback_preferences")
+        .unwrap_or_default()
     }
 
     pub fn get_volume(&self) -> Option<f64> {
@@ -267,6 +296,40 @@ impl Replica {
             params![pos, now, episode_id],
         )
         .expect("set_resume");
+    }
+
+    pub fn set_subtitle_track(&self, episode_id: &str, sid: &str) {
+        self.set_playback_preference(episode_id, "subtitle_track", sid);
+    }
+
+    pub fn set_audio_track(&self, episode_id: &str, aid: &str) {
+        self.set_playback_preference(episode_id, "audio_track", aid);
+    }
+
+    fn set_playback_preference(&self, episode_id: &str, column: &str, value: &str) {
+        debug_assert!(matches!(column, "subtitle_track" | "audio_track"));
+        let now = now();
+        let conn = self.db.lock().unwrap();
+        let current: Option<String> = conn
+            .query_row(
+                &format!("SELECT {column} FROM episode_playback_preferences WHERE episode_id=?1"),
+                params![episode_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .expect("lookup playback preference")
+            .flatten();
+        if current.as_deref() == Some(value) {
+            return;
+        }
+        conn.execute(
+            &format!(
+                "INSERT INTO episode_playback_preferences(episode_id,{column},updated_at) VALUES(?1,?2,?3)
+                 ON CONFLICT(episode_id) DO UPDATE SET {column}=excluded.{column}, updated_at=excluded.updated_at"
+            ),
+            params![episode_id, value, now],
+        )
+        .expect("set playback preference");
     }
 
     // ── library management (local-first; syncs up like any change) ───────
@@ -1436,6 +1499,20 @@ mod tests {
         seed(&r);
         r.set_resume("a", Some(123.5));
         assert_eq!(r.resume_pos("a"), Some(123.5));
+    }
+
+    #[test]
+    fn episode_playback_preferences_are_local_to_episode() {
+        let r = Replica::new(":memory:");
+        seed(&r);
+        r.set_subtitle_track("a", "no");
+        r.set_audio_track("a", "2");
+
+        let a = r.playback_preferences("a");
+        assert_eq!(a.subtitle_track.as_deref(), Some("no"));
+        assert_eq!(a.audio_track.as_deref(), Some("2"));
+        assert_eq!(r.playback_preferences("b"), EpisodePlaybackPreferences::default());
+        assert_eq!(r.pending().episodes, 0);
     }
 
     #[test]

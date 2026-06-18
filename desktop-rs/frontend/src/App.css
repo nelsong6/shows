@@ -866,9 +866,6 @@ ul.recent li {
 .layout.over-video {
   background: color-mix(in srgb, var(--bg-deep) 68%, transparent);
 }
-.window-pip .layout.over-video {
-  background: transparent;
-}
 
 /* Flat now-playing / up-next queue. Play order; current marked, earlier
    done (dimmed), later are what's next. */
@@ -1477,8 +1474,81 @@ button.gb.toggle-view-btn {
   flex-shrink: 0;
 }
 
-/* Mini player mode uses the real Windows titlebar, so hide only the custom
-   in-client titlebar to avoid double chrome. */
-.window-pip .titlebar {
-  display: none;
+/* Compact control layout for narrow windows (width-driven, not a window mode). */
+.bottom-controls.mini-controls {
+  padding: 8px 12px 10px;
+  gap: 8px;
+}
+
+.mini-scrub-container {
+  gap: 0;
+  min-width: 0;
+}
+
+.mini-scrub-container .scrub-bar {
+  min-width: 0;
+}
+
+.mini-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.mini-controls .control-btn {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+}
+
+.mini-controls .control-btn.play-pause-btn {
+  width: 38px;
+  height: 38px;
+  flex-basis: 38px;
+}
+
+@media (max-width: 380px) {
+  .bottom-controls.mini-controls {
+    padding: 7px 10px 9px;
+  }
+
+  .mini-controls-row {
+    gap: 5px;
+  }
+
+  .mini-controls .cc-btn {
+    display: none;
+  }
+}
+
+@media (max-width: 330px) {
+  .bottom-controls.mini-controls {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .mini-controls-row {
+    gap: 4px;
+  }
+
+  .mini-controls .control-btn {
+    width: 30px;
+    height: 30px;
+    flex-basis: 30px;
+  }
+
+  .mini-controls .control-btn.play-pause-btn {
+    width: 36px;
+    height: 36px;
+    flex-basis: 36px;
+  }
+
+  .mini-controls .volume-btn {
+    display: none;
+  }
 }

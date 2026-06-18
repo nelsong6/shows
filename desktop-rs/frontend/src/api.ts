@@ -123,7 +123,7 @@ export type Status = {
   update?: UpdateInfo;
   window_maximized?: boolean;
   window_fullscreen?: boolean;
-  window_pip?: boolean;
+  window_on_top?: boolean;
 };
 
 export type Show = {
@@ -260,9 +260,10 @@ export async function toggleFullscreen(): Promise<ControlResult> {
   return postControl('/fullscreen');
 }
 
-// Toggle the window between normal and mini-player always-on-top mode.
-export async function togglePip(): Promise<ControlResult> {
-  return postControl('/pip');
+// Toggle whether the window floats above others (topmost Z-order). Chrome and
+// layout are unchanged — it is purely a stacking toggle.
+export async function toggleStayOnTop(): Promise<ControlResult> {
+  return postControl('/stay-on-top');
 }
 
 export async function seekPercent(percent: number): Promise<ControlResult> {

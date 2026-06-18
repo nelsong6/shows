@@ -323,7 +323,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     server.set_runner(runner.clone());
     server.set_syncer(syncer.clone());
     server.set_on_fullscreen(compositor.fullscreen_callback());
-    server.set_on_pip(compositor.pip_callback());
+    server.set_on_stay_on_top(compositor.stay_on_top_callback());
     server.set_on_window_action(compositor.window_action_callback());
 
     let s_clone = server.clone();

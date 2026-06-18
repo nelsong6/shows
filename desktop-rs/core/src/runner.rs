@@ -113,6 +113,8 @@ pub trait PlayerOps: Send + Sync {
     fn previous(&self);
     fn time_pos(&self) -> Option<f64>;
     fn seek_absolute(&self, seconds: f64);
+    fn set_sub(&self, sid: &str);
+    fn set_audio(&self, aid: &str);
     fn set_playlist_pos(&self, idx: usize);
     /// Block until the queued round's playlist is exhausted (mpv goes idle /
     /// playlist-pos -> -1), or stop/shutdown. Detecting the boundary this way —
@@ -571,9 +573,27 @@ impl Runner {
         }
     }
 
+    pub fn set_current_subtitle_track(&self, sid: &str) -> ControlOutcome {
+        self.player.set_sub(sid);
+        let Some(cur) = self.current() else {
+            return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
+        };
+        self.replica.set_subtitle_track(&cur.episode_id, sid);
+        ControlOutcome::applied("subtitle_updated", "subtitle track updated")
+    }
+
+    pub fn set_current_audio_track(&self, aid: &str) -> ControlOutcome {
+        self.player.set_audio(aid);
+        let Some(cur) = self.current() else {
+            return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
+        };
+        self.replica.set_audio_track(&cur.episode_id, aid);
+        ControlOutcome::applied("audio_updated", "audio track updated")
+    }
+
     // ── playback callbacks (mpv event thread; keep fast + local) ─────────
     /// A queued file opened — mark it now-playing, note reachable media, restore
-    /// its saved resume position.
+    /// its saved resume position and per-episode track choices.
     pub fn on_file_loaded(&self) {
         let Some(cur) = self.current() else {
             return;
@@ -585,6 +605,13 @@ impl Runner {
         }
         self.replica
             .update_round_entry_state(&cur.episode_id, "playing", &cur.playlist);
+        let prefs = self.replica.playback_preferences(&cur.episode_id);
+        if let Some(sid) = prefs.subtitle_track.as_deref() {
+            self.player.set_sub(sid);
+        }
+        if let Some(aid) = prefs.audio_track.as_deref() {
+            self.player.set_audio(aid);
+        }
         if let Some(pos) = self.replica.resume_pos(&cur.episode_id) {
             if pos > 1.0 {
                 self.player.seek_absolute(pos);
@@ -988,6 +1015,8 @@ mod tests {
         clears: AtomicUsize,
         time: Mutex<Option<f64>>,
         seeked: Mutex<Option<f64>>,
+        sub: Mutex<Option<String>>,
+        audio: Mutex<Option<String>>,
         playlist_pos: Mutex<Option<usize>>,
         on_wait: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     }
@@ -1013,6 +1042,12 @@ mod tests {
         }
         fn seek_absolute(&self, seconds: f64) {
             *self.seeked.lock().unwrap() = Some(seconds);
+        }
+        fn set_sub(&self, sid: &str) {
+            *self.sub.lock().unwrap() = Some(sid.to_string());
+        }
+        fn set_audio(&self, aid: &str) {
+            *self.audio.lock().unwrap() = Some(aid.to_string());
         }
         fn set_playlist_pos(&self, idx: usize) {
             *self.playlist_pos.lock().unwrap() = Some(idx);
@@ -1574,6 +1609,57 @@ mod tests {
                 .episode_id,
             cur.episode_id
         );
+    }
+
+    #[test]
+    fn track_controls_persist_for_current_episode() {
+        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        set_round(&run);
+        run.set_pos(0);
+        let cur = run.current().unwrap();
+
+        assert_eq!(
+            run.set_current_subtitle_track("no").status(),
+            "subtitle_updated"
+        );
+        assert_eq!(run.set_current_audio_track("2").status(), "audio_updated");
+        assert_eq!(*p.sub.lock().unwrap(), Some("no".into()));
+        assert_eq!(*p.audio.lock().unwrap(), Some("2".into()));
+
+        let prefs = r.playback_preferences(&cur.episode_id);
+        assert_eq!(prefs.subtitle_track.as_deref(), Some("no"));
+        assert_eq!(prefs.audio_track.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn on_file_loaded_applies_episode_track_preferences() {
+        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        set_round(&run);
+        run.set_pos(0);
+        let cur = run.current().unwrap();
+        r.set_subtitle_track(&cur.episode_id, "3");
+        r.set_audio_track(&cur.episode_id, "1");
+
+        run.on_file_loaded();
+
+        assert_eq!(*p.sub.lock().unwrap(), Some("3".into()));
+        assert_eq!(*p.audio.lock().unwrap(), Some("1".into()));
     }
 
     // ── round-end detection (playlist-pos -> -1) ───────────────────────
