@@ -866,9 +866,6 @@ ul.recent li {
 .layout.over-video {
   background: color-mix(in srgb, var(--bg-deep) 68%, transparent);
 }
-.window-pip .layout.over-video {
-  background: transparent;
-}
 
 /* Flat now-playing / up-next queue. Play order; current marked, earlier
    done (dimmed), later are what's next. */
@@ -1477,12 +1474,7 @@ button.gb.toggle-view-btn {
   flex-shrink: 0;
 }
 
-/* Mini player mode uses the real Windows titlebar, so hide only the custom
-   in-client titlebar to avoid double chrome. */
-.window-pip .titlebar {
-  display: none;
-}
-
+/* Compact control layout for narrow windows (width-driven, not a window mode). */
 .bottom-controls.mini-controls {
   padding: 8px 12px 10px;
   gap: 8px;

@@ -2,7 +2,7 @@
 //! bundle and a same-origin control surface: the overlay subscribes to
 //! `/status/stream`, can read a one-shot `/status` snapshot, reads `/shows`,
 //! `/stats`, `/history`, and POSTs `/pause` `/skip` `/prev` `/defer` `/seek`
-//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/pip` `/window/*`
+//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/stay-on-top` `/window/*`
 //! `/library/*`.
 
 use std::io::Read;
@@ -207,19 +207,18 @@ impl StatusPatch {
         StatusPatch { fields }
     }
 
-    pub fn window_state(maximized: bool, fullscreen: bool, pip: bool) -> StatusPatch {
+    pub fn window_state(maximized: bool, fullscreen: bool, on_top: bool) -> StatusPatch {
         let mut fields = serde_json::Map::new();
         fields.insert("window_maximized".into(), json!(maximized));
         fields.insert("window_fullscreen".into(), json!(fullscreen));
-        fields.insert("window_pip".into(), json!(pip));
-        fields.insert("mini_pointer_inside".into(), json!(false));
+        fields.insert("window_on_top".into(), json!(on_top));
         StatusPatch { fields }
     }
 }
 
 pub type WindowActionCb = Box<dyn Fn(WindowAction) + Send + Sync>;
 type FullscreenCb = Box<dyn Fn() + Send + Sync>;
-type PipCb = Box<dyn Fn() + Send + Sync>;
+type StayOnTopCb = Box<dyn Fn() + Send + Sync>;
 
 pub struct ControlServer {
     dist_dir: Option<PathBuf>,
@@ -232,7 +231,7 @@ pub struct ControlServer {
     runner: Mutex<Option<Arc<Runner>>>,
     syncer: Mutex<Option<Arc<Syncer>>>,
     on_fullscreen: Mutex<Option<FullscreenCb>>,
-    on_pip: Mutex<Option<PipCb>>,
+    on_stay_on_top: Mutex<Option<StayOnTopCb>>,
     on_window_action: Mutex<Option<WindowActionCb>>,
 }
 
@@ -253,8 +252,7 @@ impl ControlServer {
         status.insert("round_blocked".into(), json!(false));
         status.insert("window_maximized".into(), json!(false));
         status.insert("window_fullscreen".into(), json!(false));
-        status.insert("window_pip".into(), json!(false));
-        status.insert("mini_pointer_inside".into(), json!(false));
+        status.insert("window_on_top".into(), json!(false));
         Arc::new(ControlServer {
             dist_dir,
             playlists,
@@ -266,7 +264,7 @@ impl ControlServer {
             runner: Mutex::new(None),
             syncer: Mutex::new(None),
             on_fullscreen: Mutex::new(None),
-            on_pip: Mutex::new(None),
+            on_stay_on_top: Mutex::new(None),
             on_window_action: Mutex::new(None),
         })
     }
@@ -285,8 +283,8 @@ impl ControlServer {
     pub fn set_on_fullscreen(&self, f: FullscreenCb) {
         *self.on_fullscreen.lock().unwrap() = Some(f);
     }
-    pub fn set_on_pip(&self, f: PipCb) {
-        *self.on_pip.lock().unwrap() = Some(f);
+    pub fn set_on_stay_on_top(&self, f: StayOnTopCb) {
+        *self.on_stay_on_top.lock().unwrap() = Some(f);
     }
     pub fn set_on_window_action(&self, f: WindowActionCb) {
         *self.on_window_action.lock().unwrap() = Some(f);
@@ -539,11 +537,11 @@ impl ControlServer {
                 }
                 respond_control_ok(request, "fullscreen_toggled", "fullscreen toggled");
             }
-            "/pip" => {
-                if let Some(cb) = self.on_pip.lock().unwrap().as_ref() {
+            "/stay-on-top" => {
+                if let Some(cb) = self.on_stay_on_top.lock().unwrap().as_ref() {
                     cb();
                 }
-                respond_control_ok(request, "pip_toggled", "mini player toggled");
+                respond_control_ok(request, "stay_on_top_toggled", "stay on top toggled");
             }
             "/window/minimize" => {
                 if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
@@ -1531,8 +1529,7 @@ mod tests {
         assert_eq!(value["round_blocked"], false);
         assert_eq!(value["window_maximized"], false);
         assert_eq!(value["window_fullscreen"], false);
-        assert_eq!(value["window_pip"], false);
-        assert_eq!(value["mini_pointer_inside"], false);
+        assert_eq!(value["window_on_top"], false);
         assert!(value["alerts"].is_array());
     }
 

@@ -48,7 +48,27 @@ const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
 const WM_WINDOW_MINIMIZE: u32 = WM_APP + 2;
 const WM_WINDOW_MAXIMIZE: u32 = WM_APP + 3;
 const WM_WINDOW_CLOSE: u32 = WM_APP + 4;
-const WM_TOGGLE_PIP: u32 = WM_APP + 5;
+const WM_TOGGLE_STAY_ON_TOP: u32 = WM_APP + 5;
+
+// Custom-chrome geometry, defined ONCE in logical (96-DPI) pixels and scaled by
+// the window DPI everywhere it is used, so the Win32 hit-test regions line up
+// with what the overlay renders at any DPI. The overlay CSS mirrors these:
+// `.titlebar { height: 32px }` and `.titlebar-actions { width: 138px }`. See
+// `docs/feature-contracts/desktop-shell.md`.
+const TITLEBAR_LOGICAL_H: i32 = 32;
+const WINDOW_BUTTONS_LOGICAL_W: i32 = 138;
+const RESIZE_BORDER_LOGICAL: i32 = 6;
+
+/// Scale a logical (96-DPI) length to physical pixels for `dpi`.
+fn scale_for_dpi(logical: i32, dpi: i32) -> i32 {
+    (logical * dpi.max(96)) / 96
+}
+
+/// Custom titlebar height in physical pixels for this window's DPI. The single
+/// source the swapchain offset, overlay bounds, and caption hit-test all use.
+fn titlebar_height_px(hwnd: HWND) -> i32 {
+    scale_for_dpi(TITLEBAR_LOGICAL_H, unsafe { GetDpiForWindow(hwnd) } as i32)
+}
 
 type StatusUpdateCb = Box<dyn Fn(serde_json::Value) + Send + Sync>;
 
@@ -78,65 +98,53 @@ fn rect_height(rect: RECT) -> i32 {
     rect.bottom - rect.top
 }
 
-fn default_pip_rect(work: RECT) -> RECT {
-    let margin = 24;
-    let work_w = rect_width(work).max(1);
-    let work_h = rect_height(work).max(1);
-    let max_w = (work_w - margin * 2).max(1);
-    let max_h = (work_h - margin * 2).max(1);
+/// Map a client-relative point to a non-client hit-test code for the custom
+/// chrome. Pure (no HWND) so it is unit-tested across DPIs. `cx`/`cy` are
+/// relative to the window's top-left; `width`/`height` are the window size.
+/// All geometry derives from the shared logical constants, scaled by `dpi`, so
+/// the draggable caption and the window-button zone match the rendered overlay
+/// at every scale factor.
+fn nc_hit(cx: i32, cy: i32, width: i32, height: i32, dpi: i32, is_max: bool) -> u32 {
+    let titlebar = scale_for_dpi(TITLEBAR_LOGICAL_H, dpi);
+    let buttons = scale_for_dpi(WINDOW_BUTTONS_LOGICAL_W, dpi);
+    let border = scale_for_dpi(RESIZE_BORDER_LOGICAL, dpi).max(1);
 
-    let mut pip_w = ((work_w as f64) * 0.375) as i32;
-    pip_w = pip_w.clamp(640, 960).min(max_w);
-    let mut pip_h = (pip_w * 9) / 16;
-
-    if pip_h > max_h {
-        pip_h = max_h;
-        pip_w = (pip_h * 16) / 9;
+    if !is_max {
+        let is_top = cy < border;
+        let is_bottom = cy >= height - border;
+        let is_left = cx < border;
+        let is_right = cx >= width - border;
+        if is_top && is_left {
+            return HTTOPLEFT;
+        }
+        if is_top && is_right {
+            return HTTOPRIGHT;
+        }
+        if is_bottom && is_left {
+            return HTBOTTOMLEFT;
+        }
+        if is_bottom && is_right {
+            return HTBOTTOMRIGHT;
+        }
+        if is_top {
+            return HTTOP;
+        }
+        if is_bottom {
+            return HTBOTTOM;
+        }
+        if is_left {
+            return HTLEFT;
+        }
+        if is_right {
+            return HTRIGHT;
+        }
     }
 
-    let right = work.right - margin.min(work_w / 2);
-    let bottom = work.bottom - margin.min(work_h / 2);
-    RECT {
-        left: right - pip_w,
-        top: bottom - pip_h,
-        right,
-        bottom,
+    // Within the titlebar height and left of the window-button cluster: drag.
+    if cy >= 0 && cy < titlebar && cx < width - buttons {
+        return HTCAPTION;
     }
-}
-
-fn clamp_pip_rect_to_work_area(rect: RECT, work: RECT) -> RECT {
-    let work_w = rect_width(work).max(1);
-    let work_h = rect_height(work).max(1);
-    let width = rect_width(rect).clamp(1, work_w);
-    let height = rect_height(rect).clamp(1, work_h);
-
-    let mut left = rect.left;
-    let mut top = rect.top;
-
-    if left < work.left {
-        left = work.left;
-    }
-    if top < work.top {
-        top = work.top;
-    }
-    if left + width > work.right {
-        left = work.right - width;
-    }
-    if top + height > work.bottom {
-        top = work.bottom - height;
-    }
-
-    RECT {
-        left,
-        top,
-        right: left + width,
-        bottom: top + height,
-    }
-}
-
-fn pip_window_style(saved_style: isize) -> isize {
-    let style = saved_style as u32;
-    ((style & !WS_MAXIMIZE.0 & !WS_POPUP.0) | WS_OVERLAPPEDWINDOW.0) as isize
+    HTCLIENT
 }
 
 #[cfg(test)]
@@ -165,50 +173,38 @@ mod tests {
         assert!(motion.observe(point(321, 181)));
     }
 
+    // The whole point of the DPI fix: the caption drag region must cover the
+    // full *rendered* titlebar height (logical 32 × dpi/96), not a flat 32px.
     #[test]
-    fn default_pip_rect_is_larger_than_old_tiny_size() {
-        let work = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
-        let rect = default_pip_rect(work);
+    fn caption_drag_spans_full_titlebar_height_at_every_dpi() {
+        for dpi in [96, 120, 144, 192] {
+            let tb = scale_for_dpi(TITLEBAR_LOGICAL_H, dpi);
+            // Bottom row of the visible titlebar, left of the buttons: drags.
+            assert_eq!(nc_hit(200, tb - 1, 1000, 800, dpi, false), HTCAPTION, "dpi={dpi}");
+            // One pixel below the titlebar is client, not caption.
+            assert_eq!(nc_hit(200, tb + 1, 1000, 800, dpi, false), HTCLIENT, "dpi={dpi}");
+        }
+    }
 
-        assert_eq!(rect_width(rect), 720);
-        assert_eq!(rect_height(rect), 405);
-        assert_eq!(rect.right, 1896);
-        assert_eq!(rect.bottom, 1056);
+    // The window-button cluster must stay clickable (HTCLIENT, forwarded to the
+    // overlay), and the pixel just left of it must drag, at every DPI.
+    #[test]
+    fn button_cluster_stays_client_and_caption_starts_left_of_it() {
+        for dpi in [96, 120, 144, 192] {
+            let tb = scale_for_dpi(TITLEBAR_LOGICAL_H, dpi);
+            let buttons = scale_for_dpi(WINDOW_BUTTONS_LOGICAL_W, dpi);
+            assert_eq!(nc_hit(1000 - buttons + 5, tb / 2, 1000, 800, dpi, false), HTCLIENT, "dpi={dpi}");
+            assert_eq!(nc_hit(1000 - buttons - 5, tb / 2, 1000, 800, dpi, false), HTCAPTION, "dpi={dpi}");
+        }
     }
 
     #[test]
-    fn default_pip_rect_stays_inside_small_work_area() {
-        let work = RECT { left: 0, top: 0, right: 800, bottom: 500 };
-        let rect = default_pip_rect(work);
-
-        assert!(rect_width(rect) <= 752);
-        assert!(rect_height(rect) <= 452);
-        assert!(rect.left >= work.left);
-        assert!(rect.top >= work.top);
-        assert!(rect.right <= work.right);
-        assert!(rect.bottom <= work.bottom);
-    }
-
-    #[test]
-    fn clamp_pip_rect_preserves_size_and_moves_inside_work_area() {
-        let work = RECT { left: 100, top: 100, right: 900, bottom: 700 };
-        let rect = RECT { left: 850, top: 650, right: 1250, bottom: 875 };
-        let clamped = clamp_pip_rect_to_work_area(rect, work);
-
-        assert_eq!(rect_width(clamped), 400);
-        assert_eq!(rect_height(clamped), 225);
-        assert_eq!(clamped.right, work.right);
-        assert_eq!(clamped.bottom, work.bottom);
-    }
-
-    #[test]
-    fn pip_window_style_uses_normal_windows_chrome() {
-        let style = pip_window_style((WS_POPUP.0 | WS_MAXIMIZE.0 | WS_VISIBLE.0) as isize) as u32;
-
-        assert_eq!(style & WS_OVERLAPPEDWINDOW.0, WS_OVERLAPPEDWINDOW.0);
-        assert_eq!(style & WS_POPUP.0, 0);
-        assert_eq!(style & WS_MAXIMIZE.0, 0);
-        assert_ne!(style & WS_VISIBLE.0, 0);
+    fn resize_borders_exist_only_when_not_maximized() {
+        assert_eq!(nc_hit(0, 0, 1000, 800, 96, false), HTTOPLEFT);
+        assert_eq!(nc_hit(500, 799, 1000, 800, 96, false), HTBOTTOM);
+        assert_eq!(nc_hit(999, 400, 1000, 800, 96, false), HTRIGHT);
+        // Maximized: no resize band — the corner falls through to caption.
+        assert_eq!(nc_hit(0, 0, 1000, 800, 96, true), HTCAPTION);
     }
 }
 
@@ -228,7 +224,6 @@ struct State {
     cursor: HCURSOR,
     arrow: HCURSOR,
     cursor_motion: CursorMotion,
-    mini_pointer_inside: bool,
     _target: IDCompositionTarget,
     _root: IDCompositionVisual,
     _bottom: IDCompositionVisual,
@@ -239,11 +234,11 @@ struct State {
     _webview: ICoreWebView2,
     // Borderless-fullscreen toggle: saved on entry, restored on exit.
     is_fullscreen: bool,
-    is_pip: bool,
+    // Stay-on-top: a pure topmost Z-order flag. Chrome/layout are unchanged.
+    is_on_top: bool,
     saved_style: isize,
     saved_exstyle: isize,
     saved_rect: RECT,
-    last_pip_rect: Option<RECT>,
 }
 
 thread_local! {
@@ -274,7 +269,7 @@ impl Compositor {
         unsafe { GetClientRect(hwnd, &mut rc)? };
         let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
 
-        let video_top = (32 * unsafe { GetDpiForWindow(hwnd) } as i32) / 96;
+        let video_top = titlebar_height_px(hwnd);
         let video_h = (ch - video_top).max(1);
 
         // D3D11 device + composition swapchain (the video layer).
@@ -402,7 +397,6 @@ impl Compositor {
                 cursor: arrow,
                 arrow,
                 cursor_motion: CursorMotion::new(current_cursor_screen_pos()),
-                mini_pointer_inside: false,
                 _target: target,
                 _root: root,
                 _bottom: bottom,
@@ -412,11 +406,10 @@ impl Compositor {
                 base,
                 _webview: webview,
                 is_fullscreen: false,
-                is_pip: false,
+                is_on_top: false,
                 saved_style: 0,
                 saved_exstyle: 0,
                 saved_rect: RECT::default(),
-                last_pip_rect: None,
             });
         });
 
@@ -480,13 +473,14 @@ impl Compositor {
         })
     }
 
-    /// A `Send + Sync` closure that posts a pip-toggle message to the UI thread.
-    pub fn pip_callback(&self) -> Box<dyn Fn() + Send + Sync> {
+    /// A `Send + Sync` closure that posts a stay-on-top-toggle message to the UI
+    /// thread (the topmost Z-order change must happen on the owning thread).
+    pub fn stay_on_top_callback(&self) -> Box<dyn Fn() + Send + Sync> {
         let raw = self.hwnd.0 as usize;
         Box::new(move || unsafe {
             let _ = PostMessageW(
                 Some(HWND(raw as *mut _)),
-                WM_TOGGLE_PIP,
+                WM_TOGGLE_STAY_ON_TOP,
                 WPARAM(0),
                 LPARAM(0),
             );
@@ -552,18 +546,6 @@ fn is_cursor_in_window(hwnd: HWND) -> bool {
     }
 }
 
-fn set_mini_pointer_inside(st: &mut State, inside: bool, reason: &str) -> bool {
-    if !st.is_pip || st.mini_pointer_inside == inside {
-        return false;
-    }
-    st.mini_pointer_inside = inside;
-    log::info!("mini pointer inside={inside} reason={reason}");
-    if let Some(cb) = &st.status_callback {
-        cb(serde_json::json!({ "mini_pointer_inside": inside }));
-    }
-    true
-}
-
 fn render(s: &State) {
     unsafe {
         s.gl.render(); // mpv OpenGL render -> the shared D3D texture
@@ -576,16 +558,39 @@ fn render(s: &State) {
     }
 }
 
+/// Rebuild everything that depends on the client size: swapchain backbuffer,
+/// video-visual vertical offset (below the custom titlebar unless fullscreen),
+/// overlay bounds, and the shared GL/D3D texture mpv renders into. The single
+/// place layout is recomputed — called on `WM_SIZE` and after the fullscreen
+/// toggle. Forces a present so the resized frame shows even while paused.
+fn relayout(hwnd: HWND, st: &mut State, cw: i32, ch: i32) {
+    if cw <= 0 || ch <= 0 {
+        return;
+    }
+    unsafe {
+        let video_top = if st.is_fullscreen { 0 } else { titlebar_height_px(hwnd) };
+        let video_h = (ch - video_top).max(1);
+        let _ = st.swapchain.ResizeBuffers(
+            0,
+            cw as u32,
+            video_h as u32,
+            DXGI_FORMAT_UNKNOWN,
+            DXGI_SWAP_CHAIN_FLAG(0),
+        );
+        let _ = st._bottom.SetOffsetY2(video_top as f32);
+        let _ = st.base.SetBounds(RECT { left: 0, top: 0, right: cw, bottom: ch });
+        let _ = st.gl.resize(&st.device, cw, video_h);
+        // The webview's visual-hosting output needs a Commit to publish the new
+        // bounds in the DComp tree.
+        let _ = st.dcomp.Commit();
+        render(st);
+    }
+}
+
 extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     unsafe {
         match msg {
             WM_NCCALCSIZE => {
-                let is_pip = STATE.with(|s| {
-                    s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
-                });
-                if is_pip {
-                    return DefWindowProcW(hwnd, msg, w, l);
-                }
                 if w.0 != 0 {
                     let is_fs = STATE.with(|s| {
                         s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
@@ -606,78 +611,30 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(0)
             }
             WM_NCHITTEST => {
-                let (is_fs, is_pip) = STATE.with(|s| {
-                    s.borrow().as_ref().map(|st| (st.is_fullscreen, st.is_pip)).unwrap_or((false, false))
+                let is_fs = STATE.with(|s| {
+                    s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
                 });
-                if is_pip {
-                    return DefWindowProcW(hwnd, msg, w, l);
-                }
                 if is_fs {
                     return LRESULT(HTCLIENT as isize);
                 }
 
                 let x = (l.0 & 0xFFFF) as i16 as i32;
                 let y = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
-                
+
                 let mut rect = RECT::default();
                 let _ = GetWindowRect(hwnd, &mut rect);
-                
+
+                let dpi = GetDpiForWindow(hwnd) as i32;
                 let is_max = IsZoomed(hwnd).as_bool();
-                
-                if !is_max {
-                    let border_width = 6;
-                    let is_top = y < rect.top + border_width;
-                    let is_bottom = y >= rect.bottom - border_width;
-                    let is_left = x < rect.left + border_width;
-                    let is_right = x >= rect.right - border_width;
-                    
-                    if is_top && is_left {
-                        return LRESULT(HTTOPLEFT as isize);
-                    }
-                    if is_top && is_right {
-                        return LRESULT(HTTOPRIGHT as isize);
-                    }
-                    if is_bottom && is_left {
-                        return LRESULT(HTBOTTOMLEFT as isize);
-                    }
-                    if is_bottom && is_right {
-                        return LRESULT(HTBOTTOMRIGHT as isize);
-                    }
-                    if is_top {
-                        return LRESULT(HTTOP as isize);
-                    }
-                    if is_bottom {
-                        return LRESULT(HTBOTTOM as isize);
-                    }
-                    if is_left {
-                        return LRESULT(HTLEFT as isize);
-                    }
-                    if is_right {
-                        return LRESULT(HTRIGHT as isize);
-                    }
-                }
-                
-                if is_max {
-                    let client_y = y - rect.top;
-                    if client_y >= 0 && client_y < 32 {
-                        let client_x = x - rect.left;
-                        let width = rect.right - rect.left;
-                        if client_x < width - 140 {
-                            return LRESULT(HTCAPTION as isize);
-                        }
-                    }
-                    return LRESULT(HTCLIENT as isize);
-                }
-                
-                let client_y = y - rect.top;
-                if client_y >= 0 && client_y < 32 {
-                    let client_x = x - rect.left;
-                    let width = rect.right - rect.left;
-                    if client_x < width - 140 {
-                        return LRESULT(HTCAPTION as isize);
-                    }
-                }
-                LRESULT(HTCLIENT as isize)
+                let code = nc_hit(
+                    x - rect.left,
+                    y - rect.top,
+                    rect_width(rect),
+                    rect_height(rect),
+                    dpi,
+                    is_max,
+                );
+                LRESULT(code as isize)
             }
             WM_TIMER => {
                 STATE.with(|s| {
@@ -704,7 +661,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                                 SetCursor(Some(st.arrow));
                                 st.cursor = st.arrow;
                             }
-                            set_mini_pointer_inside(st, true, "client-mousemove");
                         }
                     });
                 }
@@ -737,33 +693,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(0)
             }
             WM_NCMOUSEMOVE => {
-                let is_pip = STATE.with(|s| {
-                    s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
-                });
-                if is_pip {
-                    let mut tme = TRACKMOUSEEVENT {
-                        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE | windows::Win32::UI::Input::KeyboardAndMouse::TRACKMOUSEEVENT_FLAGS(0x00000010), // TME_NONCLIENT
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0,
-                    };
-                    let _ = TrackMouseEvent(&mut tme);
-                    STATE.with(|s| {
-                        if let Some(st) = s.borrow_mut().as_mut() {
-                            let changed = set_mini_pointer_inside(st, false, "nonclient-mousemove");
-                            if changed {
-                                let _ = st.controller.SendMouseInput(
-                                    COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
-                                    COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
-                                    0,
-                                    POINT { x: 0, y: 0 },
-                                );
-                            }
-                        }
-                    });
-                    return DefWindowProcW(hwnd, msg, w, l);
-                }
-
+                // The custom titlebar is a non-client (caption) area, so pointer
+                // moves over it arrive here, not as WM_MOUSEMOVE. Forward them as
+                // overlay MOVE events so titlebar buttons still show hover.
                 let lp = l.0 as u32;
                 let mut point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
                 let _ = ScreenToClient(hwnd, &mut point);
@@ -793,9 +725,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             0x02A2 => { // WM_NCMOUSELEAVE
                 let cursor_in_window = is_cursor_in_window(hwnd);
                 STATE.with(|s| {
-                    if let Some(st) = s.borrow_mut().as_mut() {
-                        if st.is_pip || !cursor_in_window {
-                            set_mini_pointer_inside(st, false, "nonclient-mouseleave");
+                    if let Some(st) = s.borrow().as_ref() {
+                        // Only clear overlay hover when the pointer truly left the
+                        // window; moving between client area and caption must not.
+                        if !cursor_in_window {
                             let _ = st.controller.SendMouseInput(
                                 COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
                                 COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
@@ -855,9 +788,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             WM_MOUSELEAVE => {
                 let cursor_in_window = is_cursor_in_window(hwnd);
                 STATE.with(|s| {
-                    if let Some(st) = s.borrow_mut().as_mut() {
-                        if st.is_pip || !cursor_in_window {
-                            set_mini_pointer_inside(st, false, "client-mouseleave");
+                    if let Some(st) = s.borrow().as_ref() {
+                        if !cursor_in_window {
                             let _ = st.controller.SendMouseInput(
                                 COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
                                 COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
@@ -903,35 +835,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 let lp = l.0 as u32;
                 let cw = (lp & 0xFFFF) as i32;
                 let ch = (lp >> 16) as i32;
-                if cw > 0 && ch > 0 {
-                    STATE.with(|s| {
-                        if let Some(st) = s.borrow_mut().as_mut() {
-                            let dpi = GetDpiForWindow(hwnd) as i32;
-                            let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
-                            let video_h = (ch - video_top).max(1);
-
-                            let _ = st.swapchain.ResizeBuffers(
-                                0,
-                                cw as u32,
-                                video_h as u32,
-                                DXGI_FORMAT_UNKNOWN,
-                                DXGI_SWAP_CHAIN_FLAG(0),
-                            );
-                            let _ = st._bottom.SetOffsetY2(video_top as f32);
-                            let _ = st.base.SetBounds(RECT {
-                                left: 0,
-                                top: 0,
-                                right: cw,
-                                bottom: ch,
-                            });
-                            let _ = st.gl.resize(&st.device, cw, video_h);
-                            // The webview's visual-hosting output needs a Commit
-                            // to publish the new bounds in the DComp tree.
-                            let _ = st.dcomp.Commit();
-                            render(st);
-                        }
-                    });
-                }
+                STATE.with(|s| {
+                    if let Some(st) = s.borrow_mut().as_mut() {
+                        relayout(hwnd, st, cw, ch);
+                    }
+                });
                 LRESULT(0)
             }
             m if m == WM_TOGGLE_FULLSCREEN => {
@@ -1015,176 +923,46 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     None => {}
                 }
 
-                // Force layout recalculation after entering or exiting fullscreen to ensure
-                // the video swapchain, visual offset, and overlay bounds are updated correctly.
+                // Rebuild layout after entering/exiting fullscreen so the video
+                // swapchain, visual offset, and overlay bounds match the new size.
                 let mut rc = RECT::default();
                 if GetClientRect(hwnd, &mut rc).is_ok() {
-                    let cw = rc.right - rc.left;
-                    let ch = rc.bottom - rc.top;
-                    if cw > 0 && ch > 0 {
-                        STATE.with(|s| {
-                            if let Some(st) = s.borrow_mut().as_mut() {
-                                let dpi = GetDpiForWindow(hwnd) as i32;
-                                let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
-                                let video_h = (ch - video_top).max(1);
-                                let _ = st.swapchain.ResizeBuffers(
-                                    0,
-                                    cw as u32,
-                                    video_h as u32,
-                                    DXGI_FORMAT_UNKNOWN,
-                                    DXGI_SWAP_CHAIN_FLAG(0),
-                                );
-                                let _ = st._bottom.SetOffsetY2(video_top as f32);
-                                let _ = st.base.SetBounds(RECT {
-                                    left: 0,
-                                    top: 0,
-                                    right: cw,
-                                    bottom: ch,
-                                });
-                                let _ = st.gl.resize(&st.device, cw, video_h);
-                                let _ = st.dcomp.Commit();
-                                render(st);
-                            }
-                        });
-                    }
+                    let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
+                    STATE.with(|s| {
+                        if let Some(st) = s.borrow_mut().as_mut() {
+                            relayout(hwnd, st, cw, ch);
+                        }
+                    });
                 }
                 LRESULT(0)
             }
-            m if m == WM_TOGGLE_PIP => {
-                enum Action {
-                    Enter { new_style: isize, rect: RECT },
-                    Exit { restore_style: isize, restore_exstyle: isize, restore_rect: RECT },
-                }
-                let action = STATE.with(|s| -> Option<Action> {
-                    let mut b = s.borrow_mut();
-                    let st = b.as_mut()?;
-                    if !st.is_pip {
-                        let mut rc = RECT::default();
-                        let _ = GetWindowRect(hwnd, &mut rc);
-                        let saved_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-                        let saved_exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-                        st.saved_rect = rc;
-                        st.saved_style = saved_style;
-                        st.saved_exstyle = saved_exstyle;
-                        st.is_pip = true;
-                        st.mini_pointer_inside = true;
-                        log::info!("mini pointer inside=true reason=enter-mini");
+            m if m == WM_TOGGLE_STAY_ON_TOP => {
+                // Pure topmost Z-order toggle: no style swap, no move/resize, no
+                // relayout. Chrome and layout are identical to windowed mode —
+                // only the window's stacking changes. This replaces the old
+                // mini-player/PiP mode, which swapped in a native frame just to
+                // float the window.
+                let on_top = STATE.with(|s| {
+                    s.borrow_mut().as_mut().map(|st| {
+                        st.is_on_top = !st.is_on_top;
                         if let Some(cb) = &st.status_callback {
-                            cb(serde_json::json!({
-                                "window_pip": true,
-                                "mini_pointer_inside": true,
-                            }));
+                            cb(serde_json::json!({ "window_on_top": st.is_on_top }));
                         }
-                        let new_style = pip_window_style(saved_style);
-                        
-                        let mon: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-                        let mut mi = MONITORINFO {
-                            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                            ..Default::default()
-                        };
-                        let _ = GetMonitorInfoW(mon, &mut mi);
-                        
-                        let target_rect = st
-                            .last_pip_rect
-                            .map(|rect| clamp_pip_rect_to_work_area(rect, mi.rcWork))
-                            .unwrap_or_else(|| default_pip_rect(mi.rcWork));
-
-                        Some(Action::Enter { new_style, rect: target_rect })
-                    } else {
-                        let mut pip_rect = RECT::default();
-                        if GetWindowRect(hwnd, &mut pip_rect).is_ok() {
-                            st.last_pip_rect = Some(pip_rect);
-                        }
-                        let action = Action::Exit {
-                            restore_style: st.saved_style,
-                            restore_exstyle: st.saved_exstyle,
-                            restore_rect: st.saved_rect,
-                        };
-                        st.is_pip = false;
-                        st.mini_pointer_inside = false;
-                        log::info!("mini pointer inside=false reason=exit-mini");
-                        if let Some(cb) = &st.status_callback {
-                            cb(serde_json::json!({
-                                "window_pip": false,
-                                "mini_pointer_inside": false,
-                            }));
-                        }
-                        Some(action)
-                    }
+                        st.is_on_top
+                    })
                 });
-                match action {
-                    Some(Action::Enter { new_style, rect: mr }) => {
-                        SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
-                        let _ = SetWindowPos(
-                            hwnd,
-                            Some(HWND_TOPMOST),
-                            mr.left,
-                            mr.top,
-                            mr.right - mr.left,
-                            mr.bottom - mr.top,
-                            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-                        );
-                        let _ = SetForegroundWindow(hwnd);
-                    }
-                    Some(Action::Exit { restore_style, restore_exstyle, restore_rect: r }) => {
-                        SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
-                        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, restore_exstyle);
-                        if (restore_style as u32 & WS_MAXIMIZE.0) != 0 {
-                            let _ = SetWindowPos(
-                                hwnd,
-                                Some(HWND_NOTOPMOST),
-                                0, 0, 0, 0,
-                                SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED,
-                            );
-                            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
-                        } else {
-                            let _ = SetWindowPos(
-                                hwnd,
-                                Some(HWND_NOTOPMOST),
-                                r.left,
-                                r.top,
-                                r.right - r.left,
-                                r.bottom - r.top,
-                                SWP_FRAMECHANGED | SWP_SHOWWINDOW,
-                            );
-                        }
-                        let _ = SetForegroundWindow(hwnd);
-                    }
-                    None => {}
-                }
-
-                // Force layout recalculation after entering or exiting pip to ensure
-                // the video swapchain, visual offset, and overlay bounds are updated correctly.
-                let mut rc = RECT::default();
-                if GetClientRect(hwnd, &mut rc).is_ok() {
-                    let cw = rc.right - rc.left;
-                    let ch = rc.bottom - rc.top;
-                    if cw > 0 && ch > 0 {
-                        STATE.with(|s| {
-                            if let Some(st) = s.borrow_mut().as_mut() {
-                                let dpi = GetDpiForWindow(hwnd) as i32;
-                                let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
-                                let video_h = (ch - video_top).max(1);
-                                let _ = st.swapchain.ResizeBuffers(
-                                    0,
-                                    cw as u32,
-                                    video_h as u32,
-                                    DXGI_FORMAT_UNKNOWN,
-                                    DXGI_SWAP_CHAIN_FLAG(0),
-                                );
-                                let _ = st._bottom.SetOffsetY2(video_top as f32);
-                                let _ = st.base.SetBounds(RECT {
-                                    left: 0,
-                                    top: 0,
-                                    right: cw,
-                                    bottom: ch,
-                                });
-                                let _ = st.gl.resize(&st.device, cw, video_h);
-                                let _ = st.dcomp.Commit();
-                                render(st);
-                            }
-                        });
-                    }
+                if let Some(on_top) = on_top {
+                    let insert_after = if on_top { HWND_TOPMOST } else { HWND_NOTOPMOST };
+                    let _ = SetWindowPos(
+                        hwnd,
+                        Some(insert_after),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
+                    log::info!("window on_top={on_top}");
                 }
                 LRESULT(0)
             }
@@ -1259,9 +1037,12 @@ fn save_window_placement(hwnd: HWND) {
             let mut maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
             let mut rect = wp.rcNormalPosition;
             
+            // Fullscreen swaps the window rect, so persist the pre-fullscreen
+            // rect instead of the borderless one. Stay-on-top never changes the
+            // rect, so the live placement is already correct there.
             let saved_transient = STATE.with(|s| {
                 s.borrow().as_ref().map(|st| {
-                    (st.is_fullscreen || st.is_pip, st.saved_rect, st.saved_style)
+                    (st.is_fullscreen, st.saved_rect, st.saved_style)
                 })
             });
             if let Some((true, saved_rect, saved_style)) = saved_transient {
