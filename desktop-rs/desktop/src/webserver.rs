@@ -30,6 +30,7 @@ pub enum WindowAction {
     Minimize,
     Maximize,
     Close,
+    BeginDrag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -560,6 +561,12 @@ impl ControlServer {
                     cb(WindowAction::Close);
                 }
                 respond_control_ok(request, "window_close_requested", "closing window");
+            }
+            "/window/begin-drag" => {
+                if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
+                    cb(WindowAction::BeginDrag);
+                }
+                respond_control_ok(request, "window_drag_started", "window drag started");
             }
             "/sync-now" => {
                 let syncer = self.syncer.lock().unwrap().clone();

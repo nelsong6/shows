@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type WheelEventHandler } from 'react';
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEventHandler } from 'react';
 import {
   subscribeStatus,
   listShows,
@@ -16,6 +16,7 @@ import {
   minimizeWindow,
   maximizeWindow,
   closeWindow,
+  beginWindowDrag,
   seekPercent,
   seekRelative,
   setVolume as sendVolume,
@@ -316,6 +317,35 @@ function App() {
 
   // Last physical mouse position to prevent synthetic mousemove events from waking up controls.
   const lastMousePos = useRef<{ x: number; y: number } | null>(null);
+
+  // Pin-mode window dragging: in pin mode the titlebar is hidden, so a press and
+  // drag on the bare video surface moves the window. We only start the native
+  // move once the pointer travels past a small threshold, so plain clicks and
+  // double-clicks (e.g. toggle fullscreen) still work. The host owns the actual
+  // move loop; the overlay just decides the gesture began on draggable surface.
+  const surfaceDragStart = useRef<{ x: number; y: number } | null>(null);
+  const onTopRef = useRef(false);
+  onTopRef.current = Boolean(status.window_on_top);
+  const surfaceDragProps = {
+    onPointerDown: (e: ReactPointerEvent) => {
+      if (!onTopRef.current || e.button !== 0) return;
+      surfaceDragStart.current = { x: e.screenX, y: e.screenY };
+    },
+    onPointerMove: (e: ReactPointerEvent) => {
+      const start = surfaceDragStart.current;
+      if (!start) return;
+      if (Math.abs(e.screenX - start.x) + Math.abs(e.screenY - start.y) > 4) {
+        surfaceDragStart.current = null;
+        void beginWindowDrag();
+      }
+    },
+    onPointerUp: () => {
+      surfaceDragStart.current = null;
+    },
+    onPointerCancel: () => {
+      surfaceDragStart.current = null;
+    },
+  };
 
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
@@ -763,7 +793,7 @@ function App() {
 
   return (
     <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}${status.window_maximized ? ' window-maximized' : ''}${status.window_fullscreen ? ' window-fullscreen' : ''}`}>
-      {!status.window_fullscreen && (
+      {!status.window_fullscreen && !status.window_on_top && (
         <div className="titlebar">
           <div className="titlebar-logo">
             <img src="/favicon.ico" className="titlebar-logo-img" alt="" />
@@ -796,6 +826,7 @@ function App() {
         }}
         onDoubleClick={() => void runControl(toggleFullscreen)}
         onWheel={handleVolumeWheel}
+        {...surfaceDragProps}
       />
       <VolumeOsd volume={volOsd} />
       {controlToast && <ControlToast message={controlToast.message} level={controlToast.level} />}
@@ -829,6 +860,7 @@ function App() {
           style={{ flex: 1 }}
           onDoubleClick={() => void runControl(toggleFullscreen)}
           onWheel={handleVolumeWheel}
+          {...surfaceDragProps}
         />
       )}
       <BottomControlBar

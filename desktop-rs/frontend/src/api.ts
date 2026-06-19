@@ -479,6 +479,12 @@ export async function closeWindow(): Promise<ControlResult> {
   return postControl('/window/close');
 }
 
+// Begin a native window move (caption drag). Used in pin mode, where the bare
+// video surface is the drag handle — the host starts the standard move loop.
+export async function beginWindowDrag(): Promise<ControlResult> {
+  return postControl('/window/begin-drag');
+}
+
 
 export interface ShowDetailsEpisode {
   id: string;

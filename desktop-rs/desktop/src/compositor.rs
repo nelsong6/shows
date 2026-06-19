@@ -7,30 +7,30 @@
 //! runner and control server run on background threads.
 
 use std::cell::RefCell;
-use std::sync::mpsc;
-use std::sync::Arc;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc;
 
 use webview2_com::{Microsoft::Web::WebView2::Win32::*, *};
-use windows::core::*;
-use windows::core::{Error, Result};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::DirectComposition::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
-use windows::Win32::Graphics::DirectComposition::*;
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, MonitorFromWindow, ScreenToClient, HMONITOR, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST,
+    ClientToScreen, GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+    MONITORINFO, MonitorFromRect, MonitorFromWindow, ScreenToClient,
 };
 use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+    ReleaseCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::*;
+use windows::core::{Error, Result};
 
 use crate::gl::GlVideo;
 use crate::mpv::Handle;
@@ -49,6 +49,11 @@ const WM_WINDOW_MINIMIZE: u32 = WM_APP + 2;
 const WM_WINDOW_MAXIMIZE: u32 = WM_APP + 3;
 const WM_WINDOW_CLOSE: u32 = WM_APP + 4;
 const WM_TOGGLE_STAY_ON_TOP: u32 = WM_APP + 5;
+// Begin a native window move (caption drag) initiated from the overlay — used in
+// pin mode, where there is no titlebar and the bare video surface is the drag
+// handle. The overlay decides what is draggable (it owns the DOM) and asks the
+// host to start the standard move loop.
+const WM_BEGIN_DRAG: u32 = WM_APP + 6;
 
 // Custom-chrome geometry, defined ONCE in logical (96-DPI) pixels and scaled by
 // the window DPI everywhere it is used, so the Win32 hit-test regions line up
@@ -79,7 +84,9 @@ struct CursorMotion {
 
 impl CursorMotion {
     fn new(last_pos: Option<POINT>) -> Self {
-        Self { last_pos: last_pos.map(|p| (p.x, p.y)) }
+        Self {
+            last_pos: last_pos.map(|p| (p.x, p.y)),
+        }
     }
 
     fn observe(&mut self, point: POINT) -> bool {
@@ -104,7 +111,15 @@ fn rect_height(rect: RECT) -> i32 {
 /// All geometry derives from the shared logical constants, scaled by `dpi`, so
 /// the draggable caption and the window-button zone match the rendered overlay
 /// at every scale factor.
-fn nc_hit(cx: i32, cy: i32, width: i32, height: i32, dpi: i32, is_max: bool) -> u32 {
+fn nc_hit(
+    cx: i32,
+    cy: i32,
+    width: i32,
+    height: i32,
+    dpi: i32,
+    is_max: bool,
+    has_titlebar: bool,
+) -> u32 {
     let titlebar = scale_for_dpi(TITLEBAR_LOGICAL_H, dpi);
     let buttons = scale_for_dpi(WINDOW_BUTTONS_LOGICAL_W, dpi);
     let border = scale_for_dpi(RESIZE_BORDER_LOGICAL, dpi).max(1);
@@ -141,7 +156,9 @@ fn nc_hit(cx: i32, cy: i32, width: i32, height: i32, dpi: i32, is_max: bool) -> 
     }
 
     // Within the titlebar height and left of the window-button cluster: drag.
-    if cy >= 0 && cy < titlebar && cx < width - buttons {
+    // Pin mode has no titlebar — the bare surface is dragged via the overlay
+    // (WM_BEGIN_DRAG), so no caption strip here; everything non-border is client.
+    if has_titlebar && cy >= 0 && cy < titlebar && cx < width - buttons {
         return HTCAPTION;
     }
     HTCLIENT
@@ -180,9 +197,17 @@ mod tests {
         for dpi in [96, 120, 144, 192] {
             let tb = scale_for_dpi(TITLEBAR_LOGICAL_H, dpi);
             // Bottom row of the visible titlebar, left of the buttons: drags.
-            assert_eq!(nc_hit(200, tb - 1, 1000, 800, dpi, false), HTCAPTION, "dpi={dpi}");
+            assert_eq!(
+                nc_hit(200, tb - 1, 1000, 800, dpi, false, true),
+                HTCAPTION,
+                "dpi={dpi}"
+            );
             // One pixel below the titlebar is client, not caption.
-            assert_eq!(nc_hit(200, tb + 1, 1000, 800, dpi, false), HTCLIENT, "dpi={dpi}");
+            assert_eq!(
+                nc_hit(200, tb + 1, 1000, 800, dpi, false, true),
+                HTCLIENT,
+                "dpi={dpi}"
+            );
         }
     }
 
@@ -193,18 +218,35 @@ mod tests {
         for dpi in [96, 120, 144, 192] {
             let tb = scale_for_dpi(TITLEBAR_LOGICAL_H, dpi);
             let buttons = scale_for_dpi(WINDOW_BUTTONS_LOGICAL_W, dpi);
-            assert_eq!(nc_hit(1000 - buttons + 5, tb / 2, 1000, 800, dpi, false), HTCLIENT, "dpi={dpi}");
-            assert_eq!(nc_hit(1000 - buttons - 5, tb / 2, 1000, 800, dpi, false), HTCAPTION, "dpi={dpi}");
+            assert_eq!(
+                nc_hit(1000 - buttons + 5, tb / 2, 1000, 800, dpi, false, true),
+                HTCLIENT,
+                "dpi={dpi}"
+            );
+            assert_eq!(
+                nc_hit(1000 - buttons - 5, tb / 2, 1000, 800, dpi, false, true),
+                HTCAPTION,
+                "dpi={dpi}"
+            );
         }
     }
 
     #[test]
     fn resize_borders_exist_only_when_not_maximized() {
-        assert_eq!(nc_hit(0, 0, 1000, 800, 96, false), HTTOPLEFT);
-        assert_eq!(nc_hit(500, 799, 1000, 800, 96, false), HTBOTTOM);
-        assert_eq!(nc_hit(999, 400, 1000, 800, 96, false), HTRIGHT);
+        assert_eq!(nc_hit(0, 0, 1000, 800, 96, false, true), HTTOPLEFT);
+        assert_eq!(nc_hit(500, 799, 1000, 800, 96, false, true), HTBOTTOM);
+        assert_eq!(nc_hit(999, 400, 1000, 800, 96, false, true), HTRIGHT);
         // Maximized: no resize band — the corner falls through to caption.
-        assert_eq!(nc_hit(0, 0, 1000, 800, 96, true), HTCAPTION);
+        assert_eq!(nc_hit(0, 0, 1000, 800, 96, true, true), HTCAPTION);
+    }
+
+    // Pin mode (no titlebar): the top strip is client (the overlay drags the
+    // surface), but the resize borders still work.
+    #[test]
+    fn pin_mode_has_no_caption_strip_but_keeps_resize_borders() {
+        assert_eq!(nc_hit(200, 10, 1000, 800, 96, false, false), HTCLIENT);
+        assert_eq!(nc_hit(0, 0, 1000, 800, 96, false, false), HTTOPLEFT);
+        assert_eq!(nc_hit(999, 400, 1000, 800, 96, false, false), HTRIGHT);
     }
 }
 
@@ -258,7 +300,10 @@ unsafe impl Sync for Compositor {}
 impl Compositor {
     /// Build the window, GPU + DirectComposition tree, the transparent WebView2
     /// (navigated to `overlay_url`), and an mpv render context on `handle`.
-    pub fn create(handle: Arc<Handle>, overlay_url: &str) -> std::result::Result<Compositor, Box<dyn std::error::Error>> {
+    pub fn create(
+        handle: Arc<Handle>,
+        overlay_url: &str,
+    ) -> std::result::Result<Compositor, Box<dyn std::error::Error>> {
         // Transparent default background via env var to kill the first-paint flash.
         unsafe { std::env::set_var("WEBVIEW2_DEFAULT_BACKGROUND_COLOR", "00000000") };
         unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()? };
@@ -282,7 +327,10 @@ impl Compositor {
             Width: cw as u32,
             Height: video_h as u32,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             BufferCount: 2,
             Scaling: DXGI_SCALING_STRETCH,
@@ -314,11 +362,13 @@ impl Compositor {
             let (tx, rx) = mpsc::channel();
             CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
                 Box::new(|handler| unsafe {
-                    CreateCoreWebView2Environment(&handler).map_err(webview2_com::Error::WindowsError)
+                    CreateCoreWebView2Environment(&handler)
+                        .map_err(webview2_com::Error::WindowsError)
                 }),
                 Box::new(move |hr, env| {
                     hr?;
-                    tx.send(env.ok_or_else(|| Error::from(E_POINTER))).expect("send env");
+                    tx.send(env.ok_or_else(|| Error::from(E_POINTER)))
+                        .expect("send env");
                     Ok(())
                 }),
             )?;
@@ -334,7 +384,8 @@ impl Compositor {
                 }),
                 Box::new(move |hr, c| {
                     hr?;
-                    tx.send(c.ok_or_else(|| Error::from(E_POINTER))).expect("send controller");
+                    tx.send(c.ok_or_else(|| Error::from(E_POINTER)))
+                        .expect("send controller");
                     Ok(())
                 }),
             )?;
@@ -344,9 +395,19 @@ impl Compositor {
         let base2: ICoreWebView2Controller2 = controller.cast()?;
         let web_unknown: IUnknown = web.cast()?;
         unsafe {
-            base.SetBounds(RECT { left: 0, top: 0, right: cw, bottom: ch })?;
+            base.SetBounds(RECT {
+                left: 0,
+                top: 0,
+                right: cw,
+                bottom: ch,
+            })?;
             base.SetIsVisible(true)?;
-            base2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR { A: 0, R: 0, G: 0, B: 0 })?;
+            base2.SetDefaultBackgroundColor(COREWEBVIEW2_COLOR {
+                A: 0,
+                R: 0,
+                G: 0,
+                B: 0,
+            })?;
             controller.SetRootVisualTarget(&web_unknown)?;
             dcomp.Commit()?;
         }
@@ -357,7 +418,8 @@ impl Compositor {
         // via CursorChanged, and the host must apply it. Caching it here is what
         // lets the overlay's idle auto-hide and button hover cursors reach the
         // screen; WM_SETCURSOR applies the cache.
-        let arrow = unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or(HCURSOR(std::ptr::null_mut()));
+        let arrow =
+            unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or(HCURSOR(std::ptr::null_mut()));
         let cursor_handler = CursorChangedEventHandler::create(Box::new(
             |sender: Option<ICoreWebView2CompositionController>, _args| {
                 if let Some(c) = sender {
@@ -413,7 +475,11 @@ impl Compositor {
             });
         });
 
-        Ok(Compositor { hwnd, maximized, has_saved })
+        Ok(Compositor {
+            hwnd,
+            maximized,
+            has_saved,
+        })
     }
 
     pub fn hwnd(&self) -> HWND {
@@ -436,20 +502,18 @@ impl Compositor {
         });
     }
 
-    pub fn window_action_callback(&self) -> Box<dyn Fn(crate::webserver::WindowAction) + Send + Sync> {
+    pub fn window_action_callback(
+        &self,
+    ) -> Box<dyn Fn(crate::webserver::WindowAction) + Send + Sync> {
         let raw = self.hwnd.0 as usize;
         Box::new(move |action| unsafe {
             let msg = match action {
                 crate::webserver::WindowAction::Minimize => WM_WINDOW_MINIMIZE,
                 crate::webserver::WindowAction::Maximize => WM_WINDOW_MAXIMIZE,
                 crate::webserver::WindowAction::Close => WM_WINDOW_CLOSE,
+                crate::webserver::WindowAction::BeginDrag => WM_BEGIN_DRAG,
             };
-            let _ = PostMessageW(
-                Some(HWND(raw as *mut _)),
-                msg,
-                WPARAM(0),
-                LPARAM(0),
-            );
+            let _ = PostMessageW(Some(HWND(raw as *mut _)), msg, WPARAM(0), LPARAM(0));
         })
     }
 
@@ -499,7 +563,11 @@ impl Compositor {
     /// Show the window and run the message loop (blocks until the window closes).
     pub fn run(&self) {
         unsafe {
-            let cmd = if self.maximized { SW_SHOWMAXIMIZED } else { SW_SHOW };
+            let cmd = if self.maximized {
+                SW_SHOWMAXIMIZED
+            } else {
+                SW_SHOW
+            };
             let _ = ShowWindow(self.hwnd, cmd);
             let _ = SetForegroundWindow(self.hwnd);
             if std::env::var("SHOWS_TOPMOST").is_ok() {
@@ -568,7 +636,13 @@ fn relayout(hwnd: HWND, st: &mut State, cw: i32, ch: i32) {
         return;
     }
     unsafe {
-        let video_top = if st.is_fullscreen { 0 } else { titlebar_height_px(hwnd) };
+        // Fullscreen and pin mode both hide the custom titlebar, so the video
+        // fills the whole client area.
+        let video_top = if st.is_fullscreen || st.is_on_top {
+            0
+        } else {
+            titlebar_height_px(hwnd)
+        };
         let video_h = (ch - video_top).max(1);
         let _ = st.swapchain.ResizeBuffers(
             0,
@@ -578,7 +652,12 @@ fn relayout(hwnd: HWND, st: &mut State, cw: i32, ch: i32) {
             DXGI_SWAP_CHAIN_FLAG(0),
         );
         let _ = st._bottom.SetOffsetY2(video_top as f32);
-        let _ = st.base.SetBounds(RECT { left: 0, top: 0, right: cw, bottom: ch });
+        let _ = st.base.SetBounds(RECT {
+            left: 0,
+            top: 0,
+            right: cw,
+            bottom: ch,
+        });
         let _ = st.gl.resize(&st.device, cw, video_h);
         // The webview's visual-hosting output needs a Commit to publish the new
         // bounds in the DComp tree.
@@ -593,7 +672,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             WM_NCCALCSIZE => {
                 if w.0 != 0 {
                     let is_fs = STATE.with(|s| {
-                        s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
+                        s.borrow()
+                            .as_ref()
+                            .map(|st| st.is_fullscreen)
+                            .unwrap_or(false)
                     });
                     let is_max = IsZoomed(hwnd).as_bool();
                     if is_max && !is_fs {
@@ -611,8 +693,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(0)
             }
             WM_NCHITTEST => {
-                let is_fs = STATE.with(|s| {
-                    s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
+                let (is_fs, is_on_top) = STATE.with(|s| {
+                    s.borrow()
+                        .as_ref()
+                        .map(|st| (st.is_fullscreen, st.is_on_top))
+                        .unwrap_or((false, false))
                 });
                 if is_fs {
                     return LRESULT(HTCLIENT as isize);
@@ -626,6 +711,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
 
                 let dpi = GetDpiForWindow(hwnd) as i32;
                 let is_max = IsZoomed(hwnd).as_bool();
+                // Pin mode hides the titlebar, so there is no caption strip.
                 let code = nc_hit(
                     x - rect.left,
                     y - rect.top,
@@ -633,6 +719,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     rect_height(rect),
                     dpi,
                     is_max,
+                    !is_on_top,
                 );
                 LRESULT(code as isize)
             }
@@ -647,7 +734,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
             | WM_MBUTTONDOWN | WM_MBUTTONUP => {
                 let lp = l.0 as u32;
-                let point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
+                let point = POINT {
+                    x: (lp & 0xFFFF) as i16 as i32,
+                    y: (lp >> 16) as i16 as i32,
+                };
                 if msg == WM_MOUSEMOVE {
                     // Keyboard/media input can synthesize a same-position
                     // WM_MOUSEMOVE. Only real pointer displacement may reveal
@@ -697,7 +787,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 // moves over it arrive here, not as WM_MOUSEMOVE. Forward them as
                 // overlay MOVE events so titlebar buttons still show hover.
                 let lp = l.0 as u32;
-                let mut point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
+                let mut point = POINT {
+                    x: (lp & 0xFFFF) as i16 as i32,
+                    y: (lp >> 16) as i16 as i32,
+                };
                 let _ = ScreenToClient(hwnd, &mut point);
 
                 STATE.with(|s| {
@@ -722,7 +815,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 });
                 DefWindowProcW(hwnd, msg, w, l)
             }
-            0x02A2 => { // WM_NCMOUSELEAVE
+            0x02A2 => {
+                // WM_NCMOUSELEAVE
                 let cursor_in_window = is_cursor_in_window(hwnd);
                 STATE.with(|s| {
                     if let Some(st) = s.borrow().as_ref() {
@@ -751,7 +845,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 if hit == HTCLIENT {
                     let handled = STATE.with(|s| {
                         if let Some(st) = s.borrow().as_ref() {
-                            SetCursor(if st.cursor.0.is_null() { None } else { Some(st.cursor) });
+                            SetCursor(if st.cursor.0.is_null() {
+                                None
+                            } else {
+                                Some(st.cursor)
+                            });
                             true
                         } else {
                             false
@@ -770,8 +868,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 STATE.with(|s| {
                     if let Some(st) = s.borrow().as_ref() {
                         let lp = l.0 as u32;
-                        let mut point =
-                            POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
+                        let mut point = POINT {
+                            x: (lp & 0xFFFF) as i16 as i32,
+                            y: (lp >> 16) as i16 as i32,
+                        };
                         let _ = ScreenToClient(hwnd, &mut point);
                         let delta = ((w.0 >> 16) & 0xFFFF) as i16 as i32;
                         let vkeys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS((w.0 & 0xFFFF) as i32);
@@ -809,7 +909,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 // hosting; keyboard routes through the parent window once focused.
                 STATE.with(|s| {
                     if let Some(st) = s.borrow().as_ref() {
-                        let _ = st.base.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+                        let _ = st
+                            .base
+                            .MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
                     }
                 });
                 LRESULT(0)
@@ -848,8 +950,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 // synchronously dispatches `WM_SIZE`, whose arm also borrows
                 // STATE, and nesting would panic the RefCell.
                 enum Action {
-                    Enter { new_style: isize, monitor_rect: RECT },
-                    Exit { restore_style: isize, restore_exstyle: isize, restore_rect: RECT },
+                    Enter {
+                        new_style: isize,
+                        monitor_rect: RECT,
+                    },
+                    Exit {
+                        restore_style: isize,
+                        restore_exstyle: isize,
+                        restore_rect: RECT,
+                    },
                 }
                 let action = STATE.with(|s| -> Option<Action> {
                     let mut b = s.borrow_mut();
@@ -874,7 +983,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                             ..Default::default()
                         };
                         let _ = GetMonitorInfoW(mon, &mut mi);
-                        Some(Action::Enter { new_style, monitor_rect: mi.rcMonitor })
+                        Some(Action::Enter {
+                            new_style,
+                            monitor_rect: mi.rcMonitor,
+                        })
                     } else {
                         let action = Action::Exit {
                             restore_style: st.saved_style,
@@ -889,7 +1001,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     }
                 });
                 match action {
-                    Some(Action::Enter { new_style, monitor_rect: mr }) => {
+                    Some(Action::Enter {
+                        new_style,
+                        monitor_rect: mr,
+                    }) => {
                         SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
                         let _ = SetWindowPos(
                             hwnd,
@@ -902,7 +1017,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         );
                         let _ = SetForegroundWindow(hwnd);
                     }
-                    Some(Action::Exit { restore_style, restore_exstyle, restore_rect: r }) => {
+                    Some(Action::Exit {
+                        restore_style,
+                        restore_exstyle,
+                        restore_rect: r,
+                    }) => {
                         SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
                         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, restore_exstyle);
                         if (restore_style as u32 & WS_MAXIMIZE.0) != 0 {
@@ -963,7 +1082,35 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                     );
                     log::info!("window on_top={on_top}");
+                    // Pin mode hides the titlebar (video_top changes), so rebuild
+                    // layout even though the window size didn't change.
+                    let mut rc = RECT::default();
+                    if GetClientRect(hwnd, &mut rc).is_ok() {
+                        let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
+                        STATE.with(|s| {
+                            if let Some(st) = s.borrow_mut().as_mut() {
+                                relayout(hwnd, st, cw, ch);
+                            }
+                        });
+                    }
                 }
+                LRESULT(0)
+            }
+            m if m == WM_BEGIN_DRAG => {
+                // Start the standard window-move loop as if the caption were
+                // grabbed at the current cursor. The overlay posts this when the
+                // user drags the bare video surface in pin mode (no titlebar).
+                let _ = ReleaseCapture();
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let lp =
+                    ((pt.x as i16 as u16 as u32) | ((pt.y as i16 as u16 as u32) << 16)) as isize;
+                SendMessageW(
+                    hwnd,
+                    WM_NCLBUTTONDOWN,
+                    Some(WPARAM(HTCAPTION as usize)),
+                    Some(LPARAM(lp)),
+                );
                 LRESULT(0)
             }
             m if m == WM_WINDOW_MINIMIZE => {
@@ -1005,7 +1152,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
 
 fn window_config_path() -> PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&base).join("shows").join("window.json")
+    std::path::Path::new(&base)
+        .join("shows")
+        .join("window.json")
 }
 
 fn load_window_placement() -> Option<(i32, i32, i32, i32, bool)> {
@@ -1020,10 +1169,23 @@ fn load_window_placement() -> Option<(i32, i32, i32, i32, bool)> {
     let right = json.get("right")?.as_i64()? as i32;
     let bottom = json.get("bottom")?.as_i64()? as i32;
     let maximized = json.get("maximized")?.as_bool().unwrap_or(false);
-    if right - left > 100 && bottom - top > 100 {
+    let rect = RECT {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    if right - left > 100 && bottom - top > 100 && placement_is_visible(rect) {
         Some((left, top, right - left, bottom - top, maximized))
     } else {
         None
+    }
+}
+
+fn placement_is_visible(rect: RECT) -> bool {
+    unsafe {
+        let monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONULL);
+        !monitor.is_invalid()
     }
 }
 
@@ -1036,20 +1198,20 @@ fn save_window_placement(hwnd: HWND) {
         if GetWindowPlacement(hwnd, &mut wp).is_ok() {
             let mut maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
             let mut rect = wp.rcNormalPosition;
-            
+
             // Fullscreen swaps the window rect, so persist the pre-fullscreen
             // rect instead of the borderless one. Stay-on-top never changes the
             // rect, so the live placement is already correct there.
             let saved_transient = STATE.with(|s| {
-                s.borrow().as_ref().map(|st| {
-                    (st.is_fullscreen, st.saved_rect, st.saved_style)
-                })
+                s.borrow()
+                    .as_ref()
+                    .map(|st| (st.is_fullscreen, st.saved_rect, st.saved_style))
             });
             if let Some((true, saved_rect, saved_style)) = saved_transient {
                 rect = saved_rect;
                 maximized = (saved_style as u32 & WS_MAXIMIZE.0) != 0;
             }
-            
+
             let json = serde_json::json!({
                 "left": rect.left,
                 "top": rect.top,
@@ -1082,9 +1244,19 @@ fn auto_fit_window(hwnd: HWND, vw: i32, vh: i32) {
 
         let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
         let exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        let mut rc = RECT { left: 0, top: 0, right: vw, bottom: vh };
-        let _ = AdjustWindowRectEx(&mut rc, WINDOW_STYLE(style), false, WINDOW_EX_STYLE(exstyle));
-        
+        let mut rc = RECT {
+            left: 0,
+            top: 0,
+            right: vw,
+            bottom: vh,
+        };
+        let _ = AdjustWindowRectEx(
+            &mut rc,
+            WINDOW_STYLE(style),
+            false,
+            WINDOW_EX_STYLE(exstyle),
+        );
+
         let mut win_w = rc.right - rc.left;
         let mut win_h = rc.bottom - rc.top;
 
@@ -1118,7 +1290,8 @@ fn create_window() -> Result<(HWND, bool, bool)> {
         lpfnWndProc: Some(wndproc),
         hInstance: hinstance,
         lpszClassName: class,
-        hIcon: unsafe { LoadIconW(Some(hinstance), w!("IDI_ICON1")) }.unwrap_or(HICON(std::ptr::null_mut())),
+        hIcon: unsafe { LoadIconW(Some(hinstance), w!("IDI_ICON1")) }
+            .unwrap_or(HICON(std::ptr::null_mut())),
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.unwrap_or(HCURSOR(std::ptr::null_mut())),
         ..Default::default()
     };

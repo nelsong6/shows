@@ -18,10 +18,12 @@ Three orthogonal flags, surfaced in status:
 - `window_maximized` — standard maximize/restore.
 - `window_fullscreen` — borderless fullscreen on the current monitor. Hides the
   custom titlebar; the video fills the client area.
-- `window_on_top` — the window floats above others (topmost Z-order). **Nothing
-  else changes**: same custom chrome, same titlebar, same hit-testing, same
-  single control bar, same size and position. It is a Z-order toggle, not a
-  separate window style.
+- `window_on_top` ("pin mode") — the window floats above others (topmost
+  Z-order) **and hides the custom titlebar** so the video fills the window and a
+  compact floating player reclaims the space. It is still not a separate window
+  style — no native frame swap. Because there is no titlebar to grab, the bare
+  video surface is the drag handle (see Pin-mode dragging). Exit via the pin
+  button in the control bar or `i`, which restores the titlebar.
 
 There is no "mini player" / picture-in-picture mode. It was removed: it swapped
 in a native window frame and a parallel control surface purely to approximate
@@ -60,8 +62,20 @@ returns the `HT*` code, so it is unit-tested at 96/120/144 DPI:
   `HTCLIENT`.
 - **Fullscreen:** entire window → `HTCLIENT`.
 
-`window_on_top` does not change hit-testing — it uses the windowed/maximized
-rules unchanged.
+In **pin mode** the titlebar is hidden, so `nc_hit` is called with
+`has_titlebar = false`: there is no caption strip (the whole interior is
+`HTCLIENT`, forwarded to the overlay), but the resize borders still work.
+
+## Pin-mode dragging
+
+With no titlebar there is no native caption to grab, so the window is moved by
+dragging the bare video surface. The overlay owns this decision because it knows
+the DOM: a left press on a non-control surface that then travels past a small
+threshold (so plain clicks and double-clicks still work) calls
+`POST /window/begin-drag`, and the host starts the standard move loop
+(`ReleaseCapture` + `WM_NCLBUTTONDOWN HTCAPTION`). Controls stay clickable —
+they are normal `HTCLIENT` and the overlay never treats a press on them as a
+drag.
 
 ## Input forwarding
 
