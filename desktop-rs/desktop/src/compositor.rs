@@ -722,16 +722,23 @@ fn render(s: &State) {
         if let Ok(backbuffer) = s.swapchain.GetBuffer::<ID3D11Texture2D>(0) {
             s.context.CopyResource(&backbuffer, s.gl.texture());
         }
-        // `Present` returns DXGI_STATUS_OCCLUDED (a success HRESULT) when the
-        // window is fully covered and nothing was shown. Stop driving the video
-        // path until it is visible again instead of presenting ~60x/sec into a
-        // hidden surface.
-        if s.swapchain.Present(1, DXGI_PRESENT(0)) == DXGI_STATUS_OCCLUDED {
-            s.standby.set(true);
-            log::info!("render: occluded — entering standby (present/commit paused)");
+        // DIAGNOSTIC (Action 1): when frozen, no Present/Commit is issued, so the
+        // on-screen frame stops updating. This isolates whether the present loop
+        // drives the alt-tab monitor re-sync: if the flash persists with zero
+        // presents, the present loop is not the cause. Revert after observation.
+        const FREEZE_PRESENTATION: bool = true;
+        if !FREEZE_PRESENTATION {
+            // `Present` returns DXGI_STATUS_OCCLUDED (a success HRESULT) when the
+            // window is fully covered and nothing was shown. Stop driving the
+            // video path until it is visible again instead of presenting ~60x/sec
+            // into a hidden surface.
+            if s.swapchain.Present(1, DXGI_PRESENT(0)) == DXGI_STATUS_OCCLUDED {
+                s.standby.set(true);
+                log::info!("render: occluded — entering standby (present/commit paused)");
+            }
+            // WebView2's visual-hosting output appears only after a device commit.
+            let _ = s.dcomp.Commit();
         }
-        // WebView2's visual-hosting output appears only after a device commit.
-        let _ = s.dcomp.Commit();
     }
 }
 
