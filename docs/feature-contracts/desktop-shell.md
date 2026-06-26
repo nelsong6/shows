@@ -25,6 +25,12 @@ Three orthogonal flags, surfaced in status:
   video surface is the drag handle (see Pin-mode dragging). Exit via the pin
   button in the control bar or `i`, which restores the titlebar.
 
+  `POST /stay-on-top` is an **idempotent set**, not a flip: the body carries the
+  desired state (`{"on_top": bool}`). A request matching the current state is a
+  no-op. This is necessary but **NOT sufficient** to fix the pin button — see
+  [Pin toggle: one click, one command](#pin-toggle-one-click-one-command), which
+  is the hard-won part. Read it before touching the pin logic.
+
 There is no "mini player" / picture-in-picture mode. It was removed: it swapped
 in a native window frame and a parallel control surface purely to approximate
 "always on top," which `window_on_top` now does directly. Per the migration
@@ -77,6 +83,27 @@ threshold (so plain clicks and double-clicks still work) calls
 they are normal `HTCLIENT` and the overlay never treats a press on them as a
 drag.
 
+## Pin-mode aspect lock
+
+Pin mode is a floating player, so wasted screen space (letterbox bars) is the
+enemy. The window is therefore locked to the video's display aspect ratio
+**only while on top**:
+
+- **On entering** pin mode the titlebar is removed, so the old shape (sized for
+  video + titlebar) would letterbox the video. The window snaps to the video
+  aspect — top-left and width kept, height derived — so no space is wasted.
+- **While resizing** (`WM_SIZING`) the proposed window rect is constrained to the
+  video aspect by `constrain_rect_aspect`: a side edge drives its own axis and
+  derives the other; a corner derives height from width and pins the dragged
+  corner so the fixed corner stays put. The handler returns `TRUE` so the OS
+  reads the adjusted rect back.
+
+Because pin mode has no non-client frame, the window rect equals the
+client/video rect, so locking the window shape locks the visible video shape
+directly. The ratio comes from mpv's `video-params/aspect` (`GlVideo::video_aspect`);
+with no video loaded yet there is nothing to lock, so resizing is unconstrained
+until the first frame's params are known. Windowed mode keeps free resizing.
+
 ## Input forwarding
 
 - Client-area mouse messages are forwarded to the overlay via `SendMouseInput`
@@ -92,10 +119,15 @@ drag.
 ## Controls visibility — single owner
 
 The overlay owns exactly one visible/hidden state and one idle timer. No native
-pointer-inside signal, no second "max visible" cap timer. During `phase ==
-"playing"` the control bar is hidden after `CONTROLS_IDLE_MS` of no real pointer
-movement. It is kept open while any of these hold:
+pointer-inside signal, no second "max visible" cap timer. Only while the video is
+**actively advancing** (`phase == "playing"` **and** `playback.paused` is false)
+is the control bar hidden after `CONTROLS_IDLE_MS` of no real pointer movement.
+`phase` stays `"playing"` across a pause (it tracks the round, not playback), so
+the paused check is required — otherwise the bar and cursor would hide while
+paused, leaving the controls invisible and unclickable. It is kept open (auto-
+hide disabled) while any of these hold:
 
+- the video is paused,
 - the settings/dashboard panel is open,
 - the pointer is down on the controls (scrubbing),
 - the pointer is hovering the controls.

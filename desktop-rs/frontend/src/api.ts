@@ -260,10 +260,12 @@ export async function toggleFullscreen(): Promise<ControlResult> {
   return postControl('/fullscreen');
 }
 
-// Toggle whether the window floats above others (topmost Z-order). Chrome and
-// layout are unchanged — it is purely a stacking toggle.
-export async function toggleStayOnTop(): Promise<ControlResult> {
-  return postControl('/stay-on-top');
+// Set whether the window floats above others (pin / topmost Z-order). This is an
+// idempotent set, not a flip: the caller passes the desired state (`!current`),
+// so a single click that reaches the host as two POSTs lands on the same state
+// instead of cancelling itself out.
+export async function setStayOnTop(onTop: boolean, from?: boolean): Promise<ControlResult> {
+  return postControl('/stay-on-top', {on_top: onTop, from});
 }
 
 export async function seekPercent(percent: number): Promise<ControlResult> {

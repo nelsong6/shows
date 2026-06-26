@@ -219,7 +219,9 @@ impl StatusPatch {
 
 pub type WindowActionCb = Box<dyn Fn(WindowAction) + Send + Sync>;
 type FullscreenCb = Box<dyn Fn() + Send + Sync>;
-type StayOnTopCb = Box<dyn Fn() + Send + Sync>;
+// Takes the desired pin state, not a flip — the overlay sends the target it
+// wants so duplicate POSTs from one click converge instead of cancelling out.
+type StayOnTopCb = Box<dyn Fn(bool) + Send + Sync>;
 
 pub struct ControlServer {
     dist_dir: Option<PathBuf>,
@@ -539,10 +541,20 @@ impl ControlServer {
                 respond_control_ok(request, "fullscreen_toggled", "fullscreen toggled");
             }
             "/stay-on-top" => {
-                if let Some(cb) = self.on_stay_on_top.lock().unwrap().as_ref() {
-                    cb();
+                // Idempotent set: the body carries the desired pin state
+                // (`{"on_top": bool}`). The overlay sends the target it wants, so
+                // a single click delivered as two POSTs lands on one state rather
+                // than flipping twice and undoing itself.
+                let b = read_body(&mut request);
+                let on_top = b.get("on_top").and_then(Value::as_bool);
+                let from = b.get("from").and_then(Value::as_bool);
+                log::info!("/stay-on-top POST on_top={on_top:?} from={from:?}");
+                if let Some(on_top) = on_top {
+                    if let Some(cb) = self.on_stay_on_top.lock().unwrap().as_ref() {
+                        cb(on_top);
+                    }
                 }
-                respond_control_ok(request, "stay_on_top_toggled", "stay on top toggled");
+                respond_control_ok(request, "stay_on_top_set", "stay on top set");
             }
             "/window/minimize" => {
                 if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {

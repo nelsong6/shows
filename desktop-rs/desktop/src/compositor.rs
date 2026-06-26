@@ -48,7 +48,10 @@ const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
 const WM_WINDOW_MINIMIZE: u32 = WM_APP + 2;
 const WM_WINDOW_MAXIMIZE: u32 = WM_APP + 3;
 const WM_WINDOW_CLOSE: u32 = WM_APP + 4;
-const WM_TOGGLE_STAY_ON_TOP: u32 = WM_APP + 5;
+// Set pin (stay-on-top) state on the UI thread. WPARAM carries the desired state
+// (1 = pinned, 0 = unpinned) — an idempotent set, not a flip, so a duplicated
+// request from one click can't cancel itself out.
+const WM_SET_STAY_ON_TOP: u32 = WM_APP + 5;
 // Begin a native window move (caption drag) initiated from the overlay — used in
 // pin mode, where there is no titlebar and the bare video surface is the drag
 // handle. The overlay decides what is draggable (it owns the DOM) and asks the
@@ -164,6 +167,39 @@ fn nc_hit(
     HTCLIENT
 }
 
+/// Constrain a `WM_SIZING` rect to `aspect` (width / height), in place. `edge` is
+/// the `WMSZ_*` handle being dragged; we adjust the dimension the user is *not*
+/// driving and anchor the corner/edge that stays put so the window doesn't crawl
+/// across the screen as it resizes:
+/// - dragging a left/right edge drives width → derive height (keep top fixed),
+/// - dragging a top/bottom edge drives height → derive width (keep left fixed),
+/// - dragging a corner drives width → derive height, pinned to that corner.
+///
+/// Pure (operates on a plain `RECT`) so it is unit-tested without a window. In
+/// pin mode the window has no non-client frame, so the window rect equals the
+/// client/video rect and this locks the visible video shape directly.
+fn constrain_rect_aspect(rect: &mut RECT, edge: u32, aspect: f64) {
+    let width = rect_width(*rect);
+    let height = rect_height(*rect);
+    match edge {
+        WMSZ_LEFT | WMSZ_RIGHT => {
+            rect.bottom = rect.top + ((width as f64 / aspect).round() as i32).max(1);
+        }
+        WMSZ_TOP | WMSZ_BOTTOM => {
+            rect.right = rect.left + ((height as f64 * aspect).round() as i32).max(1);
+        }
+        // Corners: width-driven height, anchored to the dragged corner so the
+        // fixed corner stays put.
+        WMSZ_TOPLEFT | WMSZ_TOPRIGHT => {
+            rect.top = rect.bottom - ((width as f64 / aspect).round() as i32).max(1);
+        }
+        _ => {
+            // WMSZ_BOTTOMLEFT | WMSZ_BOTTOMRIGHT
+            rect.bottom = rect.top + ((width as f64 / aspect).round() as i32).max(1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +283,52 @@ mod tests {
         assert_eq!(nc_hit(200, 10, 1000, 800, 96, false, false), HTCLIENT);
         assert_eq!(nc_hit(0, 0, 1000, 800, 96, false, false), HTTOPLEFT);
         assert_eq!(nc_hit(999, 400, 1000, 800, 96, false, false), HTRIGHT);
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT { left, top, right, bottom }
+    }
+
+    // Dragging a side edge drives that axis; the perpendicular axis is derived
+    // and the opposite edge stays anchored.
+    #[test]
+    fn aspect_lock_side_edges_derive_the_other_axis() {
+        // 16:9. Drag the right edge to width 1600 → height becomes 900, top fixed.
+        let mut r = rect(100, 50, 1700, 1000);
+        constrain_rect_aspect(&mut r, WMSZ_RIGHT, 16.0 / 9.0);
+        assert_eq!(r.left, 100);
+        assert_eq!(r.top, 50);
+        assert_eq!(rect_width(r), 1600);
+        assert_eq!(rect_height(r), 900);
+
+        // Drag the bottom edge to height 450 → width becomes 800, left fixed.
+        let mut r = rect(100, 50, 900, 500);
+        constrain_rect_aspect(&mut r, WMSZ_BOTTOM, 16.0 / 9.0);
+        assert_eq!(r.left, 100);
+        assert_eq!(r.top, 50);
+        assert_eq!(rect_height(r), 450);
+        assert_eq!(rect_width(r), 800);
+    }
+
+    // A corner derives height from width and pins the dragged corner: the fixed
+    // (diagonally opposite) corner must not move.
+    #[test]
+    fn aspect_lock_corners_pin_the_fixed_corner() {
+        // Bottom-right drag: top-left (100,50) is the anchor and stays put.
+        let mut r = rect(100, 50, 1700, 1234);
+        constrain_rect_aspect(&mut r, WMSZ_BOTTOMRIGHT, 16.0 / 9.0);
+        assert_eq!((r.left, r.top), (100, 50));
+        assert_eq!(rect_width(r), 1600);
+        assert_eq!(rect_height(r), 900);
+
+        // Top-left drag: bottom-right (1700,1234) is the anchor and stays put;
+        // the top moves up/down to give width 1600 → height 900.
+        let mut r = rect(100, 50, 1700, 1234);
+        constrain_rect_aspect(&mut r, WMSZ_TOPLEFT, 16.0 / 9.0);
+        assert_eq!((r.right, r.bottom), (1700, 1234));
+        assert_eq!(rect_width(r), 1600);
+        assert_eq!(rect_height(r), 900);
+        assert_eq!(r.top, 334);
     }
 }
 
@@ -537,15 +619,16 @@ impl Compositor {
         })
     }
 
-    /// A `Send + Sync` closure that posts a stay-on-top-toggle message to the UI
-    /// thread (the topmost Z-order change must happen on the owning thread).
-    pub fn stay_on_top_callback(&self) -> Box<dyn Fn() + Send + Sync> {
+    /// A `Send + Sync` closure that posts the desired pin (stay-on-top) state to
+    /// the UI thread (the topmost Z-order change must happen on the owning
+    /// thread). `on_top` is the target state, carried in WPARAM.
+    pub fn stay_on_top_callback(&self) -> Box<dyn Fn(bool) + Send + Sync> {
         let raw = self.hwnd.0 as usize;
-        Box::new(move || unsafe {
+        Box::new(move |on_top: bool| unsafe {
             let _ = PostMessageW(
                 Some(HWND(raw as *mut _)),
-                WM_TOGGLE_STAY_ON_TOP,
-                WPARAM(0),
+                WM_SET_STAY_ON_TOP,
+                WPARAM(on_top as usize),
                 LPARAM(0),
             );
         })
@@ -916,6 +999,27 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 });
                 LRESULT(0)
             }
+            WM_SIZING => {
+                // Lock the window to the video's aspect ratio while in pin mode,
+                // so the floating player never grows letterbox bars (wasted
+                // screen space). Only pin mode constrains: windowed mode keeps a
+                // titlebar and free resizing. `l` points at the proposed window
+                // rect, which the OS reads back after we return TRUE.
+                let aspect = STATE.with(|s| {
+                    s.borrow()
+                        .as_ref()
+                        .filter(|st| st.is_on_top)
+                        .and_then(|st| st.gl.video_aspect())
+                });
+                match aspect {
+                    Some(aspect) => {
+                        let rect = &mut *(l.0 as *mut RECT);
+                        constrain_rect_aspect(rect, w.0 as u32, aspect);
+                        LRESULT(1)
+                    }
+                    None => DefWindowProcW(hwnd, msg, w, l),
+                }
+            }
             WM_SIZE => {
                 // The first WM_SIZE fires during CreateWindowEx, before STATE
                 // is set — borrow_mut().as_mut() handles that as a no-op. We
@@ -1055,22 +1159,33 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 }
                 LRESULT(0)
             }
-            m if m == WM_TOGGLE_STAY_ON_TOP => {
-                // Pure topmost Z-order toggle: no style swap, no move/resize, no
-                // relayout. Chrome and layout are identical to windowed mode —
-                // only the window's stacking changes. This replaces the old
-                // mini-player/PiP mode, which swapped in a native frame just to
-                // float the window.
-                let on_top = STATE.with(|s| {
-                    s.borrow_mut().as_mut().map(|st| {
-                        st.is_on_top = !st.is_on_top;
+            m if m == WM_SET_STAY_ON_TOP => {
+                // Idempotent set, not a flip: WPARAM is the desired pin state, so a
+                // duplicated request from one click lands on that state instead of
+                // toggling twice and undoing itself. A request matching the current
+                // state is a no-op (None below). No style swap or native frame swap
+                // (this replaces the old mini-player/PiP mode). Entering pin mode
+                // hides the titlebar, so it also snaps the window to the video
+                // aspect ratio — and resizing stays locked to it (see WM_SIZING)
+                // — so the floating player wastes no screen space.
+                let desired = w.0 != 0;
+                let changed = STATE.with(|s| {
+                    s.borrow_mut().as_mut().and_then(|st| {
+                        if st.is_on_top == desired {
+                            return None;
+                        }
+                        st.is_on_top = desired;
                         if let Some(cb) = &st.status_callback {
                             cb(serde_json::json!({ "window_on_top": st.is_on_top }));
                         }
-                        st.is_on_top
+                        // Aspect is only needed when entering pin mode; query it
+                        // now so we don't hold a STATE borrow across SetWindowPos
+                        // (which dispatches WM_SIZE and re-borrows STATE).
+                        let aspect = st.is_on_top.then(|| st.gl.video_aspect()).flatten();
+                        Some((st.is_on_top, aspect))
                     })
                 });
-                if let Some(on_top) = on_top {
+                if let Some((on_top, enter_aspect)) = changed {
                     let insert_after = if on_top { HWND_TOPMOST } else { HWND_NOTOPMOST };
                     let _ = SetWindowPos(
                         hwnd,
@@ -1082,6 +1197,26 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                     );
                     log::info!("window on_top={on_top}");
+                    // Entering pin mode removes the titlebar, so the old window
+                    // shape (sized for video + titlebar) would letterbox the
+                    // video. Snap to the video aspect — keep the top-left and
+                    // width, derive the height — so no screen space is wasted.
+                    if let Some(aspect) = enter_aspect {
+                        let mut wr = RECT::default();
+                        if GetWindowRect(hwnd, &mut wr).is_ok() {
+                            let width = rect_width(wr);
+                            let new_h = ((width as f64 / aspect).round() as i32).max(1);
+                            let _ = SetWindowPos(
+                                hwnd,
+                                None,
+                                0,
+                                0,
+                                width,
+                                new_h,
+                                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                            );
+                        }
+                    }
                     // Pin mode hides the titlebar (video_top changes), so rebuild
                     // layout even though the window size didn't change.
                     let mut rc = RECT::default();

@@ -337,6 +337,16 @@ impl GlVideo {
         &self.texture
     }
 
+    /// Display aspect ratio (width / height) of the currently-loaded video, or
+    /// `None` if nothing is loaded yet. `video-params/aspect` is mpv's DAR after
+    /// sample-aspect and rotation, i.e. exactly the shape the frame is drawn at —
+    /// used to lock the window to the video in pin mode so there are no letterbox
+    /// bars.
+    pub fn video_aspect(&self) -> Option<f64> {
+        let a: f64 = self.handle.get_property("video-params/aspect")?.parse().ok()?;
+        (a.is_finite() && a > 0.0).then_some(a)
+    }
+
     /// Render the current mpv frame into the shared texture.
     pub fn render(&self) {
         unsafe {

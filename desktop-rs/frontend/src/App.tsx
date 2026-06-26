@@ -12,7 +12,7 @@ import {
   markShowUnwatched,
   defer,
   toggleFullscreen,
-  toggleStayOnTop,
+  setStayOnTop,
   minimizeWindow,
   maximizeWindow,
   closeWindow,
@@ -325,7 +325,6 @@ function App() {
   // move loop; the overlay just decides the gesture began on draggable surface.
   const surfaceDragStart = useRef<{ x: number; y: number } | null>(null);
   const onTopRef = useRef(false);
-  onTopRef.current = Boolean(status.window_on_top);
   const surfaceDragProps = {
     onPointerDown: (e: ReactPointerEvent) => {
       if (!onTopRef.current || e.button !== 0) return;
@@ -346,6 +345,65 @@ function App() {
       surfaceDragStart.current = null;
     },
   };
+
+  // Pin (stay-on-top): the same optimistic desired/in-flight reconcile that
+  // pause and volume already use (see pauseSync above and
+  // docs/adr/0001-ui-control-state-sync.md). We hold the user's DESIRED state,
+  // send it as an idempotent set, and reconcile against the echoed
+  // window_on_top — so a lossy/laggy status stream can never make us derive a
+  // command from a stale value. `onTopRef` is the optimistic current state; the
+  // reconcile effect and requestStayOnTop are its only writers.
+  const onTopSync = useRef<{ desired: boolean | null; inFlight: boolean }>({
+    desired: null,
+    inFlight: false,
+  });
+
+  useEffect(() => {
+    if (status.window_on_top == null) return;
+    const observed = Boolean(status.window_on_top);
+    const desired = onTopSync.current.desired;
+    if (desired === null || observed === desired) {
+      onTopSync.current.desired = null;
+      onTopRef.current = observed;
+    }
+  }, [status.window_on_top]);
+
+  const pumpOnTopQueue = useCallback(() => {
+    const sync = onTopSync.current;
+    if (sync.inFlight || sync.desired === null) return;
+
+    const sent = sync.desired;
+    sync.inFlight = true;
+    void setStayOnTop(sent)
+      .catch(() => {
+        const current = onTopSync.current;
+        if (current.desired === sent) current.desired = null;
+      })
+      .finally(() => {
+        const current = onTopSync.current;
+        current.inFlight = false;
+        if (current.desired !== null && current.desired !== sent) {
+          pumpOnTopQueue();
+        }
+      });
+  }, []);
+
+  const requestStayOnTop = useCallback((onTop: boolean) => {
+    onTopRef.current = onTop;
+    onTopSync.current.desired = onTop;
+    pumpOnTopQueue();
+  }, [pumpOnTopQueue]);
+
+  // Button and `i` keybind both route through here. A click can reach the
+  // webview as two events where a keypress can't, so we also drop a duplicate
+  // within a short window; the idempotent set above makes that safe, never wrong.
+  const pinGuardRef = useRef(0);
+  const togglePin = useCallback(() => {
+    const now = Date.now();
+    if (now - pinGuardRef.current < 400) return;
+    pinGuardRef.current = now;
+    requestStayOnTop(!onTopRef.current);
+  }, [requestStayOnTop]);
 
   // Keyboard controls. Bound on window so they work whenever the overlay has
   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
@@ -377,7 +435,7 @@ function App() {
           void runControl(toggleFullscreen);
           break;
         case 'i':
-          void runControl(toggleStayOnTop);
+          togglePin();
           break;
 
         case 'c': {
@@ -432,7 +490,7 @@ function App() {
       window.clearTimeout(volOsdTimer.current);
       window.clearTimeout(controlsIdleTimer.current);
     };
-  }, [adjustVolume, runControl]);
+  }, [adjustVolume, runControl, togglePin]);
 
 
 
@@ -442,7 +500,12 @@ function App() {
   // while the pointer hovers the controls; the pointer leaving the window hides
   // it. See docs/feature-contracts/desktop-shell.md.
   useEffect(() => {
-    const playing = status.phase === 'playing';
+    // Only auto-hide while video is actually advancing. `status.phase` stays
+    // 'playing' across a pause (it tracks the round, not playback), so without
+    // the paused check the bar and cursor would hide while paused — leaving the
+    // controls invisible and unclickable until the mouse moves. Paused = show
+    // the controls, like every other player.
+    const playing = status.phase === 'playing' && !status.playback?.paused;
     const keepOpen = showSettings || controlsPointerDown || controlsHovered;
     window.clearTimeout(controlsIdleTimer.current);
     if (!playing || keepOpen) {
@@ -480,7 +543,7 @@ function App() {
       window.removeEventListener('mousemove', onActivity);
       document.removeEventListener('mouseleave', onLeaveWindow);
     };
-  }, [status.phase, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
+  }, [status.phase, status.playback?.paused, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
 
   useEffect(() => {
     const clearPointerDown = () => setControlsPointerDown(false);
@@ -888,7 +951,7 @@ function App() {
         onSkip={() => runControl(skip)}
         onDefer={() => runControl(defer)}
         onSyncNow={() => runControl(syncNow, {success: true})}
-        onToggleStayOnTop={() => runControl(toggleStayOnTop)}
+        onToggleStayOnTop={togglePin}
         onToggleFullscreen={() => runControl(toggleFullscreen)}
       />
     </div>
