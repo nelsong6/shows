@@ -6,7 +6,7 @@
 //! Runs on the main/UI thread (WebView2 + the message loop live here); the
 //! runner and control server run on background threads.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -363,6 +363,12 @@ struct State {
     saved_style: isize,
     saved_exstyle: isize,
     saved_rect: RECT,
+    // Occlusion standby. Set when `Present` reports `DXGI_STATUS_OCCLUDED`
+    // (window fully covered), cleared when a `DXGI_PRESENT_TEST` poll reports it
+    // visible again. While set, the frame timer only polls — no render, present,
+    // or commit — so the GPU video path is not driven while nothing is on screen
+    // (DXGI best practice; reduces churn across focus/occlusion transitions).
+    standby: Cell<bool>,
 }
 
 thread_local! {
@@ -554,6 +560,7 @@ impl Compositor {
                 saved_style: 0,
                 saved_exstyle: 0,
                 saved_rect: RECT::default(),
+                standby: Cell::new(false),
             });
         });
 
@@ -699,11 +706,30 @@ fn is_cursor_in_window(hwnd: HWND) -> bool {
 
 fn render(s: &State) {
     unsafe {
+        // Occlusion standby: while the window is fully covered, only poll for
+        // visibility — no draw, present, or commit. `DXGI_PRESENT_TEST` checks
+        // occlusion without presenting; any non-occluded result means the window
+        // is visible again, so resume.
+        if s.standby.get() {
+            if s.swapchain.Present(0, DXGI_PRESENT_TEST) != DXGI_STATUS_OCCLUDED {
+                s.standby.set(false);
+                log::info!("render: visible again — leaving occlusion standby");
+            }
+            return;
+        }
+
         s.gl.render(); // mpv OpenGL render -> the shared D3D texture
         if let Ok(backbuffer) = s.swapchain.GetBuffer::<ID3D11Texture2D>(0) {
             s.context.CopyResource(&backbuffer, s.gl.texture());
         }
-        let _ = s.swapchain.Present(1, DXGI_PRESENT(0));
+        // `Present` returns DXGI_STATUS_OCCLUDED (a success HRESULT) when the
+        // window is fully covered and nothing was shown. Stop driving the video
+        // path until it is visible again instead of presenting ~60x/sec into a
+        // hidden surface.
+        if s.swapchain.Present(1, DXGI_PRESENT(0)) == DXGI_STATUS_OCCLUDED {
+            s.standby.set(true);
+            log::info!("render: occluded — entering standby (present/commit paused)");
+        }
         // WebView2's visual-hosting output appears only after a device commit.
         let _ = s.dcomp.Commit();
     }
@@ -806,7 +832,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 );
                 LRESULT(code as isize)
             }
+            WM_ACTIVATE => {
+                // Instrumentation: correlate the focus transition with occlusion
+                // standby and any monitor re-sync. Low word == WA_INACTIVE(0) when
+                // losing activation, non-zero (WA_ACTIVE/WA_CLICKACTIVE) when gaining.
+                log::info!("window activate: active={}", (w.0 & 0xFFFF) != 0);
+                DefWindowProcW(hwnd, msg, w, l)
+            }
             WM_TIMER => {
+                // Minimized: nothing is on screen — skip render/present entirely
+                // rather than driving the swapchain into a hidden window.
+                if IsIconic(hwnd).as_bool() {
+                    return LRESULT(0);
+                }
                 STATE.with(|s| {
                     if let Some(state) = s.borrow().as_ref() {
                         render(state);
