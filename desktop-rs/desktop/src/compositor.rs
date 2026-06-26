@@ -369,10 +369,6 @@ struct State {
     // or commit — so the GPU video path is not driven while nothing is on screen
     // (DXGI best practice; reduces churn across focus/occlusion transitions).
     standby: Cell<bool>,
-    // True while the window holds focus. Presentation is skipped while false, so
-    // a defocused window issues no Present/Commit (the frame freezes until
-    // refocus) while playback continues normally when focused.
-    focused: Cell<bool>,
 }
 
 thread_local! {
@@ -565,7 +561,6 @@ impl Compositor {
                 saved_exstyle: 0,
                 saved_rect: RECT::default(),
                 standby: Cell::new(false),
-                focused: Cell::new(true),
             });
         });
 
@@ -711,14 +706,6 @@ fn is_cursor_in_window(hwnd: HWND) -> bool {
 
 fn render(s: &State) {
     unsafe {
-        // Present only while focused. While defocused, issue nothing — the frame
-        // freezes until refocus, with playback continuing normally when focused.
-        // Tests whether presenting through a focus change drives the alt-tab
-        // monitor re-sync, without removing video playback entirely.
-        if !s.focused.get() {
-            return;
-        }
-
         // Occlusion standby: while the window is fully covered, only poll for
         // visibility — no draw, present, or commit. `DXGI_PRESENT_TEST` checks
         // occlusion without presenting; any non-occluded result means the window
@@ -844,15 +831,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(code as isize)
             }
             WM_ACTIVATE => {
-                // Drive the focus gate in render(): skip presentation while
-                // defocused. Low word == WA_INACTIVE(0) when losing activation.
-                let active = (w.0 & 0xFFFF) != 0;
-                STATE.with(|s| {
-                    if let Some(st) = s.borrow().as_ref() {
-                        st.focused.set(active);
-                    }
-                });
-                log::info!("window activate: active={active}");
+                // Instrumentation: log focus transitions to correlate with the
+                // monitor re-sync. Low word == WA_INACTIVE(0) when losing activation.
+                log::info!("window activate: active={}", (w.0 & 0xFFFF) != 0);
                 DefWindowProcW(hwnd, msg, w, l)
             }
             WM_TIMER => {
