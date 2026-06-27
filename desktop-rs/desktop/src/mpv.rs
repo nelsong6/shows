@@ -65,6 +65,7 @@ type FnFree = unsafe extern "C" fn(*mut c_void);
 type FnRenderCtxCreate =
     unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *mut MpvRenderParam) -> c_int;
 type FnRenderCtxRender = unsafe extern "C" fn(*mut c_void, *mut MpvRenderParam) -> c_int;
+type FnRenderCtxUpdate = unsafe extern "C" fn(*mut c_void) -> u64;
 type FnRenderCtxFree = unsafe extern "C" fn(*mut c_void);
 
 /// Resolved libmpv entry points (kept alive for the process via a leaked
@@ -83,6 +84,10 @@ pub struct Api {
     pub free: FnFree,
     pub render_context_create: FnRenderCtxCreate,
     pub render_context_render: FnRenderCtxRender,
+    /// Returns mpv's update flags; `MPV_RENDER_UPDATE_FRAME` (bit 0) means a new
+    /// video frame is ready. Used to gate the render pump so the same frame is not
+    /// re-rendered ~60x/sec (which leaks committed memory, even while paused).
+    pub render_context_update: FnRenderCtxUpdate,
     pub render_context_free: FnRenderCtxFree,
 }
 
@@ -111,6 +116,7 @@ impl Api {
                 free: sym!("mpv_free"),
                 render_context_create: sym!("mpv_render_context_create"),
                 render_context_render: sym!("mpv_render_context_render"),
+                render_context_update: sym!("mpv_render_context_update"),
                 render_context_free: sym!("mpv_render_context_free"),
             };
             std::mem::forget(lib);

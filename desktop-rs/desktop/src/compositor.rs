@@ -374,6 +374,10 @@ struct State {
     // or commit — so the GPU video path is not driven while nothing is on screen
     // (DXGI best practice; reduces churn across focus/occlusion transitions).
     standby: Cell<bool>,
+    /// Force a present on the next render tick even if mpv has no new frame —
+    /// set on resize/relayout, first paint, and standby resume so the surface is
+    /// never left stale while the pump is otherwise gated to new-frames-only.
+    force_present: Cell<bool>,
 }
 
 thread_local! {
@@ -566,6 +570,7 @@ impl Compositor {
                 saved_exstyle: 0,
                 saved_rect: RECT::default(),
                 standby: Cell::new(false),
+                force_present: Cell::new(true),
             });
         });
 
@@ -758,20 +763,31 @@ fn render(s: &State) {
         if s.standby.get() {
             if s.swapchain.Present(0, DXGI_PRESENT_TEST) != DXGI_STATUS_OCCLUDED {
                 s.standby.set(false);
+                // Re-present the current frame on resume even if paused.
+                s.force_present.set(true);
                 log::info!("render: visible again — leaving occlusion standby");
             }
             return;
         }
 
-        s.gl.render(); // mpv OpenGL render -> the shared D3D texture
-        if let Ok(backbuffer) = s.swapchain.GetBuffer::<ID3D11Texture2D>(0) {
-            s.context.CopyResource(&backbuffer, s.gl.texture());
-        }
-        // `Present` returns DXGI_STATUS_OCCLUDED (a success HRESULT) when the
-        // window is fully covered and nothing was shown.
-        if s.swapchain.Present(1, DXGI_PRESENT(0)) == DXGI_STATUS_OCCLUDED {
-            s.standby.set(true);
-            log::info!("render: occluded — entering standby");
+        // Gate the mpv GL render + Present on mpv reporting a NEW frame (or a
+        // resize/first-paint/standby-resume forced one). Re-rendering the same
+        // frame ~60x/sec leaks committed memory in the GL/driver path (~18 MB/min,
+        // even while paused) and needlessly drives the composition/VRR path. The
+        // overlay's commit stays per-tick below, so the WebView2 output still
+        // updates and first paint is not gated out.
+        let forced = s.force_present.replace(false);
+        if s.gl.poll_new_frame() || forced {
+            s.gl.render(); // mpv OpenGL render -> the shared D3D texture
+            if let Ok(backbuffer) = s.swapchain.GetBuffer::<ID3D11Texture2D>(0) {
+                s.context.CopyResource(&backbuffer, s.gl.texture());
+            }
+            // `Present` returns DXGI_STATUS_OCCLUDED (a success HRESULT) when the
+            // window is fully covered and nothing was shown.
+            if s.swapchain.Present(1, DXGI_PRESENT(0)) == DXGI_STATUS_OCCLUDED {
+                s.standby.set(true);
+                log::info!("render: occluded — entering standby");
+            }
         }
         // WebView2's visual-hosting output appears only after a device commit.
         let _ = s.dcomp.Commit();
@@ -814,6 +830,9 @@ fn relayout(hwnd: HWND, st: &mut State, cw: i32, ch: i32) {
         // The webview's visual-hosting output needs a Commit to publish the new
         // bounds in the DComp tree.
         let _ = st.dcomp.Commit();
+        // Force a present so the resized frame shows even if mpv has no new frame
+        // (e.g. paused) — the render pump is otherwise gated to new-frames-only.
+        st.force_present.set(true);
         render(st);
     }
 }
