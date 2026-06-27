@@ -775,24 +775,24 @@ fn render(s: &State) {
             return;
         }
 
-        // Gate the mpv GL render + Present on mpv reporting a NEW frame (or a
-        // resize/first-paint/standby-resume forced one). Re-rendering the same
-        // frame ~60x/sec leaks committed memory in the GL/driver path (~18 MB/min,
-        // even while paused) and needlessly drives the composition/VRR path. The
-        // overlay's commit stays per-tick below, so the WebView2 output still
-        // updates and first paint is not gated out.
-        let forced = s.force_present.replace(false);
-        if s.gl.poll_new_frame() || forced {
+        // Re-drive the mpv GL renderer ONLY on a new frame (or a forced
+        // resize/first-paint/standby-resume). Re-rendering the SAME frame ~60x/sec
+        // is the committed-memory leak (~18 MB/min, even while paused). But
+        // CopyResource + Present + Commit must run EVERY tick regardless: the
+        // WebView2 overlay's repaints (button state, the titlebar reappearing on
+        // unpin) are coupled to the per-tick present, so gating the present strands
+        // overlay updates while the video is paused — the pin/titlebar regression.
+        if s.gl.poll_new_frame() || s.force_present.replace(false) {
             s.gl.render(); // mpv OpenGL render -> the shared D3D texture
-            if let Ok(backbuffer) = s.swapchain.GetBuffer::<ID3D11Texture2D>(0) {
-                s.context.CopyResource(&backbuffer, s.gl.texture());
-            }
-            // `Present` returns DXGI_STATUS_OCCLUDED (a success HRESULT) when the
-            // window is fully covered and nothing was shown.
-            if s.swapchain.Present(1, DXGI_PRESENT(0)) == DXGI_STATUS_OCCLUDED {
-                s.standby.set(true);
-                log::info!("render: occluded — entering standby");
-            }
+        }
+        if let Ok(backbuffer) = s.swapchain.GetBuffer::<ID3D11Texture2D>(0) {
+            s.context.CopyResource(&backbuffer, s.gl.texture());
+        }
+        // `Present` returns DXGI_STATUS_OCCLUDED (a success HRESULT) when the
+        // window is fully covered and nothing was shown.
+        if s.swapchain.Present(1, DXGI_PRESENT(0)) == DXGI_STATUS_OCCLUDED {
+            s.standby.set(true);
+            log::info!("render: occluded — entering standby");
         }
         // WebView2's visual-hosting output appears only after a device commit.
         let _ = s.dcomp.Commit();
