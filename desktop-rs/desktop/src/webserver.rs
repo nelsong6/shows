@@ -1120,6 +1120,7 @@ impl StatusBroadcaster {
             subscriber,
             buffer: Vec::new(),
             offset: 0,
+            flush_pending: false,
         }
     }
 
@@ -1160,10 +1161,29 @@ struct StatusSubscriberState {
     next: Option<String>,
 }
 
+/// A >1 KiB SSE comment used purely to force a socket flush. tiny_http buffers
+/// the response in a 1024-byte `BufWriter` and never flushes a streaming body
+/// (`raw_print` "does not flush the writer"), so a sub-1 KiB frame sits unsent
+/// until enough following bytes overflow the buffer — which, on an idle stream,
+/// may be never (e.g. unpin while the video is paused: no playback frames
+/// follow, the overlay never sees the change, the titlebar never returns).
+/// Writing this oversized comment right after a frame overflows the buffer and
+/// pushes the frame to the socket at once. Clients ignore lines starting ':'.
+fn flush_comment() -> Vec<u8> {
+    let mut v = Vec::with_capacity(1203);
+    v.push(b':');
+    v.resize(1201, b' ');
+    v.extend_from_slice(b"\n\n");
+    v
+}
+
 struct StatusStream {
     subscriber: Arc<StatusSubscriber>,
     buffer: Vec<u8>,
     offset: usize,
+    // True once a real frame has been handed out and not yet flushed: the next
+    // read, if no further frame is queued, emits `flush_comment()` to push it.
+    flush_pending: bool,
 }
 
 impl Read for StatusStream {
@@ -1174,19 +1194,34 @@ impl Read for StatusStream {
 
         while self.offset >= self.buffer.len() {
             let mut state = self.subscriber.state.lock().unwrap();
-            while state.next.is_none() {
-                let (guard, timeout) = self
-                    .subscriber
-                    .cv
-                    .wait_timeout(state, Duration::from_secs(30))
-                    .unwrap();
-                state = guard;
-                if timeout.timed_out() && state.next.is_none() {
-                    state.next = Some(": keepalive\n\n".to_string());
-                }
+            if let Some(frame) = state.next.take() {
+                // A frame is queued: deliver it. It will be flushed either by the
+                // bytes of the following frame or, if the stream then idles, by
+                // the flush comment below.
+                drop(state);
+                self.buffer = frame.into_bytes();
+                self.offset = 0;
+                self.flush_pending = !self.buffer.is_empty();
+                break;
             }
-            self.buffer = state.next.take().unwrap_or_default().into_bytes();
-            self.offset = 0;
+            if self.flush_pending {
+                // Just delivered a frame and nothing follows yet — force it out
+                // to the socket now instead of letting it sit in the BufWriter.
+                self.flush_pending = false;
+                drop(state);
+                self.buffer = flush_comment();
+                self.offset = 0;
+                break;
+            }
+            // Genuinely idle: block for the next frame, or a keepalive on timeout.
+            let (mut guard, timeout) = self
+                .subscriber
+                .cv
+                .wait_timeout(state, Duration::from_secs(30))
+                .unwrap();
+            if timeout.timed_out() && guard.next.is_none() {
+                guard.next = Some(": keepalive\n\n".to_string());
+            }
         }
 
         let n = out.len().min(self.buffer.len() - self.offset);
@@ -1507,14 +1542,36 @@ mod tests {
         let mut stream = hub.subscribe("first".to_string());
         let mut initial = [0; 5];
         stream.read_exact(&mut initial).unwrap();
+        assert_eq!(&initial, b"first");
 
         hub.broadcast("stale".to_string());
         hub.broadcast("latest".to_string());
 
+        // A frame is already queued when we read, so it is delivered directly
+        // (no flush comment); the single slot has coalesced "stale" to "latest".
         let mut buf = [0; 6];
         stream.read_exact(&mut buf).unwrap();
-
         assert_eq!(&buf, b"latest");
+    }
+
+    #[test]
+    fn status_stream_flushes_idle_frame_with_oversized_comment() {
+        // Regression for the "titlebar never returns on unpin while paused" bug:
+        // tiny_http's 1024-byte BufWriter holds a frame unsent until following
+        // bytes overflow it. When the stream would otherwise idle after a frame,
+        // the reader emits a >1 KiB comment that forces that frame to the socket.
+        let hub = StatusBroadcaster::default();
+        let mut stream = hub.subscribe("frame".to_string());
+        let mut frame = [0; 5];
+        stream.read_exact(&mut frame).unwrap();
+        assert_eq!(&frame, b"frame");
+
+        let flush = flush_comment();
+        assert!(flush.len() > 1024, "comment must exceed the 1024-byte BufWriter");
+        assert!(flush.starts_with(b":") && flush.ends_with(b"\n\n"));
+        let mut buf = vec![0u8; flush.len()];
+        stream.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, flush);
     }
 
     #[test]
