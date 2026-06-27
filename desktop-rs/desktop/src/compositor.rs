@@ -436,9 +436,18 @@ impl Compositor {
         let bottom = unsafe { dcomp.CreateVisual()? };
         let web = unsafe { dcomp.CreateVisual()? };
         let sc_unknown: IUnknown = swapchain.cast()?;
+        // Force-composed candidate (flash investigation): a sub-unity opacity effect
+        // on the video visual makes DWM alpha-blend it, so the swapchain is ineligible
+        // for the independent-flip / MPO scanout path. This pins the present mode to
+        // "Composed: Flip" instead of letting DWM promote/demote between Composed and
+        // "Hardware Composed: Independent Flip" across focus edges — the present-mode
+        // churn PresentMon recorded as coincident with the monitor re-sync.
+        let video_fx = unsafe { dcomp.CreateEffectGroup()? };
         unsafe {
+            video_fx.SetOpacity2(0.99)?;
             bottom.SetContent(&sc_unknown)?;
             bottom.SetOffsetY2(video_top as f32)?;
+            bottom.SetEffect(&video_fx)?;
             root.AddVisual(&bottom, false, None::<&IDCompositionVisual>)?;
             root.AddVisual(&web, true, &bottom)?; // overlay in front of the video
             target.SetRoot(&root)?;
