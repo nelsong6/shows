@@ -374,6 +374,14 @@ impl GlVideo {
             (self.procs.dx_unlock_objects)(self.dx_device, 1, &mut obj);
         }
     }
+
+    /// True if mpv reports a new video frame is ready (`MPV_RENDER_UPDATE_FRAME`,
+    /// bit 0). The render pump uses this to avoid re-rendering the same frame
+    /// ~60x/sec, which leaks committed memory in the GL/driver path even while
+    /// paused. Cheap (returns cached flags); does not itself render.
+    pub fn poll_new_frame(&self) -> bool {
+        unsafe { (self.handle.api.render_context_update)(self.rctx) & 1 != 0 }
+    }
 }
 
 unsafe impl Send for GlVideo {}
