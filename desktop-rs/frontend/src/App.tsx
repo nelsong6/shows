@@ -324,10 +324,27 @@ function App() {
   // double-clicks (e.g. toggle fullscreen) still work. The host owns the actual
   // move loop; the overlay just decides the gesture began on draggable surface.
   const surfaceDragStart = useRef<{ x: number; y: number } | null>(null);
+  // Two distinct notions of "pinned", deliberately kept separate:
+  //  - `onTopRef` / `pinned`: the optimistic INTENT — drives the button
+  //    highlight and the direction of the next toggle command. Updated
+  //    immediately on click so the control feels instant, and rolled back to
+  //    host truth if a command is lost (see pumpOnTopQueue).
+  //  - `hostOnTopRef`: the HOST-CONFIRMED truth echoed as status.window_on_top.
+  //    It alone decides whether a native caption exists, so the surface-drag
+  //    handle must gate on it (never on the optimistic intent) to stay in
+  //    lockstep with the host's nc_hit `has_titlebar`. Otherwise a lost command
+  //    can leave the window with zero drag handles (caption gone AND surface
+  //    drag suppressed) — the "can't move the window" failure.
   const onTopRef = useRef(false);
+  const hostOnTopRef = useRef(false);
+  const [pinned, setPinned] = useState(false);
+  const setPinnedOptimistic = useCallback((next: boolean) => {
+    onTopRef.current = next;
+    setPinned(next);
+  }, []);
   const surfaceDragProps = {
     onPointerDown: (e: ReactPointerEvent) => {
-      if (!onTopRef.current || e.button !== 0) return;
+      if (!hostOnTopRef.current || e.button !== 0) return;
       surfaceDragStart.current = { x: e.screenX, y: e.screenY };
     },
     onPointerMove: (e: ReactPointerEvent) => {
@@ -346,17 +363,24 @@ function App() {
     },
   };
 
-  // Pin (stay-on-top): the same optimistic desired/in-flight reconcile that
-  // pause and volume already use (see pauseSync above and
-  // docs/adr/0001-ui-control-state-sync.md). We hold the user's DESIRED state,
-  // send it as an idempotent set, and reconcile against the echoed
-  // window_on_top — so a lossy/laggy status stream can never make us derive a
-  // command from a stale value. `onTopRef` is the optimistic current state; the
-  // reconcile effect and requestStayOnTop are its only writers.
+  // Pin (stay-on-top) follows ADR-0001's optimistic + idempotent-set +
+  // reconcile pattern, with one correction the pause/volume controls don't
+  // need: those are re-echoed on every mpv heartbeat, so a missed reconcile
+  // self-heals; window_on_top is emitted ONLY on change, so a stranded
+  // optimistic value would never recover. We therefore (a) keep ONE optimistic
+  // value (`pinned`/`onTopRef`) as the single source for both highlight and
+  // command direction, (b) roll it back to host truth when a command is lost,
+  // and (c) track the host-confirmed value in `hostOnTopRef` for the drag gate.
   const onTopSync = useRef<{ desired: boolean | null; inFlight: boolean }>({
     desired: null,
     inFlight: false,
   });
+
+  // Mirror the host-confirmed pin state into a ref the instant it is echoed, so
+  // failure-rollback and the surface-drag gate always read current host truth.
+  useEffect(() => {
+    if (status.window_on_top != null) hostOnTopRef.current = Boolean(status.window_on_top);
+  }, [status.window_on_top]);
 
   useEffect(() => {
     if (status.window_on_top == null) return;
@@ -364,9 +388,9 @@ function App() {
     const desired = onTopSync.current.desired;
     if (desired === null || observed === desired) {
       onTopSync.current.desired = null;
-      onTopRef.current = observed;
+      setPinnedOptimistic(observed);
     }
-  }, [status.window_on_top]);
+  }, [status.window_on_top, setPinnedOptimistic]);
 
   const pumpOnTopQueue = useCallback(() => {
     const sync = onTopSync.current;
@@ -377,7 +401,15 @@ function App() {
     void setStayOnTop(sent)
       .catch(() => {
         const current = onTopSync.current;
-        if (current.desired === sent) current.desired = null;
+        if (current.desired === sent) {
+          current.desired = null;
+          // Command lost: undo the optimistic advance back to the host's
+          // last-confirmed state. Without this the next click computes the
+          // wrong direction (a silent no-op against the idempotent host) and
+          // the surface-drag gate desyncs from the real caption state.
+          setPinnedOptimistic(hostOnTopRef.current);
+          showControlToast('pin failed', 'danger');
+        }
       })
       .finally(() => {
         const current = onTopSync.current;
@@ -386,13 +418,13 @@ function App() {
           pumpOnTopQueue();
         }
       });
-  }, []);
+  }, [setPinnedOptimistic, showControlToast]);
 
   const requestStayOnTop = useCallback((onTop: boolean) => {
-    onTopRef.current = onTop;
+    setPinnedOptimistic(onTop);
     onTopSync.current.desired = onTop;
     pumpOnTopQueue();
-  }, [pumpOnTopQueue]);
+  }, [pumpOnTopQueue, setPinnedOptimistic]);
 
   // Button and `i` keybind both route through here. A click can reach the
   // webview as two events where a keypress can't, so we also drop a duplicate
@@ -505,7 +537,7 @@ function App() {
     // the paused check the bar and cursor would hide while paused — leaving the
     // controls invisible and unclickable until the mouse moves. Paused = show
     // the controls, like every other player.
-    const playing = status.phase === 'playing' && !status.playback?.paused;
+    const playing = status.phase === 'playing' && !displayPaused;
     const keepOpen = showSettings || controlsPointerDown || controlsHovered;
     window.clearTimeout(controlsIdleTimer.current);
     if (!playing || keepOpen) {
@@ -543,7 +575,7 @@ function App() {
       window.removeEventListener('mousemove', onActivity);
       document.removeEventListener('mouseleave', onLeaveWindow);
     };
-  }, [status.phase, status.playback?.paused, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
+  }, [status.phase, displayPaused, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
 
   useEffect(() => {
     const clearPointerDown = () => setControlsPointerDown(false);
@@ -945,6 +977,7 @@ function App() {
         onVolumeChange={requestVolume}
         onVolumeWheel={handleVolumeWheel}
         displayPaused={displayPaused}
+        pinned={pinned}
         onRequestPause={requestPause}
         onPrevious={() => runControl(previous)}
         onSeekRelative={(seconds) => runControl(() => seekRelative(seconds))}
@@ -1160,6 +1193,7 @@ function BottomControlBar({
   onVolumeChange,
   onVolumeWheel,
   displayPaused,
+  pinned,
   onRequestPause,
   onPrevious,
   onSeekRelative,
@@ -1183,6 +1217,7 @@ function BottomControlBar({
   onVolumeChange: (volume: number, flash?: boolean) => void;
   onVolumeWheel: WheelEventHandler<HTMLDivElement>;
   displayPaused: boolean;
+  pinned: boolean;
   onRequestPause: (paused: boolean) => void;
   onPrevious: () => void;
   onSeekRelative: (seconds: number) => void;
@@ -1230,7 +1265,10 @@ function BottomControlBar({
 
   const isMuted = pb ? volume === 0 : false;
   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
-  const onTop = Boolean(status.window_on_top);
+  // Optimistic intent (echoed-state-independent) so the pin button highlights
+  // the instant it is clicked, instead of waiting a full status round-trip —
+  // the lag is what made it feel like the toggle "didn't take".
+  const onTop = pinned;
   // The compact control layout follows window *width*, not any window mode — a
   // small window gets it whether or not it is pinned on top.
   const [compactViewport, setCompactViewport] = useState(() => window.innerWidth <= 900);

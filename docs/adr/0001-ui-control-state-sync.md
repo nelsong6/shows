@@ -64,10 +64,15 @@ References: [optimistic UI pattern](https://www.freecodecamp.org/news/how-to-use
 - Backend control endpoints for these controls take a desired value and are
   idempotent (a request matching current state is a no-op); they do not flip
   internal state.
-- **Outstanding:** the pin / stay-on-top control does **not** yet follow this
-  pattern — it is a backend-owned toggle. It is to be migrated to an `onTopSync`
-  mirroring `pauseSync`, with `/stay-on-top` taking `{"on_top": bool}` as an
-  idempotent set. Until then it is the known-nonconformant control.
+- The pin / stay-on-top control now follows this pattern (`onTopSync` +
+  `/stay-on-top {"on_top": bool}`). It needed one addition the heartbeat-backed
+  controls don't: `window_on_top` is echoed **only on change**, so a missed
+  reconcile cannot self-heal the way a missed pause/volume echo does. Pin
+  therefore also (a) keeps one optimistic value driving both highlight and
+  command direction, (b) rolls that value back to host truth on a failed
+  command, and (c) gates the window drag handle on the host-confirmed value, not
+  the optimistic one. See
+  [`desktop-shell.md` → Pin toggle: one click, one command](../feature-contracts/desktop-shell.md#pin-toggle-one-click-one-command).
 
 ## Rejected alternative
 

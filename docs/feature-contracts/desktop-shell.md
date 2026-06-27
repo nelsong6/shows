@@ -38,6 +38,41 @@ policy, the old path (`window_pip`, `mini_pointer_inside`, `/pip`, the
 `mini-controls` PiP coupling, the native-frame swap) is deleted, not kept behind
 a flag.
 
+## Pin toggle: one click, one command
+
+`window_on_top` is harder than the other remote-state controls (pause, volume)
+for one reason: **it is echoed only on change.** Pause and volume ride every mpv
+heartbeat, so a missed reconcile self-heals on the next frame; `window_on_top` is
+emitted only when `WM_SET_STAY_ON_TOP` actually flips `is_on_top`, so a stranded
+optimistic value would *never* recover. ADR-0001's pattern is necessary but not
+sufficient here. The additional invariants:
+
+1. **One optimistic value for intent.** `pinned`/`onTopRef` (overlay) is the
+   single source for both the button highlight *and* the direction of the next
+   toggle. It updates immediately on click (instant feedback — the lag was what
+   made the button feel like it "didn't take"). It is never read from
+   `status.window_on_top`.
+2. **Roll back on a lost command.** If a `/stay-on-top` POST fails, the overlay
+   resets the optimistic value to the host-confirmed `hostOnTopRef`. Otherwise
+   the next click derives the wrong direction and hits the host's idempotent
+   no-op — a silent dead toggle.
+3. **The drag handle gates on host truth, never on intent.** Exactly one drag
+   affordance must exist at all times: the native caption when not pinned, the
+   overlay surface-drag when pinned — never zero, never both. Both the host
+   (`nc_hit has_titlebar = !is_on_top`) and the overlay (`surfaceDragProps` gate,
+   titlebar render condition) key off the *same* host-confirmed value
+   (`status.window_on_top` / `hostOnTopRef`), so they can never disagree about
+   whether a caption exists. A failed command that desynced intent from host
+   truth must not be able to suppress the surface drag while the caption is also
+   gone.
+4. **The host re-asserts `is_on_top` after every transition that can change
+   Z-order.** Exiting fullscreen restores a pre-pin exstyle that lacks
+   `WS_EX_TOPMOST`, so the fullscreen-exit path re-applies `HWND_TOPMOST` from the
+   live `is_on_top`. Pin entry clears `WS_MAXIMIZE` (`SW_RESTORE`) before the
+   aspect snap so the floating window keeps working resize borders. The
+   invariant: **whenever fullscreen/maximize changes, real Z-order and the
+   emitted `window_on_top` are reconciled back to `is_on_top`.**
+
 ## Chrome geometry — one source of truth, DPI-correct
 
 The custom titlebar's dimensions are defined **once**, in logical (96-DPI)
