@@ -368,6 +368,10 @@ struct State {
     saved_style: isize,
     saved_exstyle: isize,
     saved_rect: RECT,
+    // Pre-pin "normal" rect, captured on entering pin mode. Pin snaps the window
+    // to the video aspect (a smaller, frameless-looking shape); persisting that
+    // on close would reopen the windowed app mis-sized, so we save this instead.
+    prepin_rect: Option<RECT>,
     // Occlusion standby. Set when `Present` reports `DXGI_STATUS_OCCLUDED`
     // (window fully covered), cleared when a `DXGI_PRESENT_TEST` poll reports it
     // visible again. While set, the frame timer only polls — no render, present,
@@ -569,6 +573,7 @@ impl Compositor {
                 saved_style: 0,
                 saved_exstyle: 0,
                 saved_rect: RECT::default(),
+                prepin_rect: None,
                 standby: Cell::new(false),
                 force_present: Cell::new(true),
             });
@@ -1125,6 +1130,25 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 });
                 LRESULT(0)
             }
+            WM_GETMINMAXINFO => {
+                // Never let the window shrink below its own custom chrome: if the
+                // client width drops under the window-button cluster, nc_hit's
+                // caption test (`cx < width - buttons`) has no room left and the
+                // titlebar stops dragging entirely. Scale with the per-window DPI
+                // so it tracks nc_hit at every scale factor. (Fires before STATE
+                // exists during window creation — it touches no STATE, so safe.)
+                let dpi = GetDpiForWindow(hwnd) as i32;
+                let min_w = scale_for_dpi(WINDOW_BUTTONS_LOGICAL_W + 80, dpi);
+                let min_h = scale_for_dpi(TITLEBAR_LOGICAL_H + 80, dpi);
+                let mmi = &mut *(l.0 as *mut MINMAXINFO);
+                if mmi.ptMinTrackSize.x < min_w {
+                    mmi.ptMinTrackSize.x = min_w;
+                }
+                if mmi.ptMinTrackSize.y < min_h {
+                    mmi.ptMinTrackSize.y = min_h;
+                }
+                LRESULT(0)
+            }
             WM_SIZING => {
                 // Lock the window to the video's aspect ratio while in pin mode,
                 // so the floating player never grows letterbox bars (wasted
@@ -1188,6 +1212,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         restore_style: isize,
                         restore_exstyle: isize,
                         restore_rect: RECT,
+                        was_on_top: bool,
                     },
                 }
                 let action = STATE.with(|s| -> Option<Action> {
@@ -1222,6 +1247,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                             restore_style: st.saved_style,
                             restore_exstyle: st.saved_exstyle,
                             restore_rect: st.saved_rect,
+                            was_on_top: st.is_on_top,
                         };
                         st.is_fullscreen = false;
                         if let Some(cb) = &st.status_callback {
@@ -1251,6 +1277,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         restore_style,
                         restore_exstyle,
                         restore_rect: r,
+                        was_on_top,
                     }) => {
                         SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
                         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, restore_exstyle);
@@ -1265,6 +1292,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                                 r.right - r.left,
                                 r.bottom - r.top,
                                 SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+                            );
+                        }
+                        // The restored exstyle predates any pin done WHILE
+                        // fullscreen, so it lacks WS_EX_TOPMOST. Re-assert the real
+                        // Z-order from the live pin state, or the host would think
+                        // it is pinned (titlebar hidden) while the window no longer
+                        // floats — and the titlebar would never come back.
+                        if was_on_top {
+                            let _ = SetWindowPos(
+                                hwnd,
+                                Some(HWND_TOPMOST),
+                                0,
+                                0,
+                                0,
+                                0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                             );
                         }
                         let _ = SetForegroundWindow(hwnd);
@@ -1306,8 +1349,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         }
                         // Aspect is only needed when entering pin mode; query it
                         // now so we don't hold a STATE borrow across SetWindowPos
-                        // (which dispatches WM_SIZE and re-borrows STATE).
-                        let aspect = st.is_on_top.then(|| st.gl.video_aspect()).flatten();
+                        // (which dispatches WM_SIZE and re-borrows STATE). Skip it
+                        // while fullscreen — snapping a fullscreen window to the
+                        // video aspect would shrink it off the monitor.
+                        let aspect = (st.is_on_top && !st.is_fullscreen)
+                            .then(|| st.gl.video_aspect())
+                            .flatten();
                         Some((st.is_on_top, aspect))
                     })
                 });
@@ -1323,6 +1370,35 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                     );
                     log::info!("window on_top={on_top}");
+                    if on_top {
+                        // Remember the windowed rect before pin reshapes it, so a
+                        // close-while-pinned persists the right size (see State).
+                        let mut wp = WINDOWPLACEMENT {
+                            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                            ..Default::default()
+                        };
+                        let prepin = GetWindowPlacement(hwnd, &mut wp)
+                            .is_ok()
+                            .then_some(wp.rcNormalPosition);
+                        STATE.with(|s| {
+                            if let Some(st) = s.borrow_mut().as_mut() {
+                                st.prepin_rect = prepin;
+                            }
+                        });
+                        // The aspect snap below resizes; if the window is maximized
+                        // it would shrink while WS_MAXIMIZE stays set, leaving
+                        // IsZoomed() true so nc_hit drops the resize borders. Clear
+                        // the maximized state first so pin gets a real floating rect.
+                        if IsZoomed(hwnd).as_bool() {
+                            let _ = ShowWindow(hwnd, SW_RESTORE);
+                        }
+                    } else {
+                        STATE.with(|s| {
+                            if let Some(st) = s.borrow_mut().as_mut() {
+                                st.prepin_rect = None;
+                            }
+                        });
+                    }
                     // Entering pin mode removes the titlebar, so the old window
                     // shape (sized for video + titlebar) would letterbox the
                     // video. Snap to the video aspect — keep the top-left and
@@ -1372,6 +1448,25 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     Some(WPARAM(HTCAPTION as usize)),
                     Some(LPARAM(lp)),
                 );
+                // SendMessageW returns only when the modal move loop ends. The
+                // loop swallowed all pointer input, so the overlay saw no movement
+                // and its idle timer may have hidden the bottom control bar — the
+                // ONLY way to unpin with the mouse in pin mode (no titlebar). Feed
+                // the overlay the post-drag cursor position so the bar reveals.
+                let mut after = POINT::default();
+                if GetCursorPos(&mut after).is_ok() {
+                    let _ = ScreenToClient(hwnd, &mut after);
+                    STATE.with(|s| {
+                        if let Some(st) = s.borrow().as_ref() {
+                            let _ = st.controller.SendMouseInput(
+                                COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
+                                COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
+                                0,
+                                after,
+                            );
+                        }
+                    });
+                }
                 LRESULT(0)
             }
             m if m == WM_WINDOW_MINIMIZE => {
@@ -1461,16 +1556,29 @@ fn save_window_placement(hwnd: HWND) {
             let mut rect = wp.rcNormalPosition;
 
             // Fullscreen swaps the window rect, so persist the pre-fullscreen
-            // rect instead of the borderless one. Stay-on-top never changes the
-            // rect, so the live placement is already correct there.
+            // rect instead of the borderless one. Pin mode aspect-snaps the rect,
+            // so persist the pre-pin windowed rect instead. (Fullscreen wins when
+            // both hold — its saved_rect already predates any in-fullscreen pin.)
             let saved_transient = STATE.with(|s| {
-                s.borrow()
-                    .as_ref()
-                    .map(|st| (st.is_fullscreen, st.saved_rect, st.saved_style))
+                s.borrow().as_ref().map(|st| {
+                    (
+                        st.is_fullscreen,
+                        st.saved_rect,
+                        st.saved_style,
+                        st.is_on_top,
+                        st.prepin_rect,
+                    )
+                })
             });
-            if let Some((true, saved_rect, saved_style)) = saved_transient {
-                rect = saved_rect;
-                maximized = (saved_style as u32 & WS_MAXIMIZE.0) != 0;
+            match saved_transient {
+                Some((true, saved_rect, saved_style, _, _)) => {
+                    rect = saved_rect;
+                    maximized = (saved_style as u32 & WS_MAXIMIZE.0) != 0;
+                }
+                Some((false, _, _, true, Some(prepin))) => {
+                    rect = prepin;
+                }
+                _ => {}
             }
 
             let json = serde_json::json!({

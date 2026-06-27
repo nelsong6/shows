@@ -173,7 +173,7 @@ pub fn get_local_path(show_name: &str, relative_path: &str) -> std::path::PathBu
 }
 
 fn comparable_path_key(path: &std::path::Path) -> String {
-    let comparable = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let comparable = canonicalize_existing_ancestor(path);
     let mut key = comparable.to_string_lossy().replace('/', "\\");
     if let Some(rest) = key.strip_prefix(r"\\?\UNC\") {
         key = format!(r"\\{rest}");
@@ -187,6 +187,37 @@ fn comparable_path_key(path: &std::path::Path) -> String {
         key.pop();
     }
     key
+}
+
+/// Canonicalize the longest *existing* ancestor of `path`, then re-append the
+/// remaining (not-yet-existing) components lexically.
+///
+/// A bare `path.canonicalize()` is existence-dependent: it only succeeds once the
+/// file is on disk (where, on Windows, it also expands 8.3 short names and
+/// resolves symlinks/junctions). So a key built for a round file *before* it has
+/// been synced (canonicalize fails → raw path) would not match the key built
+/// while pruning *after* it exists (canonicalize succeeds → resolved path) — and
+/// `prune_unused_files` would delete the file it just synced. Canonicalizing only
+/// the stable existing prefix makes the key the same in both cases.
+fn canonicalize_existing_ancestor(path: &std::path::Path) -> std::path::PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        if let Ok(canon) = cur.canonicalize() {
+            let mut result = canon;
+            for part in tail.iter().rev() {
+                result.push(part);
+            }
+            return result;
+        }
+        let Some(name) = cur.file_name().map(|n| n.to_os_string()) else {
+            return path.to_path_buf();
+        };
+        tail.push(name);
+        if !cur.pop() {
+            return path.to_path_buf();
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1304,6 +1335,27 @@ mod tests {
 
         assert!(active_file.exists());
         assert!(!stale_file.exists());
+    }
+
+    #[test]
+    fn comparable_path_key_is_stable_across_file_existence() {
+        // The key must not change once the file is created: prune records the
+        // "active" key before a round file is synced, then recomputes it while
+        // walking the cache after it exists. If those differ, the just-synced
+        // file is deleted as "unused" — the real defect behind the Windows-only
+        // CI failure (canonicalize() resolves 8.3 short names only once on disk).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("Show").join("S01");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A redundant ".." so a bare canonicalize() (once the file exists) would
+        // resolve to a different string than the raw form used before it exists.
+        let file = dir.join("..").join("S01").join("E01.mkv");
+
+        let before = comparable_path_key(&file);
+        std::fs::write(&file, b"x").unwrap();
+        let after = comparable_path_key(&file);
+
+        assert_eq!(before, after);
     }
 
     #[test]
