@@ -26,7 +26,8 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, ReleaseCapture, TME_LEAVE,
+    TRACKMOUSEEVENT, TrackMouseEvent, VK_F,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
@@ -57,6 +58,10 @@ const WM_SET_STAY_ON_TOP: u32 = WM_APP + 5;
 // handle. The overlay decides what is draggable (it owns the DOM) and asks the
 // host to start the standard move loop.
 const WM_BEGIN_DRAG: u32 = WM_APP + 6;
+// Observability: id for the global Ctrl+Alt+F hotkey that stamps a monitor-flash
+// marker into the log. Global (not an overlay keybind) because the flash happens
+// while shows is backgrounded and another app holds focus.
+const FLASH_MARKER_HOTKEY_ID: i32 = 0xF1A5;
 
 // Custom-chrome geometry, defined ONCE in logical (96-DPI) pixels and scaled by
 // the window DPI everywhere it is used, so the Win32 hit-test regions line up
@@ -682,12 +687,52 @@ impl Compositor {
                 );
             }
             SetTimer(Some(self.hwnd), 1, 16, None); // ~60fps render pump
+            // Observability: global Ctrl+Alt+F stamps a flash marker into the log
+            // even when shows is not focused (the flash happens while another app
+            // is foreground). Best-effort — ignore registration failure/conflict.
+            let _ = RegisterHotKey(
+                Some(self.hwnd),
+                FLASH_MARKER_HOTKEY_ID,
+                MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+                VK_F.0 as u32,
+            );
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
+    }
+}
+
+/// Observability heartbeat: ~once/sec, log shows' window state and the current
+/// foreground window class, so an intermittent monitor flash (marked via the
+/// Ctrl+Alt+F hotkey, or an `OBS DISPLAYCHANGE` line) can be correlated with what
+/// shows and the foreground app were doing in the seconds around it. Lines are
+/// prefixed `OBS ` for easy grep in `%APPDATA%\shows\shows.log`.
+fn obs_heartbeat(hwnd: HWND, state: &State) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static OBS_TICK: AtomicU64 = AtomicU64::new(0);
+    // 16ms render pump → every 60th tick ≈ 1s.
+    if OBS_TICK.fetch_add(1, Ordering::Relaxed) % 60 != 0 {
+        return;
+    }
+    unsafe {
+        let fg = GetForegroundWindow();
+        let is_fg = fg == hwnd;
+        let mut buf = [0u16; 96];
+        let len = GetClassNameW(fg, &mut buf).max(0) as usize;
+        let fg_class = String::from_utf16_lossy(&buf[..len]);
+        let mut rc = RECT::default();
+        let _ = GetClientRect(hwnd, &mut rc);
+        log::info!(
+            "OBS hb fg_self={is_fg} fg_class=\"{fg_class}\" on_top={} fullscreen={} standby={} client={}x{}",
+            state.is_on_top,
+            state.is_fullscreen,
+            state.standby.get(),
+            rc.right - rc.left,
+            rc.bottom - rc.top,
+        );
     }
 }
 
@@ -840,10 +885,36 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 LRESULT(code as isize)
             }
             WM_ACTIVATE => {
-                // Instrumentation: log focus transitions to correlate with the
-                // monitor re-sync. Low word == WA_INACTIVE(0) when losing activation.
-                log::info!("window activate: active={}", (w.0 & 0xFFFF) != 0);
+                // Observability: log focus transitions + the other window's class
+                // to correlate with the monitor flash. Low word == WA_INACTIVE(0)
+                // when losing activation; lParam is the other window in the switch.
+                let active = (w.0 & 0xFFFF) != 0;
+                let other = HWND(l.0 as *mut _);
+                let mut buf = [0u16; 96];
+                let len = GetClassNameW(other, &mut buf).max(0) as usize;
+                let other_class = String::from_utf16_lossy(&buf[..len]);
+                log::info!("OBS activate active={active} other_class=\"{other_class}\"");
                 DefWindowProcW(hwnd, msg, w, l)
+            }
+            WM_ACTIVATEAPP => {
+                // App-boundary activation (alt-tab to/from a DIFFERENT process) —
+                // the flash-correlated edge. w != 0 => this app becoming active.
+                log::info!("OBS activateapp active={}", w.0 != 0);
+                DefWindowProcW(hwnd, msg, w, l)
+            }
+            WM_DISPLAYCHANGE => {
+                // A modeset (resolution/bpp/refresh re-publish). If the flash is a
+                // modeset this fires at the exact instant — an automatic marker.
+                let w_px = (l.0 as u32) & 0xFFFF;
+                let h_px = ((l.0 as u32) >> 16) & 0xFFFF;
+                log::warn!("OBS DISPLAYCHANGE bpp={} res={w_px}x{h_px}", w.0);
+                DefWindowProcW(hwnd, msg, w, l)
+            }
+            WM_HOTKEY => {
+                if w.0 as i32 == FLASH_MARKER_HOTKEY_ID {
+                    log::warn!("OBS ===== FLASH MARKER (Ctrl+Alt+F) =====");
+                }
+                LRESULT(0)
             }
             WM_TIMER => {
                 // Minimized: nothing is on screen — skip render/present entirely
@@ -853,6 +924,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 }
                 STATE.with(|s| {
                     if let Some(state) = s.borrow().as_ref() {
+                        obs_heartbeat(hwnd, state);
                         render(state);
                     }
                 });
