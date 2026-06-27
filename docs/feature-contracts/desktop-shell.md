@@ -144,6 +144,13 @@ into the shared texture, presents the video swapchain, and commits the
 DirectComposition device (the WebView overlay's visual-hosting output only
 appears after a device commit).
 
+The video visual carries a sub-unity opacity effect (0.99) so DWM **always
+composites** it and never promotes it to a hardware overlay / independent-flip
+plane. This is deliberate: the promote/demote churn at focus edges re-trained the
+DSC/VRR display link and caused a monitor flash on alt-tab. It assumes an SDR
+swapchain — forcing composition also defeats HDR passthrough, so the effect must
+be gated off if HDR is ever enabled. See ADR-0002.
+
 **Deferred (not yet implemented):** presenting video only on a new mpv frame
 (`mpv_render_context_update`'s `FRAME` flag) to stop re-presenting an unchanged
 frame while paused/idle. An attempt at this regressed first paint to a blank
