@@ -167,6 +167,11 @@ hide disabled) while any of these hold:
 - the pointer is down on the controls (scrubbing),
 - the pointer is hovering the controls.
 
+The now-playing HUD and current queue marker are bound to the active round entry
+(`phase == "playing"`, `round`, `round_pos`), not to whether the playback clock
+is advancing. Pause and mute may annotate the label, but they do not clear the
+current episode or disable round controls such as previous, skip, and defer.
+
 Real pointer movement reveals the bar and re-arms the idle timer; the pointer
 leaving the window hides it. The control bar adapts to **window width**
 (`compactViewport`), not to any window mode — a small window gets the compact

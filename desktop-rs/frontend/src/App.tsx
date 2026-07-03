@@ -537,10 +537,10 @@ function App() {
     // the paused check the bar and cursor would hide while paused — leaving the
     // controls invisible and unclickable until the mouse moves. Paused = show
     // the controls, like every other player.
-    const playing = status.phase === 'playing' && !displayPaused;
+    const activelyAdvancing = status.phase === 'playing' && !displayPaused;
     const keepOpen = showSettings || controlsPointerDown || controlsHovered;
     window.clearTimeout(controlsIdleTimer.current);
-    if (!playing || keepOpen) {
+    if (!activelyAdvancing || keepOpen) {
       lastMousePos.current = null;
       setControlsIdle(false);
       return;
@@ -618,8 +618,8 @@ function App() {
   }, [selected, status.last_advance?.advanced_count]);
 
   const playingByShow = new Set((status.round ?? []).map((r) => r.show_id));
-  const playing = status.phase === 'playing';
-  const overlayVisible = !playing || showSettings;
+  const roundActive = status.phase === 'playing';
+  const overlayVisible = !roundActive || showSettings;
   const round = status.round ?? [];
   const pos = currentPos(status);
   const selectedShow = shows.find((s) => s.id === selected) ?? null;
@@ -932,7 +932,7 @@ function App() {
         />
       )}
       {overlayVisible ? (
-        <div className={`layout${playing ? ' over-video' : ''}`}>
+        <div className={`layout${roundActive ? ' over-video' : ''}`}>
 
 
           <main className="main">
@@ -961,7 +961,7 @@ function App() {
       <BottomControlBar
         status={status}
         pos={pos}
-        playing={playing}
+        roundActive={roundActive}
         viewing={showSettings}
         onToggleView={() => {
           setShowSettings((v) => !v);
@@ -1181,7 +1181,7 @@ function ControlToast({ message, level }: { message: string; level: 'info' | 'da
 function BottomControlBar({
   status,
   pos,
-  playing,
+  roundActive,
   viewing,
   onToggleView,
   viewingSettings,
@@ -1205,7 +1205,7 @@ function BottomControlBar({
 }: {
   status: Status;
   pos: number;
-  playing: boolean;
+  roundActive: boolean;
   viewing: boolean;
   onToggleView: () => void;
   viewingSettings: boolean;
@@ -1258,12 +1258,15 @@ function BottomControlBar({
     }
   };
 
+  const isMuted = pb ? volume === 0 : false;
   const round = status.round ?? [];
-  const nowPlayingText = round.length
-    ? `${round[pos].show_name}   (${pos + 1}/${round.length})`
+  const currentEntry =
+    round.length > 0 && pos >= 0 && pos < round.length ? round[pos] : null;
+  const nowPlayingState = displayPaused ? 'paused' : isMuted ? 'muted' : null;
+  const nowPlayingText = currentEntry
+    ? `${nowPlayingState ? `${nowPlayingState} - ` : ''}${currentEntry.show_name}   (${pos + 1}/${round.length})`
     : status.message || '—';
 
-  const isMuted = pb ? volume === 0 : false;
   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
   // Optimistic intent (echoed-state-independent) so the pin button highlights
   // the instant it is clicked, instead of waiting a full status round-trip —
@@ -1315,7 +1318,7 @@ function BottomControlBar({
           <button
             className="control-btn"
             onClick={onPrevious}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Previous Show (p)"
           >
             <PrevIcon />
@@ -1333,7 +1336,7 @@ function BottomControlBar({
           <button
             className="control-btn play-pause-btn"
             onClick={() => onRequestPause(!displayPaused)}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Play / Pause (Space)"
           >
             {displayPaused ? <PlayIcon /> : <PauseIcon />}
@@ -1351,7 +1354,7 @@ function BottomControlBar({
           <button
             className="control-btn"
             onClick={onSkip}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Skip Show (n)"
           >
             <NextIcon />
@@ -1429,7 +1432,7 @@ function BottomControlBar({
           <button
             className="control-btn"
             onClick={onPrevious}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Previous Show (p)"
           >
             <PrevIcon />
@@ -1447,7 +1450,7 @@ function BottomControlBar({
           <button
             className="control-btn play-pause-btn"
             onClick={() => onRequestPause(!displayPaused)}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Play / Pause (Space)"
           >
             {displayPaused ? <PlayIcon /> : <PauseIcon />}
@@ -1465,7 +1468,7 @@ function BottomControlBar({
           <button
             className="control-btn"
             onClick={onSkip}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Skip Show (n)"
           >
             <NextIcon />
@@ -1477,7 +1480,7 @@ function BottomControlBar({
           <button
             className="control-btn defer-btn"
             onClick={onDefer}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Defer Episode (d)"
           >
             <DeferIcon />
@@ -1555,7 +1558,7 @@ function BottomControlBar({
             <SyncIcon />
           </button>
 
-          {playing && (
+          {roundActive && (
             <button
               className={`control-btn playlist-btn${viewing && !viewingSettings ? ' active' : ''}`}
               onClick={onToggleView}
