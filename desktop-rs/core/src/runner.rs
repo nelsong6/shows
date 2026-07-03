@@ -863,8 +863,7 @@ impl Runner {
             round.len(),
             canonical_base
         );
-        self.player
-            .show_text("Syncing new round files to SSD...", 10000);
+        self.player.show_text("Checking round cache...", 10000);
 
         let mut active_local_paths = std::collections::HashSet::new();
 
@@ -880,52 +879,29 @@ impl Runner {
 
             active_local_paths.insert(comparable_path_key(&local_path));
 
-            // Check if source file exists before trying to copy
-            let nas_path = std::path::Path::new(&entry.nas_absolute_path);
-            if !nas_path.exists() {
-                if local_path.exists() {
-                    report.cached += 1;
-                    log::warn!(
-                        "file sync cached because source is unavailable: show={} episode={} source={:?} local={:?}",
-                        entry.show_id,
-                        entry.episode_id,
-                        nas_path,
-                        local_path
-                    );
-                } else {
-                    report.missing += 1;
-                    record_file_sync_problem(
-                        &mut report,
-                        entry,
-                        &local_path,
-                        "source file missing",
-                    );
-                    log::error!(
-                        "file sync missing: show={} episode={} source={:?} local={:?}",
-                        entry.show_id,
-                        entry.episode_id,
-                        nas_path,
-                        local_path
-                    );
-                }
+            if is_usable_cached_file(&local_path) {
+                report.cached += 1;
+                log::info!(
+                    "file sync cached: show={} episode={} local={:?}",
+                    entry.show_id,
+                    entry.episode_id,
+                    local_path
+                );
                 continue;
             }
 
-            if local_path.exists() {
-                let src_metadata = std::fs::metadata(nas_path);
-                let dst_metadata = std::fs::metadata(&local_path);
-                if let (Ok(src_m), Ok(dst_m)) = (src_metadata, dst_metadata) {
-                    if src_m.len() == dst_m.len() {
-                        report.cached += 1;
-                        log::info!(
-                            "file sync cached: show={} episode={} local={:?}",
-                            entry.show_id,
-                            entry.episode_id,
-                            local_path
-                        );
-                        continue;
-                    }
-                }
+            let nas_path = std::path::Path::new(&entry.nas_absolute_path);
+            if std::fs::metadata(nas_path).is_err() {
+                report.missing += 1;
+                record_file_sync_problem(&mut report, entry, &local_path, "source file missing");
+                log::error!(
+                    "file sync missing: show={} episode={} source={:?} local={:?}",
+                    entry.show_id,
+                    entry.episode_id,
+                    nas_path,
+                    local_path
+                );
+                continue;
             }
 
             log::info!(
@@ -1003,6 +979,12 @@ impl Runner {
             );
         }
     }
+}
+
+fn is_usable_cached_file(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false)
 }
 
 fn prune_unused_files(dir: &std::path::Path, active_paths: &std::collections::HashSet<String>) {
@@ -1356,6 +1338,21 @@ mod tests {
         let after = comparable_path_key(&file);
 
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn cache_hit_accepts_only_non_empty_local_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing.mkv");
+        let empty = tmp.path().join("empty.mkv");
+        let cached = tmp.path().join("cached.mkv");
+
+        std::fs::write(&empty, b"").unwrap();
+        std::fs::write(&cached, b"cached bytes").unwrap();
+
+        assert!(!is_usable_cached_file(&missing));
+        assert!(!is_usable_cached_file(&empty));
+        assert!(is_usable_cached_file(&cached));
     }
 
     #[test]
