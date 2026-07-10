@@ -65,13 +65,13 @@ References: [optimistic UI pattern](https://www.freecodecamp.org/news/how-to-use
   idempotent (a request matching current state is a no-op); they do not flip
   internal state.
 - The pin / stay-on-top control now follows this pattern (`onTopSync` +
-  `/stay-on-top {"on_top": bool}`). It needed one addition the heartbeat-backed
-  controls don't: `window_on_top` is echoed **only on change**, so a missed
-  reconcile cannot self-heal the way a missed pause/volume echo does. Pin
-  therefore also (a) keeps one optimistic value driving both highlight and
-  command direction, (b) rolls that value back to host truth on a failed
-  command, and (c) gates the window drag handle on the host-confirmed value, not
-  the optimistic one. See
+  `/stay-on-top {"on_top": bool}`). Because a missed shell-state frame can
+  disagree with the native caption/drag surface, the compositor re-echoes
+  `window_on_top` on its existing heartbeat and an idempotent no-op request
+  acknowledges the current value. Pin also (a) keeps one optimistic value
+  driving both highlight and command direction, (b) rolls that value back to
+  host truth on a failed command, and (c) leaves drag authorization on native
+  `is_on_top`, not optimistic or echoed browser state. See
   [`desktop-shell.md` → Pin toggle: one click, one command](../feature-contracts/desktop-shell.md#pin-toggle-one-click-one-command).
 
 ## Rejected alternative

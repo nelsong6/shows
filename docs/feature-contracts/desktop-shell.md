@@ -41,11 +41,13 @@ a flag.
 ## Pin toggle: one click, one command
 
 `window_on_top` is harder than the other remote-state controls (pause, volume)
-for one reason: **it is echoed only on change.** Pause and volume ride every mpv
-heartbeat, so a missed reconcile self-heals on the next frame; `window_on_top` is
-emitted only when `WM_SET_STAY_ON_TOP` actually flips `is_on_top`, so a stranded
-optimistic value would *never* recover. ADR-0001's pattern is necessary but not
-sufficient here. The additional invariants:
+because it controls which drag affordance exists. A missed reconcile can hide
+the native caption while leaving the overlay's surface drag disabled. ADR-0001's
+pattern is necessary but not sufficient here. The host therefore re-echoes its
+authoritative shell state on the compositor's existing approximately one-second
+heartbeat, and an idempotent no-op command also echoes the current value. A
+coalesced status frame self-heals without browser polling. The additional
+invariants:
 
 1. **One optimistic value for intent.** `pinned`/`onTopRef` (overlay) is the
    single source for both the button highlight *and* the direction of the next
@@ -56,15 +58,13 @@ sufficient here. The additional invariants:
    resets the optimistic value to the host-confirmed `hostOnTopRef`. Otherwise
    the next click derives the wrong direction and hits the host's idempotent
    no-op — a silent dead toggle.
-3. **The drag handle gates on host truth, never on intent.** Exactly one drag
-   affordance must exist at all times: the native caption when not pinned, the
-   overlay surface-drag when pinned — never zero, never both. Both the host
-   (`nc_hit has_titlebar = !is_on_top`) and the overlay (`surfaceDragProps` gate,
-   titlebar render condition) key off the *same* host-confirmed value
-   (`status.window_on_top` / `hostOnTopRef`), so they can never disagree about
-   whether a caption exists. A failed command that desynced intent from host
-   truth must not be able to suppress the surface drag while the caption is also
-   gone.
+3. **The host gates the drag mechanism on live truth, never browser intent.**
+   Exactly one effective drag affordance exists at all times: `nc_hit` exposes
+   the caption when native `is_on_top` is false; `WM_BEGIN_DRAG` authorizes the
+   overlay's surface gesture only when native `is_on_top` is true. The overlay
+   may optimistically render before an SSE echo, but stale browser state cannot
+   suppress both handles or enable both because authorization stays on the
+   window-owning thread.
 4. **The host re-asserts `is_on_top` after every transition that can change
    Z-order.** Exiting fullscreen restores a pre-pin exstyle that lacks
    `WS_EX_TOPMOST`, so the fullscreen-exit path re-applies `HWND_TOPMOST` from the
@@ -72,6 +72,11 @@ sufficient here. The additional invariants:
    aspect snap so the floating window keeps working resize borders. The
    invariant: **whenever fullscreen/maximize changes, real Z-order and the
    emitted `window_on_top` are reconciled back to `is_on_top`.**
+5. **Shell truth is repeated, not edge-triggered.** Every compositor heartbeat
+   projects `window_on_top` and `window_fullscreen`, including while playback is
+   paused. Re-sending an already-satisfied pin request also emits
+   `window_on_top`. The status stream may coalesce frames; any later projection
+   must still repair the overlay's titlebar and surface-drag gate.
 
 ## Chrome geometry — one source of truth, DPI-correct
 
@@ -166,6 +171,11 @@ hide disabled) while any of these hold:
 - the settings/dashboard panel is open,
 - the pointer is down on the controls (scrubbing),
 - the pointer is hovering the controls.
+
+The now-playing HUD and current queue marker are bound to the active round entry
+(`phase == "playing"`, `round`, `round_pos`), not to whether the playback clock
+is advancing. Pause and mute may annotate the label, but they do not clear the
+current episode or disable round controls such as previous, skip, and defer.
 
 Real pointer movement reveals the bar and re-arms the idle timer; the pointer
 leaving the window hides it. The control bar adapts to **window width**

@@ -49,8 +49,8 @@ impl NotifyingSyncer {
 }
 
 impl SyncOps for NotifyingSyncer {
-    fn seed(&self) -> bool {
-        let online = self.inner.seed();
+    fn sync(&self) -> bool {
+        let online = self.inner.sync();
         self.notify();
         online
     }
@@ -187,6 +187,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
         });
     let server = ControlServer::new(dist_dir, replica.clone(), playlists.clone());
+    server.begin_startup_sync(syncer.shared_db_path());
+    syncer.set_progress_callback(Some({
+        let s = server.clone();
+        Arc::new(move |progress| s.append_startup_sync_event(progress.into()))
+    }));
     let port = server.start();
     let overlay_url = format!("http://127.0.0.1:{port}/");
     log::info!("control server on {overlay_url}");
@@ -215,7 +220,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Runner pushes phase/round/advance into the control server's status.
     let stop = StopFlag::new();
     let cb = {
-        let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status) = (
+        let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status, s_sync_progress) = (
+            server.clone(),
             server.clone(),
             server.clone(),
             server.clone(),
@@ -303,6 +309,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                     _ => StatusPhase::Fetching,
                 };
                 s_status.push_status(StatusPatch::phase(phase, message));
+            })),
+            on_sync_progress: Some(Box::new(move |progress| {
+                s_sync_progress.append_startup_sync_event(progress.clone().into());
             })),
         }
     };

@@ -46,12 +46,14 @@ import {
   fetchShowDetails,
   type ShowDetailsResponse,
 } from './api';
+import {PinSyncController} from './pinSync';
 import './App.css';
 
 const VOLUME_MIN = 0;
 const VOLUME_MAX = 130;
 const VOLUME_STEP = 5;
 const CONTROLS_IDLE_MS = 2000;
+const PIN_ACK_TIMEOUT_MS = 1500;
 
 function clampVolume(volume: number): number {
   if (!Number.isFinite(volume)) return VOLUME_MIN;
@@ -114,6 +116,10 @@ function App() {
     message: '',
     playlist: '',
   });
+  // Advances for every full status snapshot, even when an individual field has
+  // the same primitive value. Shell-state heartbeats use same-value snapshots
+  // as acknowledgements after a coalesced pin/unpin edge.
+  const [statusRevision, setStatusRevision] = useState(0);
   const [shows, setShows] = useState<Show[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState<ShowDetailsResponse | null>(null);
@@ -130,7 +136,10 @@ function App() {
   const [controlToast, setControlToast] = useState<{message: string; level: 'info' | 'danger'} | null>(null);
   const [repairedRoundEntries, setRepairedRoundEntries] = useState<Set<string>>(() => new Set());
 
-  useEffect(() => subscribeStatus(setStatus), []);
+  useEffect(() => subscribeStatus((nextStatus) => {
+    setStatus(nextStatus);
+    setStatusRevision((revision) => revision + 1);
+  }), []);
 
   const showControlToast = useCallback((message: string, level: 'info' | 'danger' = 'info') => {
     setControlToast({message, level});
@@ -329,12 +338,9 @@ function App() {
   //    highlight and the direction of the next toggle command. Updated
   //    immediately on click so the control feels instant, and rolled back to
   //    host truth if a command is lost (see pumpOnTopQueue).
-  //  - `hostOnTopRef`: the HOST-CONFIRMED truth echoed as status.window_on_top.
-  //    It alone decides whether a native caption exists, so the surface-drag
-  //    handle must gate on it (never on the optimistic intent) to stay in
-  //    lockstep with the host's nc_hit `has_titlebar`. Otherwise a lost command
-  //    can leave the window with zero drag handles (caption gone AND surface
-  //    drag suppressed) — the "can't move the window" failure.
+  //  - `hostOnTopRef`: the most recently echoed HOST-CONFIRMED truth. It is
+  //    used for failed-command rollback; native code authorizes surface drag
+  //    from its live `is_on_top`, so an SSE delay cannot remove both handles.
   const onTopRef = useRef(false);
   const hostOnTopRef = useRef(false);
   const [pinned, setPinned] = useState(false);
@@ -344,7 +350,7 @@ function App() {
   }, []);
   const surfaceDragProps = {
     onPointerDown: (e: ReactPointerEvent) => {
-      if (!hostOnTopRef.current || e.button !== 0) return;
+      if (e.button !== 0) return;
       surfaceDragStart.current = { x: e.screenX, y: e.screenY };
     },
     onPointerMove: (e: ReactPointerEvent) => {
@@ -365,16 +371,12 @@ function App() {
 
   // Pin (stay-on-top) follows ADR-0001's optimistic + idempotent-set +
   // reconcile pattern, with one correction the pause/volume controls don't
-  // need: those are re-echoed on every mpv heartbeat, so a missed reconcile
-  // self-heals; window_on_top is emitted ONLY on change, so a stranded
-  // optimistic value would never recover. We therefore (a) keep ONE optimistic
-  // value (`pinned`/`onTopRef`) as the single source for both highlight and
-  // command direction, (b) roll it back to host truth when a command is lost,
-  // and (c) track the host-confirmed value in `hostOnTopRef` for the drag gate.
-  const onTopSync = useRef<{ desired: boolean | null; inFlight: boolean }>({
-    desired: null,
-    inFlight: false,
-  });
+  // need: shell truth is re-echoed by the compositor heartbeat so a missed edge
+  // self-heals. We therefore (a) keep ONE optimistic value
+  // (`pinned`/`onTopRef`) as the single source for both highlight and command
+  // direction, (b) roll it back to host truth when a command is lost, and (c)
+  // track the last host-confirmed value in `hostOnTopRef` for rollback.
+  const onTopSync = useRef(new PinSyncController());
 
   // Mirror the host-confirmed pin state into a ref the instant it is echoed, so
   // failure-rollback and the surface-drag gate always read current host truth.
@@ -385,55 +387,50 @@ function App() {
   useEffect(() => {
     if (status.window_on_top == null) return;
     const observed = Boolean(status.window_on_top);
-    const desired = onTopSync.current.desired;
-    if (desired === null || observed === desired) {
-      onTopSync.current.desired = null;
-      setPinnedOptimistic(observed);
-    }
-  }, [status.window_on_top, setPinnedOptimistic]);
+    const reconciled = onTopSync.current.observe(observed);
+    if (reconciled !== null) setPinnedOptimistic(reconciled);
+  }, [status.window_on_top, statusRevision, setPinnedOptimistic]);
 
   const pumpOnTopQueue = useCallback(() => {
     const sync = onTopSync.current;
-    if (sync.inFlight || sync.desired === null) return;
+    const request = sync.dispatch();
+    if (request === null) return;
 
-    const sent = sync.desired;
-    sync.inFlight = true;
-    void setStayOnTop(sent)
-      .catch(() => {
-        const current = onTopSync.current;
-        if (current.desired === sent) {
-          current.desired = null;
-          // Command lost: undo the optimistic advance back to the host's
-          // last-confirmed state. Without this the next click computes the
-          // wrong direction (a silent no-op against the idempotent host) and
-          // the surface-drag gate desyncs from the real caption state.
-          setPinnedOptimistic(hostOnTopRef.current);
-          showControlToast('pin failed', 'danger');
-        }
-      })
-      .finally(() => {
-        const current = onTopSync.current;
-        current.inFlight = false;
-        if (current.desired !== null && current.desired !== sent) {
-          pumpOnTopQueue();
-        }
-      });
+    const settle = (succeeded: boolean) => {
+      const outcome = onTopSync.current.settle(request, succeeded);
+      if (outcome.rollback) {
+        // Command lost: undo the optimistic advance back to the host's
+        // last-confirmed state. Without this the next click computes the
+        // wrong direction (a silent no-op against the idempotent host) and
+        // the surface-drag gate desyncs from the real caption state.
+        setPinnedOptimistic(hostOnTopRef.current);
+        showControlToast('pin failed', 'danger');
+      }
+      if (outcome.awaitAck) {
+        window.setTimeout(() => {
+          const reconciled = onTopSync.current.expireAcknowledgement(request);
+          if (reconciled !== null) setPinnedOptimistic(reconciled);
+        }, PIN_ACK_TIMEOUT_MS);
+      }
+      if (outcome.pump) pumpOnTopQueue();
+    };
+
+    void setStayOnTop(request.value).then(
+      () => settle(true),
+      () => settle(false),
+    );
   }, [setPinnedOptimistic, showControlToast]);
 
   const requestStayOnTop = useCallback((onTop: boolean) => {
     setPinnedOptimistic(onTop);
-    onTopSync.current.desired = onTop;
+    onTopSync.current.queue(onTop);
     pumpOnTopQueue();
   }, [pumpOnTopQueue, setPinnedOptimistic]);
 
-  // Button and `i` keybind both route through here. A click can reach the
-  // webview as two events where a keypress can't, so we also drop a duplicate
-  // within a short window; the idempotent set above makes that safe, never wrong.
-  const pinGuardRef = useRef(0);
+  // Button and `i` keybind both route through the desired-state queue. Two real
+  // rapid clicks are two intents: the second supersedes the first and is pumped
+  // after the in-flight request, returning to the starting state.
   const togglePin = useCallback(() => {
-    const now = Date.now();
-    if (now - pinGuardRef.current < 400) return;
-    pinGuardRef.current = now;
     requestStayOnTop(!onTopRef.current);
   }, [requestStayOnTop]);
 
@@ -537,10 +534,10 @@ function App() {
     // the paused check the bar and cursor would hide while paused — leaving the
     // controls invisible and unclickable until the mouse moves. Paused = show
     // the controls, like every other player.
-    const playing = status.phase === 'playing' && !displayPaused;
+    const activelyAdvancing = status.phase === 'playing' && !displayPaused;
     const keepOpen = showSettings || controlsPointerDown || controlsHovered;
     window.clearTimeout(controlsIdleTimer.current);
-    if (!playing || keepOpen) {
+    if (!activelyAdvancing || keepOpen) {
       lastMousePos.current = null;
       setControlsIdle(false);
       return;
@@ -618,8 +615,8 @@ function App() {
   }, [selected, status.last_advance?.advanced_count]);
 
   const playingByShow = new Set((status.round ?? []).map((r) => r.show_id));
-  const playing = status.phase === 'playing';
-  const overlayVisible = !playing || showSettings;
+  const roundActive = status.phase === 'playing';
+  const overlayVisible = !roundActive || showSettings;
   const round = status.round ?? [];
   const pos = currentPos(status);
   const selectedShow = shows.find((s) => s.id === selected) ?? null;
@@ -932,7 +929,7 @@ function App() {
         />
       )}
       {overlayVisible ? (
-        <div className={`layout${playing ? ' over-video' : ''}`}>
+        <div className={`layout${roundActive ? ' over-video' : ''}`}>
 
 
           <main className="main">
@@ -961,7 +958,7 @@ function App() {
       <BottomControlBar
         status={status}
         pos={pos}
-        playing={playing}
+        roundActive={roundActive}
         viewing={showSettings}
         onToggleView={() => {
           setShowSettings((v) => !v);
@@ -1181,7 +1178,7 @@ function ControlToast({ message, level }: { message: string; level: 'info' | 'da
 function BottomControlBar({
   status,
   pos,
-  playing,
+  roundActive,
   viewing,
   onToggleView,
   viewingSettings,
@@ -1205,7 +1202,7 @@ function BottomControlBar({
 }: {
   status: Status;
   pos: number;
-  playing: boolean;
+  roundActive: boolean;
   viewing: boolean;
   onToggleView: () => void;
   viewingSettings: boolean;
@@ -1258,12 +1255,15 @@ function BottomControlBar({
     }
   };
 
+  const isMuted = pb ? volume === 0 : false;
   const round = status.round ?? [];
-  const nowPlayingText = round.length
-    ? `${round[pos].show_name}   (${pos + 1}/${round.length})`
+  const currentEntry =
+    round.length > 0 && pos >= 0 && pos < round.length ? round[pos] : null;
+  const nowPlayingState = displayPaused ? 'paused' : isMuted ? 'muted' : null;
+  const nowPlayingText = currentEntry
+    ? `${nowPlayingState ? `${nowPlayingState} - ` : ''}${currentEntry.show_name}   (${pos + 1}/${round.length})`
     : status.message || '—';
 
-  const isMuted = pb ? volume === 0 : false;
   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
   // Optimistic intent (echoed-state-independent) so the pin button highlights
   // the instant it is clicked, instead of waiting a full status round-trip —
@@ -1315,7 +1315,7 @@ function BottomControlBar({
           <button
             className="control-btn"
             onClick={onPrevious}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Previous Show (p)"
           >
             <PrevIcon />
@@ -1333,7 +1333,7 @@ function BottomControlBar({
           <button
             className="control-btn play-pause-btn"
             onClick={() => onRequestPause(!displayPaused)}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Play / Pause (Space)"
           >
             {displayPaused ? <PlayIcon /> : <PauseIcon />}
@@ -1351,7 +1351,7 @@ function BottomControlBar({
           <button
             className="control-btn"
             onClick={onSkip}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Skip Show (n)"
           >
             <NextIcon />
@@ -1429,7 +1429,7 @@ function BottomControlBar({
           <button
             className="control-btn"
             onClick={onPrevious}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Previous Show (p)"
           >
             <PrevIcon />
@@ -1447,7 +1447,7 @@ function BottomControlBar({
           <button
             className="control-btn play-pause-btn"
             onClick={() => onRequestPause(!displayPaused)}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Play / Pause (Space)"
           >
             {displayPaused ? <PlayIcon /> : <PauseIcon />}
@@ -1465,7 +1465,7 @@ function BottomControlBar({
           <button
             className="control-btn"
             onClick={onSkip}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Skip Show (n)"
           >
             <NextIcon />
@@ -1477,7 +1477,7 @@ function BottomControlBar({
           <button
             className="control-btn defer-btn"
             onClick={onDefer}
-            disabled={!playing}
+            disabled={!roundActive}
             title="Defer Episode (d)"
           >
             <DeferIcon />
@@ -1555,7 +1555,7 @@ function BottomControlBar({
             <SyncIcon />
           </button>
 
-          {playing && (
+          {roundActive && (
             <button
               className={`control-btn playlist-btn${viewing && !viewingSettings ? ' active' : ''}`}
               onClick={onToggleView}
@@ -2215,6 +2215,228 @@ function durationDays(start: string, end: string): string {
   return `${days}d`;
 }
 
+function formatSyncDuration(milliseconds: number | null | undefined): string {
+  if (milliseconds == null || !Number.isFinite(milliseconds)) return '—';
+  const ms = Math.max(0, milliseconds);
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60_000) {
+    const seconds = ms / 1000;
+    return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
+  }
+  const minutes = Math.floor(ms / 60_000);
+  const seconds = Math.floor((ms % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+
+function formatSyncDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const date = new Date(iso);
+  if (isNaN(date.getTime())) return iso;
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function formatSyncClock(iso: string): string {
+  const date = new Date(iso);
+  if (isNaN(date.getTime())) return '—';
+  return date.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+function syncPendingSummary(status: Status): string {
+  const sync = status.sync;
+  if (!sync) return 'not reported';
+  const label = `${sync.pending} ${sync.pending === 1 ? 'change' : 'changes'}`;
+  const breakdown = sync.pending_breakdown;
+  if (!breakdown || sync.pending === 0) return label;
+
+  const parts = [
+    breakdown.shows ? `${breakdown.shows} shows` : '',
+    breakdown.episodes ? `${breakdown.episodes} episodes` : '',
+    breakdown.history ? `${breakdown.history} history` : '',
+    breakdown.queue ? `${breakdown.queue} queue` : '',
+  ].filter(Boolean);
+  return parts.length ? `${label} · ${parts.join(', ')}` : label;
+}
+
+function SyncLogPanel({status}: {status: Status}) {
+  const sync = status.startup_sync;
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    if (sync?.state !== 'running') return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [sync?.state, sync?.started_at]);
+
+  if (!sync) {
+    return (
+      <section className="sync-log-panel" aria-labelledby="sync-log-title">
+        <div className="sync-log-title-row">
+          <div>
+            <p className="sync-log-eyebrow">startup diagnostics</p>
+            <h2 id="sync-log-title">sync log</h2>
+          </div>
+        </div>
+        <div className="sync-log-empty" role="status">
+          <span className="sync-log-empty-mark" aria-hidden="true" />
+          <strong>no startup sync trace yet</strong>
+          <p>
+            The next launch will show each shared-database step here, including what the app
+            attempted, how long it took, and whether it completed.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  const startedMs = Date.parse(sync.started_at);
+  const finishedMs = sync.finished_at ? Date.parse(sync.finished_at) : Number.NaN;
+  const elapsedMs = sync.state === 'running' && Number.isFinite(startedMs)
+    ? Math.max(0, now - startedMs)
+    : sync.elapsed_ms != null
+      ? sync.elapsed_ms
+      : Number.isFinite(startedMs) && Number.isFinite(finishedMs)
+        ? Math.max(0, finishedMs - startedMs)
+        : null;
+  const dbPath = sync.shared_db_path ?? status.sync?.shared_db_path ?? 'not configured';
+  const playlists = sync.playlists.length > 0
+    ? sync.playlists.join(', ')
+    : status.playlist || 'none';
+  const events = [...sync.events].sort((a, b) => a.seq - b.seq);
+
+  return (
+    <section className="sync-log-panel" aria-labelledby="sync-log-title">
+      <header className={`sync-log-hero ${sync.state}`}>
+        <div className="sync-log-title-row">
+          <div>
+            <p className="sync-log-eyebrow">startup diagnostics</p>
+            <h2 id="sync-log-title">sync log</h2>
+          </div>
+          <span className={`sync-overall-state ${sync.state}`} role="status" aria-live="polite">
+            {sync.state}
+          </span>
+        </div>
+        <p className="sync-log-lede">
+          {sync.state === 'running'
+            ? 'The app is still reconciling its local replica with the shared database.'
+            : sync.state === 'succeeded'
+              ? 'Startup reconciliation completed successfully.'
+              : 'Startup continued, but one or more sync steps did not complete cleanly.'}
+        </p>
+
+        <dl className="sync-log-summary">
+          <div className="sync-summary-item">
+            <dt>elapsed</dt>
+            <dd className="sync-elapsed" aria-label={`Elapsed ${formatSyncDuration(elapsedMs)}`}>
+              {formatSyncDuration(elapsedMs)}
+            </dd>
+          </div>
+          <div className="sync-summary-item">
+            <dt>started</dt>
+            <dd><time dateTime={sync.started_at}>{formatSyncDateTime(sync.started_at)}</time></dd>
+          </div>
+          <div className="sync-summary-item">
+            <dt>finished</dt>
+            <dd>
+              {sync.finished_at
+                ? <time dateTime={sync.finished_at}>{formatSyncDateTime(sync.finished_at)}</time>
+                : 'in progress'}
+            </dd>
+          </div>
+          <div className="sync-summary-item sync-summary-wide">
+            <dt>shared database</dt>
+            <dd><code title={dbPath}>{dbPath}</code></dd>
+          </div>
+          <div className="sync-summary-item">
+            <dt>playlists</dt>
+            <dd>{playlists}</dd>
+          </div>
+          <div className="sync-summary-item sync-summary-wide">
+            <dt>pending now</dt>
+            <dd>{syncPendingSummary(status)}</dd>
+          </div>
+        </dl>
+      </header>
+
+      <div className="sync-timeline-heading">
+        <div>
+          <p className="sync-log-eyebrow">ordered trace</p>
+          <h3>boot sequence</h3>
+        </div>
+        <span>{events.length} {events.length === 1 ? 'event' : 'events'}</span>
+      </div>
+
+      {events.length === 0 ? (
+        <div className="sync-log-empty compact" role="status">
+          <span className="sync-log-empty-mark" aria-hidden="true" />
+          <strong>waiting for the first sync step</strong>
+          <p>The trace is active; events will appear here as startup proceeds.</p>
+        </div>
+      ) : (
+        <ol
+          className="sync-timeline"
+          aria-label="Startup sync events"
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions text"
+        >
+          {events.map((event) => {
+            const counts = event.counts;
+            const countParts = counts ? [
+              counts.shows ? `${counts.shows} shows` : '',
+              counts.episodes ? `${counts.episodes} episodes` : '',
+              counts.history ? `${counts.history} history` : '',
+              counts.queue ? `${counts.queue} queue` : '',
+            ].filter(Boolean) : [];
+
+            return (
+              <li className={`sync-event ${event.state}`} key={event.seq}>
+                <time className="sync-event-time" dateTime={event.at} title={formatSyncDateTime(event.at)}>
+                  {formatSyncClock(event.at)}
+                </time>
+                <span className="sync-event-marker" aria-hidden="true" />
+                <article className="sync-event-card">
+                  <div className="sync-event-header">
+                    <div className="sync-event-stage">
+                      <span className="sync-event-seq">#{event.seq}</span>
+                      <strong>{event.stage.replace(/[_-]+/g, ' ')}</strong>
+                    </div>
+                    <span className={`sync-event-state ${event.state}`}>{event.state}</span>
+                  </div>
+                  <p>{event.message}</p>
+                  {(event.duration_ms != null || counts) && (
+                    <footer className="sync-event-meta">
+                      {event.duration_ms != null && (
+                        <span className="sync-event-duration">{formatSyncDuration(event.duration_ms)}</span>
+                      )}
+                      {counts && (
+                        <span className="sync-event-counts">
+                          <strong>{counts.total} total</strong>
+                          {countParts.length > 0 && <span>{countParts.join(' · ')}</span>}
+                        </span>
+                      )}
+                    </footer>
+                  )}
+                </article>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+    </section>
+  );
+}
+
 function SettingsPanel({
   status,
   shows,
@@ -2238,7 +2460,7 @@ function SettingsPanel({
   overviewHeader: React.ReactNode;
   overviewContent: React.ReactNode;
 }) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'stats' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'sync' | 'stats' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
 
   const statsHeader = stats && stats.total_shows ? (() => {
     const pct = stats.episodes_total
@@ -2288,14 +2510,22 @@ function SettingsPanel({
     <div className="settings-panel">
       <div className="settings-sidebar">
         <h3>settings</h3>
-        <nav className="settings-nav">
-          <button className={`nav-btn${activeTab === 'overview' ? ' active' : ''}`} onClick={() => setActiveTab('overview')}>overview</button>
-          <button className={`nav-btn${activeTab === 'stats' ? ' active' : ''}`} onClick={() => setActiveTab('stats')}>stats</button>
-          <button className={`nav-btn${activeTab === 'library' ? ' active' : ''}`} onClick={() => setActiveTab('library')}>library</button>
-          <button className={`nav-btn${activeTab === 'add_show' ? ' active' : ''}`} onClick={() => setActiveTab('add_show')}>add show</button>
-          <button className={`nav-btn${activeTab === 'next_round' ? ' active' : ''}`} onClick={() => setActiveTab('next_round')}>next round</button>
-          <button className={`nav-btn${activeTab === 'general' ? ' active' : ''}`} onClick={() => setActiveTab('general')}>general</button>
-          <button className={`nav-btn${activeTab === 'appearance' ? ' active' : ''}`} onClick={() => setActiveTab('appearance')}>appearance</button>
+        <nav className="settings-nav" aria-label="Settings sections">
+          <button aria-current={activeTab === 'overview' ? 'page' : undefined} className={`nav-btn${activeTab === 'overview' ? ' active' : ''}`} onClick={() => setActiveTab('overview')}>overview</button>
+          <button
+            type="button"
+            className={`nav-btn${activeTab === 'sync' ? ' active' : ''}`}
+            aria-current={activeTab === 'sync' ? 'page' : undefined}
+            onClick={() => setActiveTab('sync')}
+          >
+            sync log
+          </button>
+          <button aria-current={activeTab === 'stats' ? 'page' : undefined} className={`nav-btn${activeTab === 'stats' ? ' active' : ''}`} onClick={() => setActiveTab('stats')}>stats</button>
+          <button aria-current={activeTab === 'library' ? 'page' : undefined} className={`nav-btn${activeTab === 'library' ? ' active' : ''}`} onClick={() => setActiveTab('library')}>library</button>
+          <button aria-current={activeTab === 'add_show' ? 'page' : undefined} className={`nav-btn${activeTab === 'add_show' ? ' active' : ''}`} onClick={() => setActiveTab('add_show')}>add show</button>
+          <button aria-current={activeTab === 'next_round' ? 'page' : undefined} className={`nav-btn${activeTab === 'next_round' ? ' active' : ''}`} onClick={() => setActiveTab('next_round')}>next round</button>
+          <button aria-current={activeTab === 'general' ? 'page' : undefined} className={`nav-btn${activeTab === 'general' ? ' active' : ''}`} onClick={() => setActiveTab('general')}>general</button>
+          <button aria-current={activeTab === 'appearance' ? 'page' : undefined} className={`nav-btn${activeTab === 'appearance' ? ' active' : ''}`} onClick={() => setActiveTab('appearance')}>appearance</button>
         </nav>
       </div>
 
@@ -2310,6 +2540,12 @@ function SettingsPanel({
               {overviewContent}
             </div>
           )}
+
+        {activeTab === 'sync' && (
+          <div className="settings-tab sync-log-tab">
+            <SyncLogPanel status={status} />
+          </div>
+        )}
 
         {activeTab === 'stats' && (
           <div className="settings-tab">
