@@ -72,6 +72,34 @@ export type SyncState = {
   shared_db_path?: string | null;
 };
 
+export type StartupSyncCounts = {
+  shows: number;
+  episodes: number;
+  history: number;
+  queue: number;
+  total: number;
+};
+
+export type StartupSyncEvent = {
+  seq: number;
+  at: string;
+  stage: string;
+  state: 'started' | 'succeeded' | 'skipped' | 'failed';
+  message: string;
+  duration_ms?: number | null;
+  counts?: StartupSyncCounts | null;
+};
+
+export type StartupSyncStatus = {
+  state: 'running' | 'succeeded' | 'degraded';
+  started_at: string;
+  finished_at?: string | null;
+  elapsed_ms?: number | null;
+  shared_db_path?: string | null;
+  playlists: string[];
+  events: StartupSyncEvent[];
+};
+
 export type StatusAlert = {
   level: 'danger' | 'warning' | 'info';
   title: string;
@@ -116,6 +144,7 @@ export type Status = {
   last_advance?: AdvanceResult;
   playback?: Playback;
   sync?: SyncState;
+  startup_sync?: StartupSyncStatus;
   file_sync?: FileSyncStatus;
   alerts?: StatusAlert[];
   error_kind?: 'round_unplayable' | string;

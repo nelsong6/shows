@@ -55,8 +55,8 @@ const WM_WINDOW_CLOSE: u32 = WM_APP + 4;
 const WM_SET_STAY_ON_TOP: u32 = WM_APP + 5;
 // Begin a native window move (caption drag) initiated from the overlay — used in
 // pin mode, where there is no titlebar and the bare video surface is the drag
-// handle. The overlay decides what is draggable (it owns the DOM) and asks the
-// host to start the standard move loop.
+// handle. The overlay decides what surface is draggable (it owns the DOM); the
+// host authorizes the move from live `is_on_top`, never echoed browser state.
 const WM_BEGIN_DRAG: u32 = WM_APP + 6;
 // Observability: id for the global Ctrl+Alt+F hotkey that stamps a monitor-flash
 // marker into the log. Global (not an overlay keybind) because the flash happens
@@ -735,6 +735,16 @@ fn obs_heartbeat(hwnd: HWND, state: &State) {
             rc.bottom - rc.top,
         );
     }
+    // Shell state is cheap and authoritative. Re-echo it on the compositor's
+    // existing heartbeat so one coalesced/lost SSE frame cannot strand the
+    // overlay with the wrong titlebar or drag affordance while playback is
+    // paused. This is a state projection, not another source of truth.
+    if let Some(cb) = &state.status_callback {
+        cb(serde_json::json!({
+            "window_on_top": state.is_on_top,
+            "window_fullscreen": state.is_fullscreen,
+        }));
+    }
 }
 
 fn current_cursor_screen_pos() -> Option<POINT> {
@@ -1341,6 +1351,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 let changed = STATE.with(|s| {
                     s.borrow_mut().as_mut().and_then(|st| {
                         if st.is_on_top == desired {
+                            // Idempotent no-ops still acknowledge host truth.
+                            // If the change frame was lost, a repeated desired
+                            // command must be able to repair the overlay.
+                            if let Some(cb) = &st.status_callback {
+                                cb(serde_json::json!({ "window_on_top": st.is_on_top }));
+                            }
                             return None;
                         }
                         st.is_on_top = desired;
@@ -1437,6 +1453,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 // Start the standard window-move loop as if the caption were
                 // grabbed at the current cursor. The overlay posts this when the
                 // user drags the bare video surface in pin mode (no titlebar).
+                let pinned = STATE.with(|s| {
+                    s.borrow()
+                        .as_ref()
+                        .map(|state| state.is_on_top)
+                        .unwrap_or(false)
+                });
+                if !pinned {
+                    return LRESULT(0);
+                }
                 let _ = ReleaseCapture();
                 let mut pt = POINT::default();
                 let _ = GetCursorPos(&mut pt);
