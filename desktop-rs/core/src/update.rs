@@ -26,6 +26,10 @@ pub fn current_sha() -> Option<String> {
         .map(str::to_string)
 }
 
+pub fn current_channel() -> &'static str {
+    option_env!("SHOWS_UPDATE_CHANNEL").unwrap_or("dev")
+}
+
 /// Pure comparison: given the current SHA and the latest release tag+url, return
 /// `UpdateInfo` when a different (newer) release exists, else `None`.
 pub fn compare(current: &str, tag: &str, url: &str) -> Option<UpdateInfo> {
@@ -44,6 +48,9 @@ pub fn compare(current: &str, tag: &str, url: &str) -> Option<UpdateInfo> {
 /// Compare this build to GitHub's latest release. `None` on a dev build, when
 /// offline/rate-limited, or when already up to date.
 pub fn check() -> Option<UpdateInfo> {
+    if current_channel() != "stable" {
+        return None;
+    }
     let current = current_sha()?;
     let (tag, url) = fetch_latest_release()?;
     compare(&current, &tag, &url)

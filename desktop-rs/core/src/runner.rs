@@ -1,12 +1,11 @@
-//! Round-robin playback loop — offline-first.
+//! Round-robin playback loop over the NAS-hosted SQLite database.
 //!
-//! The desktop is the engine: each round is computed locally from the SQLite
-//! replica ([`crate::engine::next_round`]), advances/defers are applied to the
-//! replica, and the syncer pushes those changes at smart moments. Playback never
-//! blocks on the network — the loop runs entirely off the replica.
+//! The desktop is the engine: each round is computed from the authoritative
+//! SQLite database ([`crate::engine::next_round`]). Advances and defers commit
+//! to that database immediately.
 //!
 //! ```text
-//!   IDLE    -> next round from replica -> queue N -> PLAYING
+//!   IDLE    -> next round from database -> queue N -> PLAYING
 //!   PLAYING -> each episode's natural end advances it (local); round drains -> IDLE
 //!   IDLE    -> empty round -> DRAINED -> park
 //! ```
@@ -16,19 +15,15 @@
 //! skipped / deferred before it finishes, never reaches that point, so a
 //! non-watch is never recorded as a watch.
 //!
-//! The runner is pure orchestration over the [`PlayerOps`] and [`SyncOps`]
-//! traits, so it lives in the safe core and is fully tested with fakes; the
-//! libmpv `Player` and the real `Syncer` implement the traits.
+//! The runner is pure orchestration over [`PlayerOps`], so it lives in the safe
+//! core and is fully tested with fakes.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::engine;
 use crate::replica::Replica;
-use crate::sync::{SyncProgress, SyncProgressState};
 
 /// A `threading.Event`-equivalent: settable, with a blocking `wait`.
 pub struct StopFlag {
@@ -126,51 +121,6 @@ pub trait PlayerOps: Send + Sync {
     fn wait_for_round_end(&self, stop: &StopFlag) -> Result<(), PlayerShutdown>;
 }
 
-/// The sync operations the runner triggers (implemented by [`crate::sync::Syncer`]).
-pub trait SyncOps: Send + Sync {
-    fn sync(&self) -> bool;
-    fn push(&self) -> bool;
-    fn pending(&self) -> i64;
-    fn online(&self) -> bool;
-}
-
-impl SyncOps for crate::sync::Syncer {
-    fn sync(&self) -> bool {
-        crate::sync::Syncer::sync(self)
-    }
-    fn push(&self) -> bool {
-        crate::sync::Syncer::push(self)
-    }
-    fn pending(&self) -> i64 {
-        crate::sync::Syncer::pending(self)
-    }
-    fn online(&self) -> bool {
-        crate::sync::Syncer::online(self)
-    }
-}
-
-const REQUEST_PUSH: u8 = 0b01;
-const REQUEST_SYNC: u8 = 0b10;
-
-fn start_sync_worker(syncer: Arc<dyn SyncOps>) -> (Sender<()>, Arc<AtomicU8>) {
-    let (wake_tx, wake_rx) = channel::<()>();
-    let pending = Arc::new(AtomicU8::new(0));
-    let worker_pending = pending.clone();
-    std::thread::Builder::new()
-        .name("shows-sync-worker".into())
-        .spawn(move || {
-            while wake_rx.recv().is_ok() {
-                let requested = worker_pending.swap(0, Ordering::AcqRel);
-                if requested & REQUEST_SYNC != 0 {
-                    syncer.sync();
-                } else if requested & REQUEST_PUSH != 0 {
-                    syncer.push();
-                }
-            }
-        })
-        .expect("spawn sync worker");
-    (wake_tx, pending)
-}
 
 #[derive(Debug, Clone)]
 pub struct RoundEntry {
@@ -375,7 +325,6 @@ pub type OnDrained = Box<dyn Fn() + Send + Sync>;
 pub type OnError = Box<dyn Fn(&str) + Send + Sync>;
 pub type OnFileSync = Box<dyn Fn(&FileSyncReport) + Send + Sync>;
 pub type OnStatus = Box<dyn Fn(&str, &str) + Send + Sync>;
-pub type OnSyncProgress = Box<dyn Fn(&SyncProgress) + Send + Sync>;
 
 #[derive(Default)]
 pub struct Callbacks {
@@ -385,7 +334,6 @@ pub struct Callbacks {
     pub on_error: Option<OnError>,
     pub on_file_sync: Option<OnFileSync>,
     pub on_status: Option<OnStatus>,
-    pub on_sync_progress: Option<OnSyncProgress>,
 }
 
 struct Inner {
@@ -398,29 +346,23 @@ struct Inner {
 
 pub struct Runner {
     replica: Arc<Replica>,
-    syncer: Arc<dyn SyncOps>,
     player: Arc<dyn PlayerOps>,
     playlists: Vec<String>,
     stop: Arc<StopFlag>,
     cb: Callbacks,
     inner: Mutex<Inner>,
-    sync_wake: Sender<()>,
-    sync_requests: Arc<AtomicU8>,
 }
 
 impl Runner {
     pub fn new(
         replica: Arc<Replica>,
-        syncer: Arc<dyn SyncOps>,
         player: Arc<dyn PlayerOps>,
         playlists: Vec<String>,
         stop: Arc<StopFlag>,
         cb: Callbacks,
     ) -> Runner {
-        let (sync_wake, sync_requests) = start_sync_worker(syncer.clone());
         Runner {
             replica,
-            syncer,
             player,
             playlists,
             stop,
@@ -432,83 +374,24 @@ impl Runner {
                 playing: None,
                 loaded_any: false,
             }),
-            sync_wake,
-            sync_requests,
         }
     }
 
     pub fn run(&self) {
-        self.emit_sync_progress(SyncProgress::new(
-            "startup.plan",
-            SyncProgressState::Started,
-            "Planning local-first startup",
-        ));
-        let has_local_library = self.replica.has_library_data();
-        self.emit_sync_progress(SyncProgress::new(
-            "startup.plan",
-            SyncProgressState::Succeeded,
-            if has_local_library {
-                "Local library is available; load it before shared-database sync"
-            } else {
-                "Local library is empty; seed it from the shared database before loading a round"
-            },
-        ));
-
-        // The only synchronous network path is a genuinely empty first install:
-        // without any local library there is nothing the offline engine can play.
-        if !has_local_library {
-            if let Some(cb) = &self.cb.on_status {
-                cb("syncing", "seeding empty local library");
-            }
-            self.syncer.sync();
-        }
         if let Some(cb) = &self.cb.on_status {
-            cb("fetching", "loading local round");
+            cb("fetching", "loading round from NAS database");
         }
-        self.run_loop(has_local_library);
+        self.run_loop();
     }
 
-    fn run_loop(&self, mut background_startup_sync: bool) {
-        let mut first_round = true;
+    fn run_loop(&self) {
         while !self.stop.is_set() {
-            if first_round {
-                self.emit_sync_progress(SyncProgress::new(
-                    "local-round.load",
-                    SyncProgressState::Started,
-                    "Loading or selecting a round from the local replica",
-                ));
-            }
             let (mut round, mut pos) = self.load_round_from_db();
             if round.is_empty() {
-                // A first-round queue is pushed only after local-round.load is
-                // terminal. Otherwise a first install can start an async push
-                // after origin.complete but before local completion, freezing
-                // a dangling `started` event into the launch-scoped timeline.
-                round = self.compute_and_save_new_round(!first_round);
+                round = self.compute_and_save_new_round();
                 pos = 0;
             }
-            if round.is_empty() && first_round && background_startup_sync {
-                // The replica is established but has no local round for the
-                // selected playlists. There is nothing useful to start, so wait
-                // for one reconciliation and retry locally before declaring it
-                // drained. A fire-and-forget worker would otherwise merge new
-                // playable rows and leave the runner parked until restart.
-                self.syncer.sync();
-                background_startup_sync = false;
-                (round, pos) = self.load_round_from_db();
-                if round.is_empty() {
-                    round = self.compute_and_save_new_round(false);
-                    pos = 0;
-                }
-            }
             if round.is_empty() {
-                if first_round {
-                    self.emit_sync_progress(SyncProgress::new(
-                        "local-round.load",
-                        SyncProgressState::Skipped,
-                        "The local library has no playable round",
-                    ));
-                }
                 log::info!("playlists drained: {}", self.playlists.join(","));
                 if let Some(cb) = &self.cb.on_drained {
                     cb();
@@ -531,34 +414,7 @@ impl Runner {
                 pos,
                 round.get(pos).map(|e| e.episode_id.as_str()).unwrap_or("")
             );
-            let file_cache_started = Instant::now();
-            if first_round {
-                self.emit_sync_progress(SyncProgress::new(
-                    "file-cache.check",
-                    SyncProgressState::Started,
-                    format!("Checking {} round file(s) in the local cache", round.len()),
-                ));
-            }
             let file_sync = self.pull_and_prune_files(&round);
-            if first_round {
-                self.emit_sync_progress(
-                    SyncProgress::new(
-                        "file-cache.check",
-                        if file_sync.incomplete() {
-                            SyncProgressState::Failed
-                        } else {
-                            SyncProgressState::Succeeded
-                        },
-                        format!("Local round file check: {}", file_sync.summary()),
-                    )
-                    .with_duration(
-                        file_cache_started
-                            .elapsed()
-                            .as_millis()
-                            .min(u128::from(u64::MAX)) as u64,
-                    ),
-                );
-            }
             if let Some(cb) = &self.cb.on_file_sync {
                 cb(&file_sync);
             }
@@ -566,24 +422,6 @@ impl Runner {
             self.player.set_playlist_pos(pos);
             if let Some(cb) = &self.cb.on_round {
                 cb(&round, pos);
-            }
-            if first_round {
-                self.emit_sync_progress(SyncProgress::new(
-                    "local-round.load",
-                    SyncProgressState::Succeeded,
-                    format!("Loaded {} episode(s) from the local replica", round.len()),
-                ));
-                if background_startup_sync {
-                    // Playback is now fully queued. Only now may the worker touch
-                    // a sleeping origin, so no network wait can delay first play.
-                    self.request_full_sync();
-                } else if self.replica.dirty_queue().is_some() {
-                    // First install (or the drained/retry path) already completed
-                    // its origin pull. Flush the newly-created queue only after
-                    // local-round.load closes the boot timeline.
-                    self.request_push();
-                }
-                first_round = false;
             }
 
             let wait_res = self.player.wait_for_round_end(&self.stop);
@@ -611,29 +449,7 @@ impl Runner {
                 self.stop.wait();
                 return;
             }
-            self.request_push(); // flush this round's advances without blocking playback
         }
-    }
-
-    fn emit_sync_progress(&self, progress: SyncProgress) {
-        if let Some(cb) = &self.cb.on_sync_progress {
-            cb(&progress);
-        }
-    }
-
-    fn request_sync_work(&self, request: u8) {
-        let previous = self.sync_requests.fetch_or(request, Ordering::AcqRel);
-        if previous == 0 {
-            let _ = self.sync_wake.send(());
-        }
-    }
-
-    fn request_full_sync(&self) {
-        self.request_sync_work(REQUEST_SYNC);
-    }
-
-    fn request_push(&self) {
-        self.request_sync_work(REQUEST_PUSH);
     }
 
     // ── interactive controls (control-server thread) ─────────────────────
@@ -658,7 +474,6 @@ impl Runner {
         if let Some(cur) = cur {
             let show_name = cur.show_name.clone();
             self.apply_advance(&[cur]);
-            self.request_push();
             ControlOutcome::applied("skipped", format!("skipped {show_name}"))
         } else {
             ControlOutcome::noop("no_current_episode", "nothing is currently selected")
@@ -679,7 +494,7 @@ impl Runner {
     }
 
     /// Deliberately reload the current round from `round_queue`. Manual repair
-    /// removes bad queue entries in the replica; this interrupts mpv so the run
+    /// removes bad queue entries in the database; this interrupts mpv so the run
     /// loop clears the in-memory playlist and rebuilds from the repaired queue.
     pub fn reload_round(&self) -> ControlOutcome {
         self.player.playlist_clear();
@@ -707,7 +522,6 @@ impl Runner {
             .insert(cur.episode_id.clone());
         self.replica
             .update_round_entry_state(&cur.episode_id, "deferred", &cur.playlist);
-        self.request_push();
         self.player.skip();
         ControlOutcome::applied("deferred", format!("deferred {show_name}"))
     }
@@ -741,7 +555,6 @@ impl Runner {
                 inner.pos = idx;
             }
             self.player.set_playlist_pos(idx);
-            self.request_push();
             ControlOutcome::applied("playing_selected_show", format!("selected show {show_id}"))
         } else {
             log::warn!(
@@ -818,8 +631,8 @@ impl Runner {
         }
     }
 
-    /// Persist the current episode's position to the replica (local; pushed on
-    /// the next sync). Called periodically and on window close.
+    /// Persist the current episode's position to the database. Called
+    /// periodically and on window close.
     pub fn save_resume(&self) {
         let Some(cur) = self.current() else {
             return;
@@ -877,7 +690,7 @@ impl Runner {
         }
     }
 
-    fn compute_and_save_new_round(&self, push: bool) -> Vec<RoundEntry> {
+    fn compute_and_save_new_round(&self) -> Vec<RoundEntry> {
         let round = self.fetch_round();
         if !round.is_empty() {
             let entries: Vec<(String, String, i32, String, String)> = round
@@ -894,10 +707,7 @@ impl Runner {
                 })
                 .collect();
             let now = chrono::Utc::now().to_rfc3339();
-            self.replica.save_round_queue(&entries, &now, true);
-            if push {
-                self.request_push();
-            }
+            self.replica.save_round_queue(&entries, &now);
         }
         round
     }
@@ -1168,11 +978,9 @@ fn prune_unused_files(dir: &std::path::Path, active_paths: &std::collections::Ha
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{LibraryEpisode, LibraryShow};
+    use crate::engine::{Episode, Show};
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    const T0: &str = "2026-01-01T00:00:00Z";
 
     #[derive(Default)]
     struct FakePlayer {
@@ -1226,158 +1034,31 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct StubSyncer {
-        syncs: AtomicUsize,
-        pushes: AtomicUsize,
-    }
-    impl SyncOps for StubSyncer {
-        fn sync(&self) -> bool {
-            self.syncs.fetch_add(1, Ordering::SeqCst);
-            true
-        }
-        fn push(&self) -> bool {
-            self.pushes.fetch_add(1, Ordering::SeqCst);
-            true
-        }
-        fn pending(&self) -> i64 {
-            0
-        }
-        fn online(&self) -> bool {
-            true
-        }
-    }
-
-    #[derive(Default)]
-    struct BlockGate {
-        state: Mutex<(bool, bool)>, // (entered, released)
-        changed: Condvar,
-    }
-
-    impl BlockGate {
-        fn enter_and_wait(&self) {
-            let mut state = self.state.lock().unwrap();
-            state.0 = true;
-            self.changed.notify_all();
-            while !state.1 {
-                state = self.changed.wait(state).unwrap();
-            }
-        }
-
-        fn wait_until_entered(&self, timeout: Duration) -> bool {
-            let state = self.state.lock().unwrap();
-            let (state, _) = self
-                .changed
-                .wait_timeout_while(state, timeout, |state| !state.0)
-                .unwrap();
-            state.0
-        }
-
-        fn release(&self) {
-            let mut state = self.state.lock().unwrap();
-            state.1 = true;
-            self.changed.notify_all();
-        }
-    }
-
-    struct GatedSyncer {
-        sync_gate: Option<Arc<BlockGate>>,
-        push_gate: Option<Arc<BlockGate>>,
-        seed: Option<(Arc<Replica>, Vec<LibraryShow>)>,
-        syncs: AtomicUsize,
-        pushes: AtomicUsize,
-    }
-
-    impl GatedSyncer {
-        fn blocking_sync(gate: Arc<BlockGate>) -> GatedSyncer {
-            GatedSyncer {
-                sync_gate: Some(gate),
-                push_gate: None,
-                seed: None,
-                syncs: AtomicUsize::new(0),
-                pushes: AtomicUsize::new(0),
-            }
-        }
-
-        fn blocking_seed(
-            gate: Arc<BlockGate>,
-            replica: Arc<Replica>,
-            shows: Vec<LibraryShow>,
-        ) -> GatedSyncer {
-            GatedSyncer {
-                sync_gate: Some(gate),
-                push_gate: None,
-                seed: Some((replica, shows)),
-                syncs: AtomicUsize::new(0),
-                pushes: AtomicUsize::new(0),
-            }
-        }
-
-        fn blocking_push(gate: Arc<BlockGate>) -> GatedSyncer {
-            GatedSyncer {
-                sync_gate: None,
-                push_gate: Some(gate),
-                seed: None,
-                syncs: AtomicUsize::new(0),
-                pushes: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl SyncOps for GatedSyncer {
-        fn sync(&self) -> bool {
-            self.syncs.fetch_add(1, Ordering::SeqCst);
-            if let Some(gate) = &self.sync_gate {
-                gate.enter_and_wait();
-            }
-            if let Some((replica, shows)) = &self.seed {
-                replica.merge_shows(shows);
-            }
-            true
-        }
-
-        fn push(&self) -> bool {
-            self.pushes.fetch_add(1, Ordering::SeqCst);
-            if let Some(gate) = &self.push_gate {
-                gate.enter_and_wait();
-            }
-            true
-        }
-
-        fn pending(&self) -> i64 {
-            0
-        }
-
-        fn online(&self) -> bool {
-            true
-        }
-    }
-
-    fn show(sid: &str, playlist: &str, eps: &[&str]) -> LibraryShow {
-        LibraryShow {
+    fn show(sid: &str, playlist: &str, eps: &[&str]) -> Show {
+        Show {
             id: sid.into(),
             playlist: playlist.into(),
             name: sid.into(),
             root_path: format!("D:\\{sid}"),
-            updated_at: T0.into(),
             episodes: eps
                 .iter()
                 .enumerate()
-                .map(|(i, e)| LibraryEpisode {
+                .map(|(i, e)| Episode {
                     id: (*e).into(),
                     relative_path: format!("{e}.mkv"),
                     position: i as i64,
-                    updated_at: T0.into(),
-                    ..Default::default()
+                    watched_at: None,
+                    resume_pos: None,
                 })
                 .collect(),
-            ..Default::default()
+            removed_at: None,
+            date_added: None,
         }
     }
 
-    fn replica(shows: &[LibraryShow]) -> Arc<Replica> {
+    fn replica(shows: &[Show]) -> Arc<Replica> {
         let r = Arc::new(Replica::new(":memory:"));
-        r.merge_shows(shows);
+        r.seed_test_shows(shows);
         r
     }
 
@@ -1401,27 +1082,8 @@ mod tests {
         stop: Arc<StopFlag>,
         cb: Callbacks,
     ) -> Arc<Runner> {
-        runner_with_syncer(
-            r,
-            Arc::new(StubSyncer::default()),
-            player,
-            playlists,
-            stop,
-            cb,
-        )
-    }
-
-    fn runner_with_syncer(
-        r: Arc<Replica>,
-        syncer: Arc<dyn SyncOps>,
-        player: Arc<dyn PlayerOps>,
-        playlists: &[&str],
-        stop: Arc<StopFlag>,
-        cb: Callbacks,
-    ) -> Arc<Runner> {
         Arc::new(Runner::new(
             r,
-            syncer,
             player,
             playlists.iter().map(|s| s.to_string()).collect(),
             stop,
@@ -1441,280 +1103,6 @@ mod tests {
     }
 
     // ── interactive controls ─────────────────────────────────────────
-    #[test]
-    fn established_startup_reports_local_progress_before_background_sync() {
-        let r = replica(&[show("s1", "nelson", &["a"])]);
-        let p = Arc::new(FakePlayer::default());
-        let stop = StopFlag::new();
-        let syncer = Arc::new(StubSyncer::default());
-        let progress: Arc<Mutex<Vec<(String, SyncProgressState)>>> = Default::default();
-        let (progress2, stop2) = (progress.clone(), stop.clone());
-        let cb = Callbacks {
-            on_sync_progress: Some(Box::new(move |event| {
-                progress2
-                    .lock()
-                    .unwrap()
-                    .push((event.stage.clone(), event.state));
-            })),
-            on_round: Some(Box::new(move |_, _| {
-                stop2.set();
-            })),
-            ..Default::default()
-        };
-        let run = runner_with_syncer(r, syncer.clone(), p, &["nelson"], stop, cb);
-
-        run.run();
-
-        assert_eq!(
-            *progress.lock().unwrap(),
-            vec![
-                ("startup.plan".into(), SyncProgressState::Started),
-                ("startup.plan".into(), SyncProgressState::Succeeded),
-                ("local-round.load".into(), SyncProgressState::Started),
-                ("file-cache.check".into(), SyncProgressState::Started),
-                ("file-cache.check".into(), SyncProgressState::Succeeded),
-                ("local-round.load".into(), SyncProgressState::Succeeded),
-            ]
-        );
-        for _ in 0..100 {
-            if syncer.syncs.load(Ordering::SeqCst) == 1 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(syncer.syncs.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn established_replica_does_not_wait_for_blocking_startup_sync() {
-        let r = replica(&[show("s1", "nelson", &["a"])]);
-        let gate = Arc::new(BlockGate::default());
-        let syncer = Arc::new(GatedSyncer::blocking_sync(gate.clone()));
-        let stop = StopFlag::new();
-        let (round_tx, round_rx) = std::sync::mpsc::channel();
-        let stop2 = stop.clone();
-        let cb = Callbacks {
-            on_round: Some(Box::new(move |_, _| {
-                let _ = round_tx.send(());
-                stop2.set();
-            })),
-            ..Default::default()
-        };
-        let run = runner_with_syncer(
-            r,
-            syncer,
-            Arc::new(FakePlayer::default()),
-            &["nelson"],
-            stop,
-            cb,
-        );
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            run.run();
-            let _ = done_tx.send(());
-        });
-
-        round_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("local round should load before origin sync finishes");
-        assert!(gate.wait_until_entered(Duration::from_secs(1)));
-        let returned_before_sync = done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
-        gate.release();
-        if !returned_before_sync {
-            let _ = done_rx.recv_timeout(Duration::from_secs(1));
-        }
-        handle.join().unwrap();
-        assert!(
-            returned_before_sync,
-            "runner startup was blocked by the background shared-database sync"
-        );
-    }
-
-    #[test]
-    fn established_drained_replica_retries_after_sync_adds_selected_playlist() {
-        let r = replica(&[show("other", "other", &["old"])]);
-        let gate = Arc::new(BlockGate::default());
-        let syncer = Arc::new(GatedSyncer::blocking_seed(
-            gate.clone(),
-            r.clone(),
-            vec![show("s1", "nelson", &["a"])],
-        ));
-        let stop = StopFlag::new();
-        let drained = Arc::new(AtomicUsize::new(0));
-        let drained2 = drained.clone();
-        let (round_tx, round_rx) = std::sync::mpsc::channel();
-        let stop2 = stop.clone();
-        let cb = Callbacks {
-            on_round: Some(Box::new(move |round, _| {
-                let _ = round_tx.send(round.len());
-                stop2.set();
-            })),
-            on_drained: Some(Box::new(move || {
-                drained2.fetch_add(1, Ordering::SeqCst);
-            })),
-            ..Default::default()
-        };
-        let run = runner_with_syncer(
-            r,
-            syncer.clone(),
-            Arc::new(FakePlayer::default()),
-            &["nelson"],
-            stop,
-            cb,
-        );
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            run.run();
-            let _ = done_tx.send(());
-        });
-
-        assert!(gate.wait_until_entered(Duration::from_secs(1)));
-        assert_eq!(
-            round_rx.recv_timeout(Duration::from_millis(100)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
-            "no round should load before reconciliation finishes"
-        );
-        assert_eq!(drained.load(Ordering::SeqCst), 0);
-
-        gate.release();
-        assert_eq!(round_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
-        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        handle.join().unwrap();
-        assert_eq!(syncer.syncs.load(Ordering::SeqCst), 1);
-        assert_eq!(drained.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn first_install_defers_new_queue_push_until_local_terminal() {
-        let r = replica(&[]);
-        let push_gate = Arc::new(BlockGate::default());
-        let syncer = Arc::new(GatedSyncer {
-            sync_gate: None,
-            push_gate: Some(push_gate.clone()),
-            seed: Some((r.clone(), vec![show("s1", "nelson", &["a"])])),
-            syncs: AtomicUsize::new(0),
-            pushes: AtomicUsize::new(0),
-        });
-        let stop = StopFlag::new();
-        let pushes_at_local_terminal = Arc::new(AtomicUsize::new(usize::MAX));
-        let observed = pushes_at_local_terminal.clone();
-        let syncer2 = syncer.clone();
-        let stop2 = stop.clone();
-        let cb = Callbacks {
-            on_sync_progress: Some(Box::new(move |event| {
-                if event.stage == "local-round.load"
-                    && event.state == SyncProgressState::Succeeded
-                {
-                    observed.store(syncer2.pushes.load(Ordering::SeqCst), Ordering::SeqCst);
-                    stop2.set();
-                }
-            })),
-            ..Default::default()
-        };
-        let run = runner_with_syncer(
-            r,
-            syncer.clone(),
-            Arc::new(FakePlayer::default()),
-            &["nelson"],
-            stop,
-            cb,
-        );
-
-        run.run();
-
-        assert_eq!(syncer.syncs.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            pushes_at_local_terminal.load(Ordering::SeqCst),
-            0,
-            "the queue push must not start before local-round.load is terminal"
-        );
-        assert!(push_gate.wait_until_entered(Duration::from_secs(1)));
-        push_gate.release();
-    }
-
-    #[test]
-    fn empty_replica_waits_for_seed_before_loading_first_round() {
-        let r = replica(&[]);
-        let gate = Arc::new(BlockGate::default());
-        let syncer = Arc::new(GatedSyncer::blocking_seed(
-            gate.clone(),
-            r.clone(),
-            vec![show("s1", "nelson", &["a"])],
-        ));
-        let stop = StopFlag::new();
-        let (round_tx, round_rx) = std::sync::mpsc::channel();
-        let stop2 = stop.clone();
-        let cb = Callbacks {
-            on_round: Some(Box::new(move |_, _| {
-                let _ = round_tx.send(());
-                stop2.set();
-            })),
-            ..Default::default()
-        };
-        let run = runner_with_syncer(
-            r,
-            syncer.clone(),
-            Arc::new(FakePlayer::default()),
-            &["nelson"],
-            stop,
-            cb,
-        );
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            run.run();
-            let _ = done_tx.send(());
-        });
-
-        assert!(gate.wait_until_entered(Duration::from_secs(1)));
-        assert_eq!(
-            round_rx.recv_timeout(Duration::from_millis(100)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
-            "an empty replica must not select a round before its synchronous seed"
-        );
-        gate.release();
-        round_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("seeded local round should load");
-        done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("runner should stop after the test round callback");
-        handle.join().unwrap();
-        assert_eq!(syncer.syncs.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn automatic_control_push_does_not_block_on_remote_io() {
-        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
-        let gate = Arc::new(BlockGate::default());
-        let syncer = Arc::new(GatedSyncer::blocking_push(gate.clone()));
-        let run = runner_with_syncer(
-            r,
-            syncer,
-            Arc::new(FakePlayer::default()),
-            &["nelson"],
-            StopFlag::new(),
-            Callbacks::default(),
-        );
-        set_round(&run);
-        run.set_pos(0);
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let handle = std::thread::spawn(move || {
-            let outcome = run.skip();
-            let _ = done_tx.send(outcome.ok());
-        });
-
-        assert!(gate.wait_until_entered(Duration::from_secs(1)));
-        let returned_before_push = done_rx
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap_or(false);
-        gate.release();
-        handle.join().unwrap();
-        assert!(
-            returned_before_push,
-            "control path waited for its automatic remote push"
-        );
-    }
-
     #[test]
     fn skip_advances_current_locally() {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);
@@ -1975,7 +1363,7 @@ mod tests {
             }
             stop2.set();
         }));
-        run.run_loop(false);
+        run.run_loop();
         assert!(watched(&r, "a").is_some());
         assert!(watched(&r, "b").is_some());
     }
@@ -2007,7 +1395,7 @@ mod tests {
             }
             stop2.set();
         }));
-        run.run_loop(false);
+        run.run_loop();
         assert!(watched(&r, "simpsons").is_some());
         assert!(watched(&r, "malcolm").is_none());
     }
@@ -2034,7 +1422,7 @@ mod tests {
             }
             stop2.set();
         }));
-        run.run_loop(false);
+        run.run_loop();
         assert!(watched(&r, "a").is_some());
         assert!(watched(&r, "b").is_none());
     }
@@ -2085,7 +1473,7 @@ mod tests {
             ..Default::default()
         };
         let run = runner(r.clone(), p, &["nelson"], stop, cb);
-        run.run_loop(false);
+        run.run_loop();
         assert!(
             errors
                 .lock()
@@ -2111,7 +1499,7 @@ mod tests {
             ..Default::default()
         };
         let run = runner(r, Arc::new(FakePlayer::default()), &["nelson"], stop, cb);
-        run.run_loop(false);
+        run.run_loop();
         assert!(drained.load(Ordering::SeqCst));
     }
 
@@ -2322,7 +1710,7 @@ mod tests {
                 )
             })
             .collect();
-        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", false);
+        r.save_round_queue(&entries, "2026-05-31T00:00:00Z");
 
         // Populate inner.round and inner.pos (start playing "a")
         {

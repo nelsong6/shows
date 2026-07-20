@@ -1,12 +1,9 @@
-//! Local SQLite replica — the desktop's working copy of the library under the
-//! offline-first design. All reads/writes for playback happen here; the server
-//! is a durable origin we sync with (git-style: local changes are marked
-//! `dirty` and pushed at smart moments; pulls reconcile last-write-wins by
-//! `updated_at`).
+//! SQLite persistence for the authoritative NAS database.
 //!
 //! The engine ([`crate::engine`]) holds the domain logic over plain structs;
 //! this layer loads rows into those structs, runs the engine, and persists the
-//! results — marking touched rows dirty and bumping `updated_at`.
+//! results. Every desktop opens this same database, so SQLite commit order—not
+//! a local dirty-row preference—determines the visible state.
 //!
 //! Concurrency: one connection behind a `Mutex`, since the runner thread, the
 //! control-server thread, and the UI thread all touch it. Volume is tiny.
@@ -14,13 +11,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Mutex;
 
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params, params_from_iter};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::engine::{self, Episode, Show};
-use crate::model::{LibraryEpisode, LibraryQueue, LibraryShow};
 
 pub const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS shows (
@@ -68,40 +63,53 @@ CREATE TABLE IF NOT EXISTS episode_playback_preferences (
   audio_track    TEXT,
   updated_at     TEXT NOT NULL
 );
+INSERT OR IGNORE INTO meta(key, value) VALUES('revision', '0');
+CREATE TRIGGER IF NOT EXISTS shows_revision_insert AFTER INSERT ON shows BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS shows_revision_update AFTER UPDATE ON shows BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS shows_revision_delete AFTER DELETE ON shows BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS episodes_revision_insert AFTER INSERT ON episodes BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS episodes_revision_update AFTER UPDATE ON episodes BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS episodes_revision_delete AFTER DELETE ON episodes BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS history_revision_insert AFTER INSERT ON watch_history BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS history_revision_delete AFTER DELETE ON watch_history BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS queue_revision_insert AFTER INSERT ON round_queue BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS queue_revision_update AFTER UPDATE ON round_queue BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS queue_revision_delete AFTER DELETE ON round_queue BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS preferences_revision_insert AFTER INSERT ON episode_playback_preferences BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS preferences_revision_update AFTER UPDATE ON episode_playback_preferences BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
+CREATE TRIGGER IF NOT EXISTS preferences_revision_delete AFTER DELETE ON episode_playback_preferences BEGIN
+  UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'revision';
+END;
 ";
 
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
-}
-
-fn parse_dt(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    chrono::DateTime::parse_from_rfc3339(s).ok()
-}
-
-/// True if timestamp `a` is strictly newer than `b` (None == oldest).
-fn newer(a: Option<&str>, b: Option<&str>) -> bool {
-    match (a, b) {
-        (None, _) => false,
-        (Some(_), None) => true,
-        (Some(a), Some(b)) => match (parse_dt(a), parse_dt(b)) {
-            (Some(da), Some(db)) => da > db,
-            _ => a > b, // fall back to lexicographic if either is unparseable
-        },
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Pending {
-    pub shows: i64,
-    pub episodes: i64,
-    pub history: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct Dirty {
-    pub shows: Vec<Value>,
-    pub episodes: Vec<Value>,
-    pub history: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -114,54 +122,46 @@ pub struct Replica {
     db: Mutex<Connection>,
 }
 
-type DirtyShowRow = (
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-);
-type DirtyEpisodeRow = (
-    String,
-    String,
-    String,
-    i64,
-    Option<String>,
-    Option<f64>,
-    String,
-);
-type DirtyHistoryRow = (String, String, String, Option<String>, String);
-type DirtyQueueRow = (String, String, i32, String);
-
-#[derive(Debug, Clone)]
-struct PushSnapshot {
-    shows: Vec<DirtyShowRow>,
-    episodes: Vec<DirtyEpisodeRow>,
-    history: Vec<DirtyHistoryRow>,
-    queue: Option<(String, String, Vec<DirtyQueueRow>)>,
-}
-
 impl Replica {
     pub fn new(path: &str) -> Replica {
-        let conn = Connection::open(path).expect("open replica db");
-        conn.execute_batch(SCHEMA).expect("apply schema");
-        Replica {
-            db: Mutex::new(conn),
-        }
+        Self::try_new(path).expect("open shows database")
     }
 
-    /// Whether this replica has ever been seeded with library data. This is the
-    /// startup boundary between an established offline working copy (which can
-    /// play immediately) and a genuinely empty first install (which must seed
-    /// before it can choose a round).
-    pub fn has_library_data(&self) -> bool {
-        let conn = self.db.lock().unwrap();
-        conn.query_row("SELECT EXISTS(SELECT 1 FROM shows LIMIT 1)", [], |r| {
-            r.get::<_, bool>(0)
+    pub fn try_new(path: &str) -> Result<Replica, rusqlite::Error> {
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(15))?;
+        conn.execute_batch(SCHEMA)?;
+        Ok(Replica {
+            db: Mutex::new(conn),
         })
-        .expect("check library data")
+    }
+
+    pub fn revision(&self) -> i64 {
+        let conn = self.db.lock().unwrap();
+        conn.query_row("SELECT CAST(value AS INTEGER) FROM meta WHERE key='revision'", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub fn seed_test_shows(&self, shows: &[Show]) {
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn.transaction().expect("begin test seed");
+        let updated_at = now();
+        for show in shows {
+            tx.execute(
+                "INSERT INTO shows(id,playlist,name,root_path,date_added,removed_at,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
+                params![show.id, show.playlist, show.name, show.root_path, show.date_added, show.removed_at, updated_at],
+            )
+            .expect("seed show");
+            for episode in &show.episodes {
+                tx.execute(
+                    "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
+                    params![episode.id, show.id, episode.relative_path, episode.position, episode.watched_at, episode.resume_pos, updated_at],
+                )
+                .expect("seed episode");
+            }
+        }
+        tx.commit().expect("commit test seed");
     }
 
     // ── reads ───────────────────────────────────────────────────────────
@@ -250,7 +250,7 @@ impl Replica {
         );
     }
 
-    // ── mutations (local-first: mark dirty + bump updated_at) ────────────
+    // ── mutations ───────────────────────────────────────────────────────
     /// Mark `(show_id, episode_id)` pairs watched via the engine; persist
     /// watched_at/removed_at, append history. Returns (newly-watched, removed ids).
     pub fn advance(&self, entries: &[(String, String)]) -> (usize, Vec<String>) {
@@ -259,11 +259,14 @@ impl Replica {
         for (sid, eid) in entries {
             by_show.entry(sid.clone()).or_default().push(eid.clone());
         }
-        let conn = self.db.lock().unwrap();
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin advance transaction");
         let mut advanced_total = 0;
         let mut removed = Vec::new();
         for (sid, eids) in &by_show {
-            let Some(mut sh) = load_show(&conn, sid) else {
+            let Some(mut sh) = load_show(&tx, sid) else {
                 continue;
             };
             let (history, n, tombstoned) = engine::advance(&mut sh, eids, &now);
@@ -271,20 +274,20 @@ impl Replica {
                 continue;
             }
             for h in &history {
-                conn.execute(
-                    "UPDATE episodes SET watched_at=?1, resume_pos=NULL, updated_at=?2, dirty=1 WHERE id=?3",
+                tx.execute(
+                    "UPDATE episodes SET watched_at=?1, resume_pos=NULL, updated_at=?2, dirty=0 WHERE id=?3",
                     params![now, now, h.episode_id],
                 )
                 .expect("mark watched");
-                conn.execute(
-                    "INSERT INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,1)",
+                tx.execute(
+                    "INSERT INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,0)",
                     params![Uuid::new_v4().to_string(), h.show_id, h.episode_id, h.relative_path, h.played_at],
                 )
                 .expect("append history");
             }
             if tombstoned {
-                conn.execute(
-                    "UPDATE shows SET removed_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+                tx.execute(
+                    "UPDATE shows SET removed_at=?1, updated_at=?2, dirty=0 WHERE id=?3",
                     params![now, now, sid],
                 )
                 .expect("tombstone");
@@ -292,13 +295,17 @@ impl Replica {
             }
             advanced_total += n;
         }
+        tx.commit().expect("commit advance transaction");
         (advanced_total, removed)
     }
 
     pub fn defer(&self, show_id: &str, episode_id: &str) -> bool {
         let now = now();
-        let conn = self.db.lock().unwrap();
-        let Some(mut sh) = load_show(&conn, show_id) else {
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin defer transaction");
+        let Some(mut sh) = load_show(&tx, show_id) else {
             return false;
         };
         if !engine::defer(&mut sh.episodes, episode_id) {
@@ -310,11 +317,12 @@ impl Replica {
             .find(|e| e.id == episode_id)
             .map(|e| e.position)
             .expect("deferred episode present");
-        conn.execute(
-            "UPDATE episodes SET position=?1, updated_at=?2, dirty=1 WHERE id=?3",
+        tx.execute(
+            "UPDATE episodes SET position=?1, updated_at=?2, dirty=0 WHERE id=?3",
             params![pos, now, episode_id],
         )
         .expect("persist defer");
+        tx.commit().expect("commit defer transaction");
         true
     }
 
@@ -334,7 +342,7 @@ impl Replica {
             return;
         }
         conn.execute(
-            "UPDATE episodes SET resume_pos=?1, updated_at=?2, dirty=1 WHERE id=?3",
+            "UPDATE episodes SET resume_pos=?1, updated_at=?2, dirty=0 WHERE id=?3",
             params![pos, now, episode_id],
         )
         .expect("set_resume");
@@ -374,7 +382,7 @@ impl Replica {
         .expect("set playback preference");
     }
 
-    // ── library management (local-first; syncs up like any change) ───────
+    // ── library management ──────────────────────────────────────────────
     pub fn create_show(
         &self,
         playlist: &str,
@@ -384,19 +392,23 @@ impl Replica {
     ) -> String {
         let now = now();
         let sid = Uuid::new_v4().to_string();
-        let conn = self.db.lock().unwrap();
-        conn.execute(
-            "INSERT INTO shows(id,playlist,name,root_path,date_added,removed_at,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,NULL,?6,1)",
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin create show transaction");
+        tx.execute(
+            "INSERT INTO shows(id,playlist,name,root_path,date_added,removed_at,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,NULL,?6,0)",
             params![sid, playlist, name, root_path, now, now],
         )
         .expect("create show");
         for (i, rel) in episodes.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,NULL,NULL,?5,1)",
+            tx.execute(
+                "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,NULL,NULL,?5,0)",
                 params![Uuid::new_v4().to_string(), sid, rel, i as i64, now],
             )
             .expect("create episode");
         }
+        tx.commit().expect("commit create show transaction");
         sid
     }
 
@@ -427,7 +439,6 @@ impl Replica {
         }
         sets.push("updated_at=?");
         vals.push(now);
-        sets.push("dirty=1");
         vals.push(show_id.to_string()); // for WHERE id=?
         let sql = format!("UPDATE shows SET {} WHERE id=?", sets.join(", "));
         let conn = self.db.lock().unwrap();
@@ -438,13 +449,13 @@ impl Replica {
     }
 
     /// Tombstone a show (removes it from rotation). Soft-delete — the engine
-    /// skips removed shows; the tombstone syncs up.
+    /// skips removed shows.
     pub fn remove_show(&self, show_id: &str) -> bool {
         let now = now();
         let conn = self.db.lock().unwrap();
         let n = conn
             .execute(
-                "UPDATE shows SET removed_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+                "UPDATE shows SET removed_at=?1, updated_at=?2, dirty=0 WHERE id=?3",
                 params![now, now, show_id],
             )
             .expect("remove show");
@@ -470,12 +481,12 @@ impl Replica {
 
         for (eid, rel) in &unwatched {
             conn.execute(
-                "UPDATE episodes SET watched_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+                "UPDATE episodes SET watched_at=?1, updated_at=?2, dirty=0 WHERE id=?3",
                 params![now, now, eid],
             )
             .expect("mark watched");
             conn.execute(
-                "INSERT INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,1)",
+                "INSERT INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,0)",
                 params![Uuid::new_v4().to_string(), show_id, eid, rel, now],
             )
             .expect("append history");
@@ -483,7 +494,7 @@ impl Replica {
 
         let n = conn
             .execute(
-                "UPDATE shows SET removed_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+                "UPDATE shows SET removed_at=?1, updated_at=?2, dirty=0 WHERE id=?3",
                 params![now, now, show_id],
             )
             .expect("tombstone");
@@ -497,13 +508,13 @@ impl Replica {
         let conn = self.db.lock().unwrap();
 
         conn.execute(
-            "UPDATE shows SET removed_at=NULL, updated_at=?1, dirty=1 WHERE id=?2",
+            "UPDATE shows SET removed_at=NULL, updated_at=?1, dirty=0 WHERE id=?2",
             params![now, show_id],
         )
         .expect("restore show");
 
         conn.execute(
-            "UPDATE episodes SET watched_at=NULL, resume_pos=NULL, updated_at=?1, dirty=1 WHERE show_id=?2",
+            "UPDATE episodes SET watched_at=NULL, resume_pos=NULL, updated_at=?1, dirty=0 WHERE show_id=?2",
             params![now, show_id],
         )
         .expect("reset episodes");
@@ -541,14 +552,14 @@ impl Replica {
             if !existing.contains(rel) {
                 let new_id = Uuid::new_v4().to_string();
                 tx.execute(
-                    "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,NULL,NULL,?5,1)",
+                    "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,NULL,NULL,?5,0)",
                     params![new_id, show_id, rel, i as i64, now],
                 )
                 .expect("add episode");
                 added_ids.push(new_id);
             } else {
                 tx.execute(
-                    "UPDATE episodes SET position=?1, updated_at=?2, dirty=1 WHERE show_id=?3 AND relative_path=?4",
+                    "UPDATE episodes SET position=?1, updated_at=?2, dirty=0 WHERE show_id=?3 AND relative_path=?4",
                     params![i as i64, now, show_id, rel],
                 )
                 .expect("update episode position");
@@ -580,12 +591,12 @@ impl Replica {
             }
 
             tx.execute(
-                "UPDATE episodes SET watched_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+                "UPDATE episodes SET watched_at=?1, updated_at=?2, dirty=0 WHERE id=?3",
                 params![now, now, eid],
             )
             .expect("mark watched");
             tx.execute(
-                "INSERT INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,1)",
+                "INSERT INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,0)",
                 params![Uuid::new_v4().to_string(), show_id, eid, rel, now],
             )
             .expect("append history");
@@ -604,88 +615,6 @@ impl Replica {
             .filter_map(Result::ok)
             .collect()
     }
-
-    // ── seed / reconcile (pull): upsert last-write-wins ──────────────────
-    /// Upsert shows + episodes pulled from the server. Last-write-wins by
-    /// `updated_at`; a locally-dirty row is kept (local unsynced change wins
-    /// until it's pushed — git-style). Used for the initial seed and later pulls.
-    pub fn merge_shows(&self, shows: &[LibraryShow]) {
-        let conn = self.db.lock().unwrap();
-        for s in shows {
-            let existing: Option<(String, i64)> = conn
-                .query_row(
-                    "SELECT updated_at, dirty FROM shows WHERE id=?1",
-                    params![s.id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()
-                .expect("lookup show");
-            match existing {
-                None => {
-                    conn.execute(
-                        "INSERT INTO shows(id,playlist,name,root_path,date_added,removed_at,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
-                        params![s.id, s.playlist, s.name, s.root_path, s.date_added, s.removed_at, s.updated_at],
-                    )
-                    .expect("insert merged show");
-                }
-                Some((cur_updated, dirty)) => {
-                    if dirty == 0 && newer(Some(&s.updated_at), Some(&cur_updated)) {
-                        conn.execute(
-                            "UPDATE shows SET playlist=?1,name=?2,root_path=?3,date_added=?4,removed_at=?5,updated_at=?6,dirty=0 WHERE id=?7",
-                            params![s.playlist, s.name, s.root_path, s.date_added, s.removed_at, s.updated_at, s.id],
-                        )
-                        .expect("update merged show");
-                    }
-                }
-            }
-            for e in &s.episodes {
-                merge_episode(&conn, &s.id, e);
-            }
-        }
-    }
-
-    pub fn merge_queues(&self, queues: &[LibraryQueue]) {
-        let conn = self.db.lock().unwrap();
-        for q in queues {
-            merge_queue_impl(&conn, q);
-        }
-    }
-
-    // ── sync push: dirty rows out, then clear ────────────────────────────
-    /// Count of unpushed local changes — the git "ahead" number.
-    pub fn pending(&self) -> Pending {
-        let conn = self.db.lock().unwrap();
-        Pending {
-            shows: count_dirty(&conn, "shows"),
-            episodes: count_dirty(&conn, "episodes"),
-            history: count_dirty(&conn, "watch_history"),
-        }
-    }
-
-    /// The records to push upstream.
-    pub fn dirty(&self) -> Dirty {
-        let conn = self.db.lock().unwrap();
-        Dirty {
-            shows: dirty_shows(&conn),
-            episodes: dirty_episodes(&conn),
-            history: dirty_history(&conn),
-        }
-    }
-
-    /// Clear dirty on rows confirmed pushed.
-    pub fn mark_synced(&self, table: &str, ids: &[String]) {
-        if ids.is_empty() {
-            return;
-        }
-        let marks = vec!["?"; ids.len()].join(",");
-        let conn = self.db.lock().unwrap();
-        conn.execute(
-            &format!("UPDATE {table} SET dirty=0 WHERE id IN ({marks})"),
-            params_from_iter(ids.iter()),
-        )
-        .expect("mark synced");
-    }
-
     pub fn get_round_queue(&self) -> Vec<(String, String, i32, String, String, String, i32)> {
         let conn = self.db.lock().unwrap();
         let mut stmt = conn
@@ -711,20 +640,20 @@ impl Replica {
         &self,
         entries: &[(String, String, i32, String, String)],
         updated_at: &str,
-        dirty: bool,
     ) {
         let mut conn = self.db.lock().unwrap();
-        let tx = conn.transaction().expect("begin save_round_queue tx");
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin save_round_queue tx");
         tx.execute("DELETE FROM round_queue", [])
             .expect("delete round_queue");
-        let dirty_val = if dirty { 1 } else { 0 };
         let mut playlists = HashSet::new();
         for entry in entries {
             playlists.insert(entry.4.clone());
             tx.execute(
                 "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![entry.0, entry.1, entry.2, entry.3, entry.4, updated_at, dirty_val],
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+                params![entry.0, entry.1, entry.2, entry.3, entry.4, updated_at],
             )
             .expect("insert round_queue entry");
         }
@@ -740,23 +669,30 @@ impl Replica {
 
     pub fn update_round_entry_state(&self, episode_id: &str, state: &str, playlist: &str) {
         let now = now();
-        let conn = self.db.lock().unwrap();
-        conn.execute(
-            "UPDATE round_queue SET state=?1, updated_at=?2, dirty=1 WHERE episode_id=?3",
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin update_round_entry_state tx");
+        tx.execute(
+            "UPDATE round_queue SET state=?1, updated_at=?2, dirty=0 WHERE episode_id=?3",
             params![state, now, episode_id],
         )
         .expect("update round entry state");
-        conn.execute(
-            "UPDATE round_queue SET updated_at=?1, dirty=1 WHERE playlist=?2",
+        tx.execute(
+            "UPDATE round_queue SET updated_at=?1, dirty=0 WHERE playlist=?2",
             params![now, playlist],
         )
-        .expect("mark other playlist entries dirty");
+        .expect("stamp playlist queue");
+        tx.commit().expect("commit update_round_entry_state tx");
     }
 
     pub fn remove_round_entry(&self, episode_id: &str) -> Option<(String, String)> {
         let now = now();
-        let conn = self.db.lock().unwrap();
-        let found: Option<(String, String)> = conn
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin remove_round_entry tx");
+        let found: Option<(String, String)> = tx
             .query_row(
                 "SELECT show_id, playlist FROM round_queue WHERE episode_id=?1",
                 params![episode_id],
@@ -765,99 +701,25 @@ impl Replica {
             .optional()
             .expect("lookup round entry");
         let (show_id, playlist) = found?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM round_queue WHERE episode_id=?1",
             params![episode_id],
         )
         .expect("delete round entry");
-        conn.execute(
-            "UPDATE round_queue SET updated_at=?1, dirty=1 WHERE playlist=?2",
+        tx.execute(
+            "UPDATE round_queue SET updated_at=?1, dirty=0 WHERE playlist=?2",
             params![now, playlist],
         )
-        .expect("mark repaired queue dirty");
-        conn.execute(
+        .expect("stamp repaired queue");
+        tx.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
             params![format!("queue_updated:{playlist}"), now],
         )
         .expect("record repaired queue timestamp");
-        let remaining: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM round_queue WHERE playlist=?1",
-                params![playlist],
-                |r| r.get(0),
-            )
-            .expect("count repaired queue");
-        if remaining == 0 {
-            conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
-                params![format!("dirty_queue:{playlist}"), now],
-            )
-            .expect("mark empty queue dirty");
-        }
+        tx.commit().expect("commit remove_round_entry tx");
         Some((show_id, playlist))
     }
-
-    pub fn dirty_queue(&self) -> Option<Value> {
-        let conn = self.db.lock().unwrap();
-        let dirty_pl: Option<(String, String)> = conn
-            .query_row(
-                "SELECT playlist, updated_at FROM round_queue WHERE dirty=1 LIMIT 1",
-                [],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-            )
-            .optional()
-            .expect("lookup dirty playlist");
-        let (playlist, updated_at) = match dirty_pl {
-            Some(dirty_pl) => dirty_pl,
-            None => {
-                conn.query_row(
-                    "SELECT substr(key, 13), value FROM meta WHERE key LIKE 'dirty_queue:%' LIMIT 1",
-                    [],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-                )
-                .optional()
-                .expect("lookup dirty empty queue")?
-            }
-        };
-
-        let mut stmt = conn
-            .prepare("SELECT episode_id, show_id, play_order, state FROM round_queue WHERE playlist=?1 ORDER BY play_order")
-            .expect("prep dirty_queue query");
-        let entries: Vec<Value> = stmt
-            .query_map(params![playlist], |r| {
-                Ok(json!({
-                    "episode_id": r.get::<_, String>(0)?,
-                    "show_id": r.get::<_, String>(1)?,
-                    "play_order": r.get::<_, i32>(2)?,
-                    "state": r.get::<_, String>(3)?,
-                }))
-            })
-            .expect("query dirty queue entries")
-            .filter_map(Result::ok)
-            .collect();
-
-        Some(json!({
-            "playlist": playlist,
-            "updated_at": updated_at,
-            "entries": entries,
-        }))
-    }
-
-    pub fn mark_queue_synced(&self, playlist: &str) {
-        let conn = self.db.lock().unwrap();
-        conn.execute(
-            "UPDATE round_queue SET dirty=0 WHERE playlist=?1",
-            params![playlist],
-        )
-        .expect("mark queue synced");
-        conn.execute(
-            "DELETE FROM meta WHERE key=?1",
-            params![format!("dirty_queue:{playlist}")],
-        )
-        .expect("clear empty queue dirty marker");
-    }
-
-    // ── dashboard payloads (read-only, offline-capable) ──────────────────
+    // ── dashboard payloads ───────────────────────────────────────────────
     /// Active shows for the dashboard sidebar (no episodes).
     pub fn overlay_shows(&self, playlists: &[String]) -> Vec<Value> {
         self.active_shows(playlists)
@@ -922,8 +784,8 @@ impl Replica {
         })
     }
 
-    /// Library + watch stats for the dashboard, computed from the replica (works
-    /// offline): totals, per-show progress, recent activity, per-day heatmap.
+    /// Library + watch stats for the dashboard: totals, per-show progress,
+    /// recent activity, and per-day heatmap.
     pub fn stats(&self, playlists: &[String]) -> Value {
         if playlists.is_empty() {
             return json!({});
@@ -1033,269 +895,7 @@ impl Replica {
             "by_day": Value::Object(by_day),
         })
     }
-
-    /// Snapshot dirty local rows, release the replica mutex, write the snapshot
-    /// to the origin, then conditionally acknowledge only rows which still have
-    /// the exact version that was sent. Remote I/O must never hold the local
-    /// working-copy lock: playback and controls remain local even when SMB is
-    /// asleep or unreachable.
-    pub fn push_to_shared(&self, shared_conn: &mut Connection) -> Result<(), rusqlite::Error> {
-        let snapshot = self.snapshot_dirty()?;
-        Self::write_snapshot_to_shared(shared_conn, &snapshot)?;
-        self.acknowledge_snapshot(&snapshot)?;
-        Ok(())
-    }
-
-    fn snapshot_dirty(&self) -> Result<PushSnapshot, rusqlite::Error> {
-        let local_conn = self.db.lock().unwrap();
-
-        let shows = {
-            let mut stmt = local_conn.prepare(
-                "SELECT id, playlist, name, root_path, date_added, removed_at, updated_at FROM shows WHERE dirty=1",
-            )?;
-            stmt.query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            })?
-            .collect::<Result<Vec<DirtyShowRow>, _>>()?
-        };
-
-        let episodes = {
-            let mut stmt = local_conn.prepare(
-                "SELECT id, show_id, relative_path, position, watched_at, resume_pos, updated_at FROM episodes WHERE dirty=1",
-            )?;
-            stmt.query_map([], |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                ))
-            })?
-            .collect::<Result<Vec<DirtyEpisodeRow>, _>>()?
-        };
-
-        let history = {
-            let mut stmt = local_conn.prepare(
-                "SELECT id, show_id, episode_id, relative_path, played_at FROM watch_history WHERE dirty=1",
-            )?;
-            stmt.query_map([], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })?
-            .collect::<Result<Vec<DirtyHistoryRow>, _>>()?
-        };
-
-        // A queue is one LWW unit per playlist. Every state change stamps every
-        // row in that playlist with the same version.
-        let dirty_queue: Option<(String, String)> = match local_conn
-            .query_row(
-                "SELECT playlist, updated_at FROM round_queue WHERE dirty=1 LIMIT 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?
-        {
-            Some(queue) => Some(queue),
-            None => local_conn
-                .query_row(
-                    "SELECT substr(key, 13), value FROM meta WHERE key LIKE 'dirty_queue:%' LIMIT 1",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?,
-        };
-        let queue = if let Some((playlist, updated_at)) = dirty_queue {
-            let entries = {
-                let mut stmt = local_conn.prepare(
-                    "SELECT episode_id, show_id, play_order, state FROM round_queue WHERE playlist=?1 ORDER BY play_order",
-                )?;
-                stmt.query_map([&playlist], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-                })?
-                .collect::<Result<Vec<DirtyQueueRow>, _>>()?
-            };
-            Some((playlist, updated_at, entries))
-        } else {
-            None
-        };
-
-        Ok(PushSnapshot {
-            shows,
-            episodes,
-            history,
-            queue,
-        })
-    }
-
-    fn write_snapshot_to_shared(
-        shared_conn: &mut Connection,
-        snapshot: &PushSnapshot,
-    ) -> Result<(), rusqlite::Error> {
-        let tx = shared_conn.transaction()?;
-        {
-            for s in &snapshot.shows {
-                let existing: Option<String> = tx
-                    .query_row(
-                        "SELECT updated_at FROM shows WHERE id=?1",
-                        params![s.0],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-
-                let should_write = match existing {
-                    None => true,
-                    Some(ref cur_updated) => newer(Some(&s.6), Some(cur_updated)),
-                };
-                if should_write {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO shows(id,playlist,name,root_path,date_added,removed_at,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
-                        params![s.0, s.1, s.2, s.3, s.4, s.5, s.6]
-                    )?;
-                }
-            }
-
-            for e in &snapshot.episodes {
-                let existing: Option<String> = tx
-                    .query_row(
-                        "SELECT updated_at FROM episodes WHERE id=?1",
-                        params![e.0],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-
-                let should_write = match existing {
-                    None => true,
-                    Some(ref cur_updated) => newer(Some(&e.6), Some(cur_updated)),
-                };
-                if should_write {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
-                        params![e.0, e.1, e.2, e.3, e.4, e.5, e.6]
-                    )?;
-                }
-            }
-
-            for h in &snapshot.history {
-                tx.execute(
-                    "INSERT OR IGNORE INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,0)",
-                    params![h.0, h.1, h.2, h.3, h.4]
-                )?;
-            }
-
-            if let Some((ref playlist, ref updated_at, ref entries)) = snapshot.queue {
-                let row_updated: Option<String> = tx
-                    .query_row(
-                        "SELECT MAX(updated_at) FROM round_queue WHERE playlist=?1",
-                        params![playlist],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-                let meta_updated: Option<String> = tx
-                    .query_row(
-                        "SELECT value FROM meta WHERE key=?1",
-                        params![format!("queue_updated:{playlist}")],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                let existing_updated = match (row_updated.as_deref(), meta_updated.as_deref()) {
-                    (None, None) => None,
-                    (Some(row), None) => Some(row.to_string()),
-                    (None, Some(meta)) => Some(meta.to_string()),
-                    (Some(row), Some(meta)) => Some(if newer(Some(row), Some(meta)) {
-                        row.to_string()
-                    } else {
-                        meta.to_string()
-                    }),
-                };
-
-                let should_write = match existing_updated {
-                    None => true,
-                    Some(ref cur_updated) => newer(Some(updated_at), Some(cur_updated.as_str())),
-                };
-                if should_write {
-                    tx.execute(
-                        "DELETE FROM round_queue WHERE playlist=?1",
-                        params![playlist],
-                    )?;
-                    tx.execute(
-                        "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
-                        params![format!("queue_updated:{playlist}"), updated_at],
-                    )?;
-                    for entry in entries {
-                        tx.execute(
-                            "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-                            params![entry.0, entry.1, entry.2, entry.3, playlist, updated_at]
-                        )?;
-                    }
-                }
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    fn acknowledge_snapshot(&self, snapshot: &PushSnapshot) -> Result<(), rusqlite::Error> {
-        let mut local_conn = self.db.lock().unwrap();
-        let tx = local_conn.transaction()?;
-
-        for show in &snapshot.shows {
-            tx.execute(
-                "UPDATE shows SET dirty=0 WHERE id=?1 AND updated_at=?2 AND dirty=1",
-                params![show.0, show.6],
-            )?;
-        }
-        for episode in &snapshot.episodes {
-            tx.execute(
-                "UPDATE episodes SET dirty=0 WHERE id=?1 AND updated_at=?2 AND dirty=1",
-                params![episode.0, episode.6],
-            )?;
-        }
-        // History is append-only and has no updated_at column. Match its full
-        // immutable payload so even a corrupt/replaced ID is never acknowledged.
-        for history in &snapshot.history {
-            tx.execute(
-                "UPDATE watch_history SET dirty=0 \
-                 WHERE id=?1 AND show_id=?2 AND episode_id=?3 AND relative_path IS ?4 \
-                   AND played_at=?5 AND dirty=1",
-                params![history.0, history.1, history.2, history.3, history.4],
-            )?;
-        }
-        if let Some((playlist, updated_at, _)) = &snapshot.queue {
-            tx.execute(
-                "UPDATE round_queue SET dirty=0 WHERE playlist=?1 AND updated_at=?2 AND dirty=1",
-                params![playlist, updated_at],
-            )?;
-            tx.execute(
-                "DELETE FROM meta WHERE key=?1 AND value=?2",
-                params![format!("dirty_queue:{playlist}"), updated_at],
-            )?;
-        }
-
-        tx.commit()
-    }
-
-    pub fn mark_all_dirty(&self) -> Result<(), rusqlite::Error> {
-        let conn = self.db.lock().unwrap();
-        conn.execute("UPDATE shows SET dirty = 1", [])?;
-        conn.execute("UPDATE episodes SET dirty = 1", [])?;
-        conn.execute("UPDATE watch_history SET dirty = 1", [])?;
-        conn.execute("UPDATE round_queue SET dirty = 1", [])?;
-        Ok(())
-    }
 }
-
 fn resume_pos_matches(a: Option<f64>, b: Option<f64>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => (a - b).abs() < 0.5,
@@ -1380,220 +980,68 @@ fn load_show(conn: &Connection, show_id: &str) -> Option<Show> {
         date_added,
     })
 }
-
-fn merge_episode(conn: &Connection, show_id: &str, e: &LibraryEpisode) {
-    let existing: Option<(String, i64)> = conn
-        .query_row(
-            "SELECT updated_at, dirty FROM episodes WHERE id=?1",
-            params![e.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .expect("lookup episode");
-    match existing {
-        None => {
-            conn.execute(
-                "INSERT INTO episodes(id,show_id,relative_path,position,watched_at,resume_pos,updated_at,dirty) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
-                params![e.id, show_id, e.relative_path, e.position, e.watched_at, e.resume_pos, e.updated_at],
-            )
-            .expect("insert merged episode");
-        }
-        Some((cur_updated, dirty)) => {
-            if dirty == 0 && newer(Some(&e.updated_at), Some(&cur_updated)) {
-                conn.execute(
-                    "UPDATE episodes SET relative_path=?1,position=?2,watched_at=?3,resume_pos=?4,updated_at=?5,dirty=0 WHERE id=?6",
-                    params![e.relative_path, e.position, e.watched_at, e.resume_pos, e.updated_at, e.id],
-                )
-                .expect("update merged episode");
-            }
-        }
-    }
-}
-
-fn merge_queue_impl(conn: &Connection, q: &LibraryQueue) {
-    let row_stats: (String, i64, i64) = conn
-        .query_row(
-            "SELECT COALESCE(MAX(updated_at), ''), COALESCE(SUM(dirty), 0), COUNT(*) FROM round_queue WHERE playlist=?1",
-            params![q.playlist],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?)),
-        )
-        .expect("lookup local queue row stats");
-    let meta_updated: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key=?1",
-            params![format!("queue_updated:{}", q.playlist)],
-            |r| r.get(0),
-        )
-        .optional()
-        .expect("lookup local queue timestamp");
-    let dirty_empty: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key=?1",
-            params![format!("dirty_queue:{}", q.playlist)],
-            |r| r.get(0),
-        )
-        .optional()
-        .expect("lookup local empty queue dirty marker");
-    let local_updated = match (row_stats.0.as_str(), meta_updated.as_deref()) {
-        ("", None) => None,
-        ("", Some(meta)) => Some(meta.to_string()),
-        (rows, None) => Some(rows.to_string()),
-        (rows, Some(meta)) => Some(if newer(Some(rows), Some(meta)) {
-            rows.to_string()
-        } else {
-            meta.to_string()
-        }),
-    };
-    let dirty_count = row_stats.1 + i64::from(dirty_empty.is_some());
-
-    let should_overwrite = match local_updated {
-        None => true,
-        Some(cur_updated) => {
-            dirty_count == 0 && newer(Some(&q.updated_at), Some(cur_updated.as_str()))
-        }
-    };
-
-    if should_overwrite {
-        conn.execute(
-            "DELETE FROM round_queue WHERE playlist=?1",
-            params![q.playlist],
-        )
-        .expect("delete old round_queue");
-        conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
-            params![format!("queue_updated:{}", q.playlist), q.updated_at],
-        )
-        .expect("record merged queue timestamp");
-        conn.execute(
-            "DELETE FROM meta WHERE key=?1",
-            params![format!("dirty_queue:{}", q.playlist)],
-        )
-        .expect("clear merged dirty queue marker");
-        for entry in &q.entries {
-            conn.execute(
-                "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-                params![entry.episode_id, entry.show_id, entry.play_order, entry.state, q.playlist, q.updated_at],
-            )
-            .expect("insert round_queue entry");
-        }
-    }
-}
-
-fn count_dirty(conn: &Connection, table: &str) -> i64 {
-    conn.query_row(
-        &format!("SELECT COUNT(*) FROM {table} WHERE dirty=1"),
-        [],
-        |r| r.get(0),
-    )
-    .expect("count dirty")
-}
-
-fn dirty_shows(conn: &Connection) -> Vec<Value> {
-    let mut stmt = conn
-        .prepare("SELECT id,playlist,name,root_path,date_added,removed_at,updated_at FROM shows WHERE dirty=1")
-        .expect("prep dirty shows");
-    stmt.query_map([], |r| {
-        Ok(json!({
-            "id": r.get::<_, String>(0)?,
-            "playlist": r.get::<_, String>(1)?,
-            "name": r.get::<_, String>(2)?,
-            "root_path": r.get::<_, String>(3)?,
-            "date_added": r.get::<_, Option<String>>(4)?,
-            "removed_at": r.get::<_, Option<String>>(5)?,
-            "updated_at": r.get::<_, String>(6)?,
-        }))
-    })
-    .expect("query dirty shows")
-    .filter_map(Result::ok)
-    .collect()
-}
-
-fn dirty_episodes(conn: &Connection) -> Vec<Value> {
-    let mut stmt = conn
-        .prepare("SELECT id,show_id,relative_path,position,watched_at,resume_pos,updated_at FROM episodes WHERE dirty=1")
-        .expect("prep dirty episodes");
-    stmt.query_map([], |r| {
-        Ok(json!({
-            "id": r.get::<_, String>(0)?,
-            "show_id": r.get::<_, String>(1)?,
-            "relative_path": r.get::<_, String>(2)?,
-            "position": r.get::<_, i64>(3)?,
-            "watched_at": r.get::<_, Option<String>>(4)?,
-            "resume_pos": r.get::<_, Option<f64>>(5)?,
-            "updated_at": r.get::<_, String>(6)?,
-        }))
-    })
-    .expect("query dirty episodes")
-    .filter_map(Result::ok)
-    .collect()
-}
-
-fn dirty_history(conn: &Connection) -> Vec<Value> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id,show_id,episode_id,relative_path,played_at FROM watch_history WHERE dirty=1",
-        )
-        .expect("prep dirty history");
-    stmt.query_map([], |r| {
-        Ok(json!({
-            "id": r.get::<_, String>(0)?,
-            "show_id": r.get::<_, String>(1)?,
-            "episode_id": r.get::<_, String>(2)?,
-            "relative_path": r.get::<_, Option<String>>(3)?,
-            "played_at": r.get::<_, String>(4)?,
-        }))
-    })
-    .expect("query dirty history")
-    .filter_map(Result::ok)
-    .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::{first_unwatched, next_round};
     use std::collections::BTreeSet;
 
-    const OLD: &str = "2025-01-01T00:00:00Z";
     const T0: &str = "2026-01-01T00:00:00Z";
-    const NEW: &str = "2027-01-01T00:00:00Z";
 
-    fn lep(id: &str, rel: &str, pos: i64, updated: &str) -> LibraryEpisode {
-        LibraryEpisode {
+    fn lep(id: &str, rel: &str, pos: i64) -> Episode {
+        Episode {
             id: id.into(),
             relative_path: rel.into(),
             position: pos,
-            updated_at: updated.into(),
-            ..Default::default()
+            watched_at: None,
+            resume_pos: None,
         }
     }
 
     fn seed(r: &Replica) {
-        r.merge_shows(&[
-            LibraryShow {
+        r.seed_test_shows(&[
+            Show {
                 id: "s1".into(),
                 playlist: "nelson".into(),
                 name: "S1".into(),
                 root_path: "D:\\A".into(),
-                updated_at: T0.into(),
-                episodes: vec![lep("a", "a.mkv", 0, T0), lep("b", "b.mkv", 1, T0)],
-                ..Default::default()
+                episodes: vec![lep("a", "a.mkv", 0), lep("b", "b.mkv", 1)],
+                removed_at: None,
+                date_added: None,
             },
-            LibraryShow {
+            Show {
                 id: "s2".into(),
                 playlist: "nelson".into(),
                 name: "S2".into(),
                 root_path: "D:\\B".into(),
-                updated_at: T0.into(),
-                episodes: vec![lep("c", "c.mkv", 0, T0)],
-                ..Default::default()
+                episodes: vec![lep("c", "c.mkv", 0)],
+                removed_at: None,
+                date_added: None,
             },
         ]);
     }
 
     fn ids(shows: &[Show]) -> BTreeSet<&str> {
         shows.iter().map(|s| s.id.as_str()).collect()
+    }
+
+    #[test]
+    fn separate_apps_observe_shared_commits_and_last_write_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shows.db");
+        let path = path.to_string_lossy();
+        let first = Replica::new(&path);
+        let second = Replica::new(&path);
+        let show_id = first.create_show("nelson", "original", r"S:\Shows\Original", &[]);
+        let after_create = second.revision();
+
+        assert_eq!(second.show(&show_id).unwrap().name, "original");
+        second.update_show(&show_id, Some("second app"), None, None);
+        assert_eq!(first.show(&show_id).unwrap().name, "second app");
+        assert!(first.revision() > after_create);
+
+        first.update_show(&show_id, Some("first app last"), None, None);
+        assert_eq!(second.show(&show_id).unwrap().name, "first app last");
     }
 
     #[test]
@@ -1612,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn advance_persists_marks_dirty_and_advances_pick() {
+    fn advance_persists_and_advances_pick() {
         let r = Replica::new(":memory:");
         seed(&r);
         let (n, removed) = r.advance(&[("s1".into(), "a".into())]);
@@ -1632,8 +1080,6 @@ mod tests {
             nr.iter().find(|o| o.show_id == "s1").unwrap().episode_id,
             "b"
         );
-        let p = r.pending();
-        assert!(p.episodes >= 1 && p.history == 1);
     }
 
     #[test]
@@ -1687,19 +1133,18 @@ mod tests {
             r.playback_preferences("b"),
             EpisodePlaybackPreferences::default()
         );
-        assert_eq!(r.pending().episodes, 0);
     }
 
     #[test]
-    fn set_resume_unchanged_is_not_dirty() {
+    fn set_resume_within_tolerance_does_not_write() {
         let r = Replica::new(":memory:");
         seed(&r);
         r.set_resume("a", Some(123.5));
-        r.mark_synced("episodes", &["a".into()]);
+        let revision = r.revision();
 
         r.set_resume("a", Some(123.6));
 
-        assert_eq!(r.pending().episodes, 0);
+        assert_eq!(r.revision(), revision);
     }
 
     #[test]
@@ -1714,128 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_lww_keeps_dirty_local_but_takes_newer_clean() {
-        let r = Replica::new(":memory:");
-        seed(&r);
-        r.advance(&[("s1".into(), "a".into())]); // episode a now dirty (locally watched)
-        // An OLDER server view must NOT clobber the dirty local episode...
-        r.merge_shows(&[LibraryShow {
-            id: "s1".into(),
-            playlist: "nelson".into(),
-            name: "S1".into(),
-            root_path: "D:\\A".into(),
-            updated_at: T0.into(),
-            episodes: vec![lep("a", "OLD.mkv", 0, OLD)],
-            ..Default::default()
-        }]);
-        assert_eq!(
-            r.show("s1")
-                .unwrap()
-                .episodes
-                .iter()
-                .find(|e| e.id == "a")
-                .unwrap()
-                .relative_path,
-            "a.mkv"
-        );
-        // ...but a NEWER server update to the (clean) show row does win.
-        r.merge_shows(&[LibraryShow {
-            id: "s1".into(),
-            playlist: "nelson".into(),
-            name: "S1NEW".into(),
-            root_path: "D:\\A".into(),
-            updated_at: NEW.into(),
-            episodes: vec![],
-            ..Default::default()
-        }]);
-        assert_eq!(r.show("s1").unwrap().name, "S1NEW");
-    }
-
-    #[test]
-    fn mark_synced_clears_pending() {
-        let r = Replica::new(":memory:");
-        seed(&r);
-        r.advance(&[("s1".into(), "a".into())]);
-        let d = r.dirty();
-        let ep_ids: Vec<String> = d
-            .episodes
-            .iter()
-            .map(|e| e["id"].as_str().unwrap().to_string())
-            .collect();
-        let h_ids: Vec<String> = d
-            .history
-            .iter()
-            .map(|h| h["id"].as_str().unwrap().to_string())
-            .collect();
-        r.mark_synced("episodes", &ep_ids);
-        r.mark_synced("watch_history", &h_ids);
-        let p = r.pending();
-        assert_eq!(p.episodes, 0);
-        assert_eq!(p.history, 0);
-    }
-
-    #[test]
-    fn push_ack_keeps_row_dirty_when_it_changes_during_remote_phase() {
-        let r = Replica::new(":memory:");
-        let show_id = r.create_show("nelson", "S1", "D:\\A", &["a.mkv".into()]);
-        let episode_id = r.show(&show_id).unwrap().episodes[0].id.clone();
-
-        // push_to_shared deliberately releases the local mutex after this
-        // snapshot. Model a playback/control mutation while the remote write is
-        // in flight, before the snapshot is acknowledged.
-        let snapshot = r.snapshot_dirty().unwrap();
-        let sent_version = snapshot
-            .episodes
-            .iter()
-            .find(|episode| episode.0 == episode_id)
-            .unwrap()
-            .6
-            .clone();
-        let current_version = "9999-12-31T23:59:59Z".to_string();
-        r.db.lock()
-            .unwrap()
-            .execute(
-                "UPDATE episodes SET resume_pos=42.0, updated_at=?1, dirty=1 WHERE id=?2",
-                params![current_version, episode_id],
-            )
-            .unwrap();
-        assert_ne!(current_version, sent_version);
-
-        let mut shared = Connection::open_in_memory().unwrap();
-        shared.execute_batch(SCHEMA).unwrap();
-        Replica::write_snapshot_to_shared(&mut shared, &snapshot).unwrap();
-        r.acknowledge_snapshot(&snapshot).unwrap();
-
-        assert_eq!(r.pending().shows, 0);
-        assert_eq!(r.pending().episodes, 1);
-        assert_eq!(r.resume_pos(&episode_id), Some(42.0));
-        let pushed_resume: Option<f64> = shared
-            .query_row(
-                "SELECT resume_pos FROM episodes WHERE id=?1",
-                [&episode_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(pushed_resume, None);
-    }
-
-    #[test]
-    fn library_data_distinguishes_first_install_from_established_replica() {
-        let r = Replica::new(":memory:");
-        assert!(!r.has_library_data());
-
-        let show_id = r.create_show("nelson", "S1", "D:\\A", &["a.mkv".into()]);
-        assert!(r.has_library_data());
-
-        // A fully watched/tombstoned library is still an established replica;
-        // it must not turn the next launch back into a blocking first seed.
-        let episode_id = r.show(&show_id).unwrap().episodes[0].id.clone();
-        r.advance(&[(show_id, episode_id)]);
-        assert!(r.has_library_data());
-    }
-
-    #[test]
-    fn create_show_is_dirty_and_in_round() {
+    fn create_show_is_in_round() {
         let r = Replica::new(":memory:");
         let sid = r.create_show(
             "nelson",
@@ -1850,9 +1174,6 @@ mod tests {
             .find(|s| s.id == sid)
             .unwrap();
         assert_eq!(me.episodes.len(), 2);
-        let p = r.pending();
-        assert_eq!(p.shows, 1);
-        assert_eq!(p.episodes, 2);
     }
 
     #[test]
@@ -1876,7 +1197,6 @@ mod tests {
         r.save_round_queue(
             &[(eid, sid.clone(), 0, "pending".into(), "nelson".into())],
             T0,
-            false,
         );
 
         assert!(r.remove_show(&sid));
@@ -1885,7 +1205,6 @@ mod tests {
                 .iter()
                 .any(|(_, show_id, ..)| show_id == &sid)
         );
-        assert!(r.dirty_queue().is_none());
     }
 
     #[test]
@@ -1946,83 +1265,7 @@ mod tests {
     }
 
     #[test]
-    fn round_queue_helpers_and_merge() {
-        let r = Replica::new(":memory:");
-
-        // Initially empty
-        assert!(r.get_round_queue().is_empty());
-        assert!(r.dirty_queue().is_none());
-
-        // Save queue
-        let entries = vec![
-            (
-                "ep1".to_string(),
-                "show1".to_string(),
-                0,
-                "pending".to_string(),
-                "nelson".to_string(),
-            ),
-            (
-                "ep2".to_string(),
-                "show2".to_string(),
-                1,
-                "pending".to_string(),
-                "nelson".to_string(),
-            ),
-        ];
-        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", true);
-
-        let q = r.get_round_queue();
-        assert_eq!(q.len(), 2);
-        assert_eq!(q[0].0, "ep1");
-        assert_eq!(q[1].0, "ep2");
-        assert_eq!(q[0].6, 1); // dirty = 1
-
-        // Check dirty queue serializes correctly
-        let dq = r.dirty_queue().unwrap();
-        assert_eq!(dq["playlist"], "nelson");
-        assert_eq!(dq["entries"].as_array().unwrap().len(), 2);
-
-        // Mark synced
-        r.mark_queue_synced("nelson");
-        assert!(r.dirty_queue().is_none());
-
-        // Update entry state
-        r.update_round_entry_state("ep1", "playing", "nelson");
-        let q2 = r.get_round_queue();
-        assert_eq!(q2[0].3, "playing");
-        assert_eq!(q2[0].6, 1); // dirty = 1 again
-        assert_eq!(q2[1].6, 1); // whole playlist queue marked dirty
-
-        // Merge queue (should win if newer/clean).
-        // Re-seed the local queue with a FIXED, clean timestamp so this merge
-        // comparison is deterministic and independent of the wall clock. The
-        // earlier update_round_entry_state() stamped every row with now(); once
-        // real time passed the hardcoded incoming date below, the incoming
-        // queue stopped being "newer" and the merge no longer overwrote — a
-        // time-bomb that turned this test red on 2026-06-01.
-        use crate::model::RoundQueueEntry;
-        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", false);
-        r.mark_queue_synced("nelson");
-        let incoming = LibraryQueue {
-            playlist: "nelson".to_string(),
-            updated_at: "2035-06-01T00:00:00Z".to_string(),
-            entries: vec![RoundQueueEntry {
-                episode_id: "ep1".to_string(),
-                show_id: "show1".to_string(),
-                play_order: 0,
-                state: "watched".to_string(),
-            }],
-        };
-        r.merge_queues(&[incoming]);
-        let q3 = r.get_round_queue();
-        assert_eq!(q3.len(), 1);
-        assert_eq!(q3[0].3, "watched");
-        assert_eq!(q3[0].6, 0); // dirty = 0
-    }
-
-    #[test]
-    fn remove_round_entry_preserves_rest_and_marks_queue_dirty() {
+    fn remove_round_entry_preserves_rest() {
         let r = Replica::new(":memory:");
         let entries = vec![
             (
@@ -2040,7 +1283,7 @@ mod tests {
                 "nelson".to_string(),
             ),
         ];
-        r.save_round_queue(&entries, "2026-05-31T00:00:00Z", false);
+        r.save_round_queue(&entries, "2026-05-31T00:00:00Z");
 
         assert_eq!(
             r.remove_round_entry("ep1"),
@@ -2050,20 +1293,11 @@ mod tests {
         let q = r.get_round_queue();
         assert_eq!(q.len(), 1);
         assert_eq!(q[0].0, "ep2");
-        assert_eq!(q[0].6, 1);
-        let dirty = r.dirty_queue().unwrap();
-        assert_eq!(dirty["playlist"], "nelson");
-        assert_eq!(dirty["entries"].as_array().unwrap().len(), 1);
-
+        assert_eq!(q[0].6, 0);
         assert_eq!(
             r.remove_round_entry("ep2"),
             Some(("s2".to_string(), "nelson".to_string()))
         );
         assert!(r.get_round_queue().is_empty());
-        let empty_dirty = r.dirty_queue().unwrap();
-        assert_eq!(empty_dirty["playlist"], "nelson");
-        assert_eq!(empty_dirty["entries"].as_array().unwrap().len(), 0);
-        r.mark_queue_synced("nelson");
-        assert!(r.dirty_queue().is_none());
     }
 }

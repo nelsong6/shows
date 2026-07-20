@@ -13,20 +13,43 @@ elsewhere.
 
 ## Local Paths
 
-- App install used for local release testing: `D:\Downloads\shows\shows-desktop.exe`
+- Versioned app installs: `%LOCALAPPDATA%\shows\versions\<version>`
 - Local watching cache: `D:\Downloads\Watching`
-- Token cache: `%APPDATA%\shows\token.json`
 - Release log: `%APPDATA%\shows\shows.log`
 
 If `SHOWS_LOCAL_WATCHING_DIR` is set, it overrides `D:\Downloads\Watching`.
 
-## Sync Health Check
+## Install the launcher
 
-1. Start `D:\Downloads\shows\shows-desktop.exe`.
-2. Open the overlay status panel.
-3. Confirm sync is online and `sync.pending == 0` after startup settles.
-4. If sync is offline, confirm `S:` exists and the status `shared_db_path` is reachable.
-5. Use Sync Now after repairing the drive mapping.
+After a channel has been published to `S:\shows-app`, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  S:\shows-app\install-shows-launcher.ps1 `
+  -Channel stable
+```
+
+Use `-Channel dev` on computers that should follow locally published development
+builds. The shortcut checks the channel manifest before every launch, verifies
+the bundle hashes, installs it into a new versioned local directory, retains the
+previous version for rollback, and starts the local executable.
+
+## Publish a development build
+
+From the repository computer:
+
+```powershell
+.\scripts\publish-shows-channel.ps1 -Channel dev
+```
+
+Use `-Channel stable` to advance the stable NAS channel. A channel manifest is
+replaced only after the complete versioned bundle has reached the NAS.
+
+## Database health check
+
+The app opens `S:\shows.db` directly. If the drive or database is unavailable,
+startup fails rather than reading or writing an independently authoritative
+local copy. `SHOWS_SHARED_DB` overrides the path for development and tests.
 
 ## File Cache Check
 

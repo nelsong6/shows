@@ -2,14 +2,14 @@
 //! bundle and a same-origin control surface: the overlay subscribes to
 //! `/status/stream`, can read a one-shot `/status` snapshot, reads `/shows`,
 //! `/stats`, `/history`, and POSTs `/pause` `/skip` `/prev` `/defer` `/seek`
-//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/stay-on-top` `/window/*`
+//! `/volume` `/sub` `/audio` `/fullscreen` `/stay-on-top` `/window/*`
 //! `/library/*`.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -17,7 +17,6 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use shows_core::replica::Replica;
 use shows_core::runner::{ControlOutcome, Runner};
 use shows_core::scan;
-use shows_core::sync::{SyncProgress, SyncProgressState, Syncer};
 
 use crate::player::Player;
 
@@ -90,188 +89,6 @@ pub struct StatusFileSync {
     pub summary: String,
     pub incomplete: bool,
     pub problems: Vec<StatusFileSyncProblem>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StartupSyncCounts {
-    pub shows: i64,
-    pub episodes: i64,
-    pub history: i64,
-    pub queue: i64,
-}
-
-impl StartupSyncCounts {
-    fn total(&self) -> i64 {
-        self.shows + self.episodes + self.history + self.queue
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct StartupSyncEvent {
-    pub stage: String,
-    pub state: String,
-    pub message: String,
-    pub duration_ms: Option<u64>,
-    pub counts: Option<StartupSyncCounts>,
-}
-
-impl From<SyncProgress> for StartupSyncEvent {
-    fn from(progress: SyncProgress) -> Self {
-        let state = match progress.state {
-            SyncProgressState::Started => "started",
-            SyncProgressState::Succeeded => "succeeded",
-            SyncProgressState::Skipped => "skipped",
-            SyncProgressState::Failed => "failed",
-        };
-        Self {
-            stage: progress.stage,
-            state: state.into(),
-            message: progress.message,
-            duration_ms: progress.duration_ms,
-            counts: progress.pending.map(|pending| StartupSyncCounts {
-                shows: pending.shows,
-                episodes: pending.episodes,
-                history: pending.history,
-                queue: pending.queue,
-            }),
-        }
-    }
-}
-
-struct StartupSyncTimeline {
-    state: String,
-    started_at: String,
-    started: Instant,
-    finished_at: Option<String>,
-    elapsed_ms: Option<u64>,
-    shared_db_path: Option<String>,
-    playlists: Vec<String>,
-    next_seq: u64,
-    had_failure: bool,
-    local_done: bool,
-    origin_done: bool,
-    last_counts: Option<StartupSyncCounts>,
-    events: Vec<Value>,
-}
-
-impl StartupSyncTimeline {
-    fn new(shared_db_path: Option<String>, playlists: Vec<String>) -> Self {
-        Self {
-            state: "running".into(),
-            started_at: now_rfc3339(),
-            started: Instant::now(),
-            finished_at: None,
-            elapsed_ms: None,
-            shared_db_path,
-            playlists,
-            next_seq: 1,
-            had_failure: false,
-            local_done: false,
-            origin_done: false,
-            last_counts: None,
-            events: Vec::new(),
-        }
-    }
-
-    fn append(&mut self, event: StartupSyncEvent) -> bool {
-        // This object is deliberately launch-scoped. Smart-moment pushes and
-        // later manual syncs use the same Syncer callback but cannot rewrite or
-        // grow the completed boot trace.
-        if self.state != "running" {
-            return false;
-        }
-        let terminal = event.state != "started";
-        if event.stage == "local-round.load" && terminal {
-            self.local_done = true;
-        }
-        if event.stage == "origin.complete" && terminal {
-            self.origin_done = true;
-            if let Some(counts) = &event.counts {
-                self.last_counts = Some(counts.clone());
-            }
-        }
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        if event.state == "failed" {
-            self.had_failure = true;
-        }
-        let counts = event.counts.map(|counts| {
-            json!({
-                "shows": counts.shows,
-                "episodes": counts.episodes,
-                "history": counts.history,
-                "queue": counts.queue,
-                "total": counts.total(),
-            })
-        });
-        self.events.push(json!({
-            "seq": seq,
-            "at": now_rfc3339(),
-            "stage": event.stage,
-            "state": event.state,
-            "message": event.message,
-            "duration_ms": event.duration_ms,
-            "counts": counts,
-        }));
-
-        if self.local_done && self.origin_done {
-            self.finish();
-        }
-        true
-    }
-
-    fn finish(&mut self) {
-        let succeeded = !self.had_failure;
-        let elapsed_ms = self.started.elapsed().as_millis() as u64;
-        let finished_at = now_rfc3339();
-        let counts = self.last_counts.as_ref().map(|counts| {
-            json!({
-                "shows": counts.shows,
-                "episodes": counts.episodes,
-                "history": counts.history,
-                "queue": counts.queue,
-                "total": counts.total(),
-            })
-        });
-        let seq = self.next_seq;
-        self.next_seq += 1;
-        self.events.push(json!({
-            "seq": seq,
-            "at": finished_at,
-            "stage": "startup.complete",
-            "state": if succeeded { "succeeded" } else { "failed" },
-            "message": if succeeded {
-                "Local round startup and origin reconciliation completed"
-            } else {
-                "Startup completed with one or more degraded steps"
-            },
-            "duration_ms": elapsed_ms,
-            "counts": counts,
-        }));
-        self.state = if succeeded {
-            "succeeded".into()
-        } else {
-            "degraded".into()
-        };
-        self.finished_at = Some(finished_at);
-        self.elapsed_ms = Some(elapsed_ms);
-    }
-
-    fn json(&self) -> Value {
-        json!({
-            "state": self.state,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
-            "elapsed_ms": self.elapsed_ms,
-            "shared_db_path": self.shared_db_path,
-            "playlists": self.playlists,
-            "events": self.events,
-        })
-    }
-}
-
-fn now_rfc3339() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 #[derive(Debug, Clone)]
@@ -412,10 +229,8 @@ pub struct ControlServer {
     status: Mutex<serde_json::Map<String, Value>>,
     status_events: StatusBroadcaster,
     status_seq: AtomicU64,
-    startup_sync: Mutex<StartupSyncTimeline>,
     player: Mutex<Option<Arc<Player>>>,
     runner: Mutex<Option<Arc<Runner>>>,
-    syncer: Mutex<Option<Arc<Syncer>>>,
     on_fullscreen: Mutex<Option<FullscreenCb>>,
     on_stay_on_top: Mutex<Option<StayOnTopCb>>,
     on_window_action: Mutex<Option<WindowActionCb>>,
@@ -439,7 +254,6 @@ impl ControlServer {
         status.insert("window_maximized".into(), json!(false));
         status.insert("window_fullscreen".into(), json!(false));
         status.insert("window_on_top".into(), json!(false));
-        let startup_sync = StartupSyncTimeline::new(None, playlists.clone());
         Arc::new(ControlServer {
             dist_dir,
             playlists,
@@ -447,10 +261,8 @@ impl ControlServer {
             status: Mutex::new(status),
             status_events: StatusBroadcaster::default(),
             status_seq: AtomicU64::new(0),
-            startup_sync: Mutex::new(startup_sync),
             player: Mutex::new(None),
             runner: Mutex::new(None),
-            syncer: Mutex::new(None),
             on_fullscreen: Mutex::new(None),
             on_stay_on_top: Mutex::new(None),
             on_window_action: Mutex::new(None),
@@ -463,23 +275,6 @@ impl ControlServer {
     }
     pub fn set_runner(&self, r: Arc<Runner>) {
         *self.runner.lock().unwrap() = Some(r);
-    }
-    pub fn set_syncer(&self, s: Arc<Syncer>) {
-        *self.syncer.lock().unwrap() = Some(s);
-        self.notify();
-    }
-
-    pub fn begin_startup_sync(&self, shared_db_path: Option<String>) {
-        *self.startup_sync.lock().unwrap() =
-            StartupSyncTimeline::new(shared_db_path, self.playlists.clone());
-        self.notify();
-    }
-
-    pub fn append_startup_sync_event(&self, event: StartupSyncEvent) {
-        let appended = self.startup_sync.lock().unwrap().append(event);
-        if appended {
-            self.notify();
-        }
     }
     pub fn set_on_fullscreen(&self, f: FullscreenCb) {
         *self.on_fullscreen.lock().unwrap() = Some(f);
@@ -667,7 +462,7 @@ impl ControlServer {
                     );
                 };
                 self.replica.mark_show_watched(id);
-                self.push_sync();
+                self.notify_database_change();
                 respond_control_ok(request, "show_marked_watched", "show marked watched");
             }
             "/library/mark-unwatched" => {
@@ -684,7 +479,7 @@ impl ControlServer {
                     );
                 };
                 self.replica.mark_show_unwatched(id);
-                self.push_sync();
+                self.notify_database_change();
                 respond_control_ok(request, "show_marked_unwatched", "show marked unwatched");
             }
             "/defer" => {
@@ -714,7 +509,7 @@ impl ControlServer {
                         }),
                     );
                 };
-                self.push_sync();
+                self.notify_database_change();
                 respond_json(
                     request,
                     200,
@@ -777,31 +572,6 @@ impl ControlServer {
                     cb(WindowAction::BeginDrag);
                 }
                 respond_control_ok(request, "window_drag_started", "window drag started");
-            }
-            "/sync-now" => {
-                let syncer = self.syncer.lock().unwrap().clone();
-                let Some(syncer) = syncer else {
-                    return respond_json(
-                        request,
-                        503,
-                        &json!({
-                            "ok": false,
-                            "status": "sync_unavailable",
-                            "message": "sync is not ready",
-                        }),
-                    );
-                };
-                let ok = syncer.sync();
-                self.notify();
-                respond_json(
-                    request,
-                    if ok { 200 } else { 503 },
-                    &json!({
-                        "ok": ok,
-                        "status": if ok { "synced" } else { "sync_failed" },
-                        "message": if ok { "sync complete" } else { "sync failed; check the status panel" },
-                    }),
-                );
             }
             "/seek" => {
                 let b = read_body(&mut request);
@@ -872,7 +642,7 @@ impl ControlServer {
                 };
                 let removed = self.replica.remove_show(id);
                 if removed {
-                    self.push_sync();
+                    self.notify_database_change();
                     respond_control_ok(request, "show_removed", "show removed");
                 } else {
                     respond_json(
@@ -905,7 +675,7 @@ impl ControlServer {
                     b.get("root_path").and_then(Value::as_str),
                     b.get("playlist").and_then(Value::as_str),
                 );
-                self.push_sync();
+                self.notify_database_change();
                 respond_control_ok(request, "show_updated", "show updated");
             }
             "/library/pick-folder" => self.library_pick_folder(request),
@@ -955,7 +725,7 @@ impl ControlServer {
             );
         }
         let sid = self.replica.create_show(&playlist, &name, &root, &eps);
-        self.push_sync();
+        self.notify_database_change();
         respond_json(request, 200, &json!({"id": sid, "episodes": eps.len()}));
     }
 
@@ -1085,7 +855,7 @@ impl ControlServer {
             .to_string();
         if !sid.is_empty() {
             if self.replica.remove_show(&sid) {
-                self.push_sync();
+                self.notify_database_change();
             }
         }
         respond_json(request, 200, &json!({}));
@@ -1110,7 +880,7 @@ impl ControlServer {
                 specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
             let added_ids = self.replica.rescan_episodes(&sid, &full_sorted);
             added = added_ids.len();
-            self.push_sync();
+            self.notify_database_change();
         }
         respond_json(request, 200, &json!({"added": added}));
     }
@@ -1137,7 +907,7 @@ impl ControlServer {
             if added > 0 {
                 self.replica.mark_episodes_watched(&sid, &added_ids);
             }
-            self.push_sync();
+            self.notify_database_change();
         }
         respond_json(request, 200, &json!({"added": added}));
     }
@@ -1202,30 +972,8 @@ impl ControlServer {
 
     fn status_json(&self) -> Value {
         let mut status = self.status.lock().unwrap().clone();
-        status.insert(
-            "startup_sync".into(),
-            self.startup_sync.lock().unwrap().json(),
-        );
         if let Some(p) = self.player.lock().unwrap().as_ref() {
             status.insert("playback".into(), p.playback_state());
-        }
-        if let Some(s) = self.syncer.lock().unwrap().as_ref() {
-            let pending = s.pending_breakdown();
-            status.insert(
-                "sync".into(),
-                json!({
-                    "online": s.online(),
-                    "pending": pending.total(),
-                    "pending_breakdown": {
-                        "shows": pending.shows,
-                        "episodes": pending.episodes,
-                        "history": pending.history,
-                        "queue": pending.queue,
-                    },
-                    "last_error": s.last_error(),
-                    "shared_db_path": s.shared_db_path(),
-                }),
-            );
         }
         status.insert("alerts".into(), status_alerts(&status));
         Value::Object(status)
@@ -1275,13 +1023,8 @@ impl ControlServer {
             ),
         }
     }
-    fn push_sync(&self) {
-        // Drop the server mutex before Syncer emits progress. Its callback
-        // broadcasts a status snapshot, which reads this same slot.
-        let syncer = self.syncer.lock().unwrap().clone();
-        if let Some(s) = syncer {
-            s.push();
-        }
+    fn notify_database_change(&self) {
+        // Mutations are already committed to the authoritative NAS database.
         self.notify();
     }
 
@@ -1571,42 +1314,6 @@ fn status_alerts(status: &serde_json::Map<String, Value>) -> Value {
         .get("error_kind")
         .and_then(Value::as_str)
         .is_some_and(|kind| kind == "round_unplayable");
-
-    if let Some(sync) = status.get("sync").and_then(Value::as_object) {
-        let online = sync.get("online").and_then(Value::as_bool).unwrap_or(true);
-        if !online {
-            let shared = sync
-                .get("shared_db_path")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let message = sync
-                .get("last_error")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    if shared.is_empty() {
-                        "Cannot reach the shared shows database.".to_string()
-                    } else {
-                        format!("Cannot reach the shared shows database at {shared}.")
-                    }
-                });
-            let detail = if shared.is_empty() {
-                "Map the NAS share, then use sync now or restart the app.".to_string()
-            } else {
-                format!(
-                    "Map the NAS share so {shared} exists, then use sync now or restart the app."
-                )
-            };
-            alerts.push(json!({
-                "level": "danger",
-                "title": "Sync offline",
-                "message": message,
-                "detail": detail,
-            }));
-        }
-    }
-
     if let Some(file_sync) = status.get("file_sync").and_then(Value::as_object) {
         if file_sync
             .get("incomplete")
@@ -1828,168 +1535,9 @@ mod tests {
         assert_eq!(value["window_maximized"], false);
         assert_eq!(value["window_fullscreen"], false);
         assert_eq!(value["window_on_top"], false);
-        assert_eq!(value["startup_sync"]["state"], "running");
-        assert!(value["startup_sync"]["events"].is_array());
-        assert!(value["startup_sync"]["events"].as_array().unwrap().is_empty());
+        assert!(value.get("startup_sync").is_none());
+        assert!(value.get("sync").is_none());
         assert!(value["alerts"].is_array());
-    }
-
-    #[test]
-    fn startup_sync_timeline_is_ordered_retained_and_terminal() {
-        let server = ControlServer::new(
-            None,
-            Arc::new(Replica::new(":memory:")),
-            vec!["nelson".to_string()],
-        );
-        server.begin_startup_sync(Some("S:\\shows.db".into()));
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "local-round.load".into(),
-            state: "succeeded".into(),
-            message: "loaded local round".into(),
-            duration_ms: Some(8),
-            counts: None,
-        });
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "origin.connect".into(),
-            state: "started".into(),
-            message: "opening shared database".into(),
-            duration_ms: None,
-            counts: None,
-        });
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "origin.connect".into(),
-            state: "succeeded".into(),
-            message: "opened shared database".into(),
-            duration_ms: Some(24_123),
-            counts: None,
-        });
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "origin.complete".into(),
-            state: "succeeded".into(),
-            message: "origin reconciliation complete".into(),
-            duration_ms: Some(24_130),
-            counts: Some(StartupSyncCounts {
-                shows: 1,
-                episodes: 2,
-                history: 3,
-                queue: 4,
-            }),
-        });
-
-        let value = server.status_json();
-        let sync = &value["startup_sync"];
-        assert_eq!(sync["state"], "succeeded");
-        assert_eq!(sync["shared_db_path"], "S:\\shows.db");
-        assert_eq!(sync["playlists"], json!(["nelson"]));
-        assert!(sync["finished_at"].is_string());
-        assert!(sync["elapsed_ms"].is_number());
-        assert_eq!(sync["events"].as_array().unwrap().len(), 5);
-        assert_eq!(sync["events"][0]["seq"], 1);
-        assert_eq!(sync["events"][1]["seq"], 2);
-        assert_eq!(sync["events"][2]["seq"], 3);
-        assert_eq!(sync["events"][3]["seq"], 4);
-        assert_eq!(sync["events"][4]["seq"], 5);
-        assert_eq!(sync["events"][2]["duration_ms"], 24_123);
-        assert_eq!(sync["events"][3]["counts"]["total"], 10);
-        assert_eq!(sync["events"][4]["stage"], "startup.complete");
-        assert_eq!(sync["events"][4]["counts"]["total"], 10);
-
-        // The timeline lives in the full status projection, so a subscriber
-        // arriving after completion receives all earlier events in its first frame.
-        let initial_frame = server.status_frame(&value);
-        assert!(initial_frame.contains("\"stage\":\"origin.connect\""));
-        assert!(initial_frame.contains("\"stage\":\"startup.complete\""));
-    }
-
-    #[test]
-    fn failed_startup_step_makes_terminal_timeline_degraded() {
-        let server = ControlServer::new(
-            None,
-            Arc::new(Replica::new(":memory:")),
-            vec!["nelson".to_string()],
-        );
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "origin.connect".into(),
-            state: "failed".into(),
-            message: "shared database unavailable".into(),
-            duration_ms: Some(5_000),
-            counts: None,
-        });
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "origin.complete".into(),
-            state: "failed".into(),
-            message: "continuing from local replica".into(),
-            duration_ms: Some(5_001),
-            counts: None,
-        });
-        assert_eq!(server.status_json()["startup_sync"]["state"], "running");
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "local-round.load".into(),
-            state: "succeeded".into(),
-            message: "loaded local round".into(),
-            duration_ms: Some(10),
-            counts: None,
-        });
-
-        assert_eq!(server.status_json()["startup_sync"]["state"], "degraded");
-    }
-
-    #[test]
-    fn startup_timeline_waits_for_local_result_and_ignores_later_syncs() {
-        let server = ControlServer::new(
-            None,
-            Arc::new(Replica::new(":memory:")),
-            vec!["nelson".to_string()],
-        );
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "origin.complete".into(),
-            state: "succeeded".into(),
-            message: "origin ready".into(),
-            duration_ms: Some(2),
-            counts: None,
-        });
-        assert_eq!(server.status_json()["startup_sync"]["state"], "running");
-
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "file-cache.check".into(),
-            state: "failed".into(),
-            message: "one local file is missing".into(),
-            duration_ms: Some(3),
-            counts: None,
-        });
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "local-round.load".into(),
-            state: "succeeded".into(),
-            message: "local round loaded".into(),
-            duration_ms: Some(4),
-            counts: None,
-        });
-        let completed = server.status_json();
-        assert_eq!(completed["startup_sync"]["state"], "degraded");
-        let completed_len = completed["startup_sync"]["events"]
-            .as_array()
-            .unwrap()
-            .len();
-        assert_eq!(
-            completed["startup_sync"]["events"][completed_len - 1]["stage"],
-            "startup.complete"
-        );
-
-        server.append_startup_sync_event(StartupSyncEvent {
-            stage: "origin.push".into(),
-            state: "started".into(),
-            message: "later smart-moment push".into(),
-            duration_ms: None,
-            counts: None,
-        });
-        assert_eq!(
-            server.status_json()["startup_sync"]["events"]
-                .as_array()
-                .unwrap()
-                .len(),
-            completed_len,
-            "post-boot sync events must not grow the launch trace"
-        );
     }
 
     #[test]
@@ -2000,30 +1548,6 @@ mod tests {
         assert_eq!(value["phase"], "fetching");
         assert!(value["error_kind"].is_null());
         assert_eq!(value["round_blocked"], false);
-    }
-
-    #[test]
-    fn status_alerts_include_sync_offline_guidance() {
-        let mut status = serde_json::Map::new();
-        status.insert(
-            "sync".into(),
-            json!({
-                "online": false,
-                "pending": 0,
-                "last_error": "Failed to open shared DB for seed: unable to open database file: S:\\shows.db",
-                "shared_db_path": "S:\\shows.db",
-            }),
-        );
-
-        let alerts = status_alerts(&status);
-        assert_eq!(alerts[0]["level"], "danger");
-        assert_eq!(alerts[0]["title"], "Sync offline");
-        assert!(
-            alerts[0]["detail"]
-                .as_str()
-                .unwrap()
-                .contains("Map the NAS share")
-        );
     }
 
     #[test]

@@ -22,7 +22,6 @@ import {
   setVolume as sendVolume,
   setSub,
   setAudio,
-  syncNow,
   removeRoundEntry,
   reloadRound,
   addShow,
@@ -177,7 +176,7 @@ function App() {
         .then(setStats)
         .catch(() => {});
     }
-  }, [status.phase, status.last_advance?.advanced_count]);
+  }, [status.phase, status.last_advance?.advanced_count, status.database?.revision]);
 
   // Latest playback, mirrored to refs so mount-once handlers can read current
   // state without re-binding global handlers. volumeRef and displayVolume are
@@ -628,20 +627,13 @@ function App() {
   const activeEpisodePath = selectedShow
     ? (selectedRoundEntry ? selectedRoundEntry.absolute_path : null)
     : playingEpisodePath;
-  const syncStatusMessage = status.sync && !status.sync.online
-    ? status.sync.last_error
-      ? `sync offline: ${status.sync.last_error}`
-      : status.sync.shared_db_path
-      ? `sync offline: cannot reach ${status.sync.shared_db_path}`
-      : 'sync offline'
-    : null;
   const alerts = status.alerts ?? [];
   const repairableRoundProblems = status.round_blocked
     ? (status.file_sync?.problems ?? [])
     : [];
   const hasRepairedRoundEntries = repairedRoundEntries.size > 0;
 
-  // Library edits mutate the replica but don't change phase/advance, so re-fetch
+  // Library edits mutate the database but don't change phase/advance, so re-fetch
   // the sidebar shows explicitly after add/remove/rescan.
   const refreshShows = () =>
     listShows()
@@ -847,8 +839,8 @@ function App() {
           {round.length === 0 && (
             <div className="section">
               <h3>status</h3>
-              <div style={{ color: syncStatusMessage ? 'var(--state-danger-fg)' : 'var(--fg-secondary)' }}>
-                {syncStatusMessage || status.message || '—'}
+              <div style={{ color: status.phase === 'error' ? 'var(--state-danger-fg)' : 'var(--fg-secondary)' }}>
+                {status.message || '—'}
               </div>
               {status.phase === 'auth' && (
                 <p className="filter-hint">a browser tab should be open. approve, then come back.</p>
@@ -980,7 +972,6 @@ function App() {
         onSeekRelative={(seconds) => runControl(() => seekRelative(seconds))}
         onSkip={() => runControl(skip)}
         onDefer={() => runControl(defer)}
-        onSyncNow={() => runControl(syncNow, {success: true})}
         onToggleStayOnTop={togglePin}
         onToggleFullscreen={() => runControl(toggleFullscreen)}
       />
@@ -1196,7 +1187,6 @@ function BottomControlBar({
   onSeekRelative,
   onSkip,
   onDefer,
-  onSyncNow,
   onToggleStayOnTop,
   onToggleFullscreen,
 }: {
@@ -1220,7 +1210,6 @@ function BottomControlBar({
   onSeekRelative: (seconds: number) => void;
   onSkip: () => void;
   onDefer: () => void;
-  onSyncNow: () => void;
   onToggleStayOnTop: () => void;
   onToggleFullscreen: () => void;
 }) {
@@ -1546,14 +1535,6 @@ function BottomControlBar({
               ))}
             </select>
           )}
-
-          <button
-            className="control-btn sync-btn"
-            onClick={onSyncNow}
-            title="Sync Now"
-          >
-            <SyncIcon />
-          </button>
 
           {roundActive && (
             <button
@@ -2215,228 +2196,6 @@ function durationDays(start: string, end: string): string {
   return `${days}d`;
 }
 
-function formatSyncDuration(milliseconds: number | null | undefined): string {
-  if (milliseconds == null || !Number.isFinite(milliseconds)) return '—';
-  const ms = Math.max(0, milliseconds);
-  if (ms < 1000) return `${Math.round(ms)} ms`;
-  if (ms < 60_000) {
-    const seconds = ms / 1000;
-    return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
-  }
-  const minutes = Math.floor(ms / 60_000);
-  const seconds = Math.floor((ms % 60_000) / 1000);
-  return `${minutes}m ${seconds}s`;
-}
-
-function formatSyncDateTime(iso: string | null | undefined): string {
-  if (!iso) return '—';
-  const date = new Date(iso);
-  if (isNaN(date.getTime())) return iso;
-  return date.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
-function formatSyncClock(iso: string): string {
-  const date = new Date(iso);
-  if (isNaN(date.getTime())) return '—';
-  return date.toLocaleTimeString(undefined, {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
-function syncPendingSummary(status: Status): string {
-  const sync = status.sync;
-  if (!sync) return 'not reported';
-  const label = `${sync.pending} ${sync.pending === 1 ? 'change' : 'changes'}`;
-  const breakdown = sync.pending_breakdown;
-  if (!breakdown || sync.pending === 0) return label;
-
-  const parts = [
-    breakdown.shows ? `${breakdown.shows} shows` : '',
-    breakdown.episodes ? `${breakdown.episodes} episodes` : '',
-    breakdown.history ? `${breakdown.history} history` : '',
-    breakdown.queue ? `${breakdown.queue} queue` : '',
-  ].filter(Boolean);
-  return parts.length ? `${label} · ${parts.join(', ')}` : label;
-}
-
-function SyncLogPanel({status}: {status: Status}) {
-  const sync = status.startup_sync;
-  const [now, setNow] = useState(Date.now());
-
-  useEffect(() => {
-    if (sync?.state !== 'running') return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(timer);
-  }, [sync?.state, sync?.started_at]);
-
-  if (!sync) {
-    return (
-      <section className="sync-log-panel" aria-labelledby="sync-log-title">
-        <div className="sync-log-title-row">
-          <div>
-            <p className="sync-log-eyebrow">startup diagnostics</p>
-            <h2 id="sync-log-title">sync log</h2>
-          </div>
-        </div>
-        <div className="sync-log-empty" role="status">
-          <span className="sync-log-empty-mark" aria-hidden="true" />
-          <strong>no startup sync trace yet</strong>
-          <p>
-            The next launch will show each shared-database step here, including what the app
-            attempted, how long it took, and whether it completed.
-          </p>
-        </div>
-      </section>
-    );
-  }
-
-  const startedMs = Date.parse(sync.started_at);
-  const finishedMs = sync.finished_at ? Date.parse(sync.finished_at) : Number.NaN;
-  const elapsedMs = sync.state === 'running' && Number.isFinite(startedMs)
-    ? Math.max(0, now - startedMs)
-    : sync.elapsed_ms != null
-      ? sync.elapsed_ms
-      : Number.isFinite(startedMs) && Number.isFinite(finishedMs)
-        ? Math.max(0, finishedMs - startedMs)
-        : null;
-  const dbPath = sync.shared_db_path ?? status.sync?.shared_db_path ?? 'not configured';
-  const playlists = sync.playlists.length > 0
-    ? sync.playlists.join(', ')
-    : status.playlist || 'none';
-  const events = [...sync.events].sort((a, b) => a.seq - b.seq);
-
-  return (
-    <section className="sync-log-panel" aria-labelledby="sync-log-title">
-      <header className={`sync-log-hero ${sync.state}`}>
-        <div className="sync-log-title-row">
-          <div>
-            <p className="sync-log-eyebrow">startup diagnostics</p>
-            <h2 id="sync-log-title">sync log</h2>
-          </div>
-          <span className={`sync-overall-state ${sync.state}`} role="status" aria-live="polite">
-            {sync.state}
-          </span>
-        </div>
-        <p className="sync-log-lede">
-          {sync.state === 'running'
-            ? 'The app is still reconciling its local replica with the shared database.'
-            : sync.state === 'succeeded'
-              ? 'Startup reconciliation completed successfully.'
-              : 'Startup continued, but one or more sync steps did not complete cleanly.'}
-        </p>
-
-        <dl className="sync-log-summary">
-          <div className="sync-summary-item">
-            <dt>elapsed</dt>
-            <dd className="sync-elapsed" aria-label={`Elapsed ${formatSyncDuration(elapsedMs)}`}>
-              {formatSyncDuration(elapsedMs)}
-            </dd>
-          </div>
-          <div className="sync-summary-item">
-            <dt>started</dt>
-            <dd><time dateTime={sync.started_at}>{formatSyncDateTime(sync.started_at)}</time></dd>
-          </div>
-          <div className="sync-summary-item">
-            <dt>finished</dt>
-            <dd>
-              {sync.finished_at
-                ? <time dateTime={sync.finished_at}>{formatSyncDateTime(sync.finished_at)}</time>
-                : 'in progress'}
-            </dd>
-          </div>
-          <div className="sync-summary-item sync-summary-wide">
-            <dt>shared database</dt>
-            <dd><code title={dbPath}>{dbPath}</code></dd>
-          </div>
-          <div className="sync-summary-item">
-            <dt>playlists</dt>
-            <dd>{playlists}</dd>
-          </div>
-          <div className="sync-summary-item sync-summary-wide">
-            <dt>pending now</dt>
-            <dd>{syncPendingSummary(status)}</dd>
-          </div>
-        </dl>
-      </header>
-
-      <div className="sync-timeline-heading">
-        <div>
-          <p className="sync-log-eyebrow">ordered trace</p>
-          <h3>boot sequence</h3>
-        </div>
-        <span>{events.length} {events.length === 1 ? 'event' : 'events'}</span>
-      </div>
-
-      {events.length === 0 ? (
-        <div className="sync-log-empty compact" role="status">
-          <span className="sync-log-empty-mark" aria-hidden="true" />
-          <strong>waiting for the first sync step</strong>
-          <p>The trace is active; events will appear here as startup proceeds.</p>
-        </div>
-      ) : (
-        <ol
-          className="sync-timeline"
-          aria-label="Startup sync events"
-          role="log"
-          aria-live="polite"
-          aria-relevant="additions text"
-        >
-          {events.map((event) => {
-            const counts = event.counts;
-            const countParts = counts ? [
-              counts.shows ? `${counts.shows} shows` : '',
-              counts.episodes ? `${counts.episodes} episodes` : '',
-              counts.history ? `${counts.history} history` : '',
-              counts.queue ? `${counts.queue} queue` : '',
-            ].filter(Boolean) : [];
-
-            return (
-              <li className={`sync-event ${event.state}`} key={event.seq}>
-                <time className="sync-event-time" dateTime={event.at} title={formatSyncDateTime(event.at)}>
-                  {formatSyncClock(event.at)}
-                </time>
-                <span className="sync-event-marker" aria-hidden="true" />
-                <article className="sync-event-card">
-                  <div className="sync-event-header">
-                    <div className="sync-event-stage">
-                      <span className="sync-event-seq">#{event.seq}</span>
-                      <strong>{event.stage.replace(/[_-]+/g, ' ')}</strong>
-                    </div>
-                    <span className={`sync-event-state ${event.state}`}>{event.state}</span>
-                  </div>
-                  <p>{event.message}</p>
-                  {(event.duration_ms != null || counts) && (
-                    <footer className="sync-event-meta">
-                      {event.duration_ms != null && (
-                        <span className="sync-event-duration">{formatSyncDuration(event.duration_ms)}</span>
-                      )}
-                      {counts && (
-                        <span className="sync-event-counts">
-                          <strong>{counts.total} total</strong>
-                          {countParts.length > 0 && <span>{countParts.join(' · ')}</span>}
-                        </span>
-                      )}
-                    </footer>
-                  )}
-                </article>
-              </li>
-            );
-          })}
-        </ol>
-      )}
-    </section>
-  );
-}
-
 function SettingsPanel({
   status,
   shows,
@@ -2460,7 +2219,7 @@ function SettingsPanel({
   overviewHeader: React.ReactNode;
   overviewContent: React.ReactNode;
 }) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'sync' | 'stats' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'stats' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
 
   const statsHeader = stats && stats.total_shows ? (() => {
     const pct = stats.episodes_total
@@ -2512,14 +2271,6 @@ function SettingsPanel({
         <h3>settings</h3>
         <nav className="settings-nav" aria-label="Settings sections">
           <button aria-current={activeTab === 'overview' ? 'page' : undefined} className={`nav-btn${activeTab === 'overview' ? ' active' : ''}`} onClick={() => setActiveTab('overview')}>overview</button>
-          <button
-            type="button"
-            className={`nav-btn${activeTab === 'sync' ? ' active' : ''}`}
-            aria-current={activeTab === 'sync' ? 'page' : undefined}
-            onClick={() => setActiveTab('sync')}
-          >
-            sync log
-          </button>
           <button aria-current={activeTab === 'stats' ? 'page' : undefined} className={`nav-btn${activeTab === 'stats' ? ' active' : ''}`} onClick={() => setActiveTab('stats')}>stats</button>
           <button aria-current={activeTab === 'library' ? 'page' : undefined} className={`nav-btn${activeTab === 'library' ? ' active' : ''}`} onClick={() => setActiveTab('library')}>library</button>
           <button aria-current={activeTab === 'add_show' ? 'page' : undefined} className={`nav-btn${activeTab === 'add_show' ? ' active' : ''}`} onClick={() => setActiveTab('add_show')}>add show</button>
@@ -2540,12 +2291,6 @@ function SettingsPanel({
               {overviewContent}
             </div>
           )}
-
-        {activeTab === 'sync' && (
-          <div className="settings-tab sync-log-tab">
-            <SyncLogPanel status={status} />
-          </div>
-        )}
 
         {activeTab === 'stats' && (
           <div className="settings-tab">

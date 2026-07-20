@@ -136,6 +136,7 @@ jobs:
         # the Python build had with `_build.py`.
         env:
           SHOWS_BUILD_SHA: ${{ github.sha }}
+          SHOWS_UPDATE_CHANNEL: stable
         run: cargo build --release -p shows-desktop
 
       # Stage the bundle: shows-desktop.exe + libmpv-2.dll

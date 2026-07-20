@@ -1,4 +1,4 @@
-//! shows-desktop — the Windows shell. Wires shows-core's offline-first engine to
+//! shows-desktop — the Windows shell. Wires shows-core's NAS-backed engine to
 //! a single DirectComposition window: libmpv video under a transparent WebView2
 //! overlay (the React UI), with a localhost control server.
 //!
@@ -22,8 +22,7 @@ use std::time::{Duration, Instant};
 
 use shows_core::replica::Replica;
 use shows_core::roundlogic::parse_playlists;
-use shows_core::runner::{Callbacks, PlayerOps, Runner, StopFlag, SyncOps};
-use shows_core::sync::Syncer;
+use shows_core::runner::{Callbacks, PlayerOps, Runner, StopFlag};
 use webserver::{
     StatusFileSync, StatusFileSyncProblem, StatusPatch, StatusPhase, StatusRemovedShow,
     StatusRoundEntry,
@@ -32,43 +31,6 @@ use webserver::{
 use compositor::Compositor;
 use player::Player;
 use webserver::ControlServer;
-
-struct NotifyingSyncer {
-    inner: Arc<Syncer>,
-    notify: Arc<dyn Fn() + Send + Sync>,
-}
-
-impl NotifyingSyncer {
-    fn new(inner: Arc<Syncer>, notify: Arc<dyn Fn() + Send + Sync>) -> NotifyingSyncer {
-        NotifyingSyncer { inner, notify }
-    }
-
-    fn notify(&self) {
-        (self.notify)();
-    }
-}
-
-impl SyncOps for NotifyingSyncer {
-    fn sync(&self) -> bool {
-        let online = self.inner.sync();
-        self.notify();
-        online
-    }
-
-    fn push(&self) -> bool {
-        let online = self.inner.push();
-        self.notify();
-        online
-    }
-
-    fn pending(&self) -> i64 {
-        self.inner.pending()
-    }
-
-    fn online(&self) -> bool {
-        self.inner.online()
-    }
-}
 
 fn start_status_waker(
     server: Arc<ControlServer>,
@@ -99,14 +61,6 @@ fn to_err(e: String) -> Box<dyn std::error::Error> {
     e.into()
 }
 
-/// `%APPDATA%\shows\replica.db`.
-fn replica_path() -> String {
-    let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
-    let dir = std::path::Path::new(&base).join("shows");
-    let _ = std::fs::create_dir_all(&dir);
-    dir.join("replica.db").to_string_lossy().into_owned()
-}
-
 /// `%APPDATA%\shows\shows.log`.
 fn log_path() -> std::path::PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
@@ -133,7 +87,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }
     builder.init();
 
-    // Single-instance guard. A second copy would race the replica + control
+    // Single-instance guard. A second local copy would race the player + control
     // server and silently drop watch updates; refuse and focus the running one.
     // (Kernel cleans up the mutex on process exit; no CloseHandle needed.)
     {
@@ -161,18 +115,14 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         &std::env::var("SHOWS_PLAYLISTS").unwrap_or_default(),
         &["nelson"],
     );
-    // Offline-first: the replica is the working copy; the syncer reconciles it.
-    // SHOWS_REPLICA overrides the path (used for safe, throwaway test runs).
-    let rp = std::env::var("SHOWS_REPLICA").unwrap_or_else(|_| replica_path());
-    let replica = Arc::new(Replica::new(&rp));
-
-    // SQLite-to-SQLite Sync: synchronizes the local replica with a database file on a network share/NAS.
-    // Defaults to S:\shows.db, can be overridden by SHOWS_SHARED_DB.
+    // Every computer opens the NAS database directly. SQLite commit order is
+    // authoritative; there is no independently-owned local database to merge.
     let shared_db_path = std::env::var("SHOWS_SHARED_DB")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| Some("S:\\shows.db".to_string()));
-    let syncer = Arc::new(Syncer::new(replica.clone(), shared_db_path, playlists.clone()));
+        .unwrap_or_else(|| "S:\\shows.db".to_string());
+    log::info!("opening authoritative database at {shared_db_path}");
+    let replica = Arc::new(Replica::try_new(&shared_db_path)?);
 
     // Control server serves the React overlay + the control surface. Picking
     // a dist dir: explicit env override > in-tree source dir (dev) > embedded (release).
@@ -187,10 +137,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             }
         });
     let server = ControlServer::new(dist_dir, replica.clone(), playlists.clone());
-    server.begin_startup_sync(syncer.shared_db_path());
-    syncer.set_progress_callback(Some({
-        let s = server.clone();
-        Arc::new(move |progress| s.append_startup_sync_event(progress.into()))
+    server.push_raw(serde_json::json!({
+        "database": {
+            "path": shared_db_path,
+            "authoritative": true,
+            "revision": replica.revision(),
+        }
     }));
     let port = server.start();
     let overlay_url = format!("http://127.0.0.1:{port}/");
@@ -219,9 +171,35 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Runner pushes phase/round/advance into the control server's status.
     let stop = StopFlag::new();
-    let cb = {
-        let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status, s_sync_progress) = (
+    {
+        let (database, status_server, watcher_stop, watcher_path) = (
+            replica.clone(),
             server.clone(),
+            stop.clone(),
+            shared_db_path.clone(),
+        );
+        std::thread::Builder::new()
+            .name("database-revision-watcher".into())
+            .spawn(move || {
+                let mut revision = database.revision();
+                while !watcher_stop.wait_timeout(Duration::from_secs(2)) {
+                    let next = database.revision();
+                    if next != revision {
+                        revision = next;
+                        status_server.push_raw(serde_json::json!({
+                            "database": {
+                                "path": watcher_path,
+                                "authoritative": true,
+                                "revision": revision,
+                            }
+                        }));
+                    }
+                }
+            })
+            .expect("spawn database revision watcher");
+    }
+    let cb = {
+        let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status) = (
             server.clone(),
             server.clone(),
             server.clone(),
@@ -310,18 +288,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 };
                 s_status.push_status(StatusPatch::phase(phase, message));
             })),
-            on_sync_progress: Some(Box::new(move |progress| {
-                s_sync_progress.append_startup_sync_event(progress.clone().into());
-            })),
         }
     };
-    let runner_syncer = Arc::new(NotifyingSyncer::new(syncer.clone(), {
-        let s = server.clone();
-        Arc::new(move || s.notify())
-    }));
     let runner = Arc::new(Runner::new(
         replica.clone(),
-        runner_syncer as Arc<dyn SyncOps>,
         player.clone() as Arc<dyn PlayerOps>,
         playlists.clone(),
         stop.clone(),
@@ -330,7 +300,6 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     server.set_player(player.clone());
     server.set_runner(runner.clone());
-    server.set_syncer(syncer.clone());
     server.set_on_fullscreen(compositor.fullscreen_callback());
     server.set_on_stay_on_top(compositor.stay_on_top_callback());
     server.set_on_window_action(compositor.window_action_callback());
@@ -397,12 +366,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .expect("spawn resume-saver");
     }
 
-    // On window close: capture the resume point, flush queued changes, stop.
+    // On window close: capture the resume point in the NAS database, then stop.
     {
-        let (r, s, st) = (runner.clone(), syncer.clone(), stop.clone());
+        let (r, st) = (runner.clone(), stop.clone());
         compositor.set_quit(Box::new(move || {
             r.save_resume();
-            s.push();
             st.set();
         }));
     }

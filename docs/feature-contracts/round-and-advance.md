@@ -1,6 +1,9 @@
 # Feature Contract: Round Selection + Advance
 
-The round-robin playback loop is implemented by the **desktop engine** (`desktop-qt/shows/engine.py` over the local SQLite replica in `shows/replica.py`, driven by `shows/runner.py`), syncing to the durable origin with `POST /sync`. It began as a pair of server endpoints — `GET …/next-round` + `POST …/advance` — removed in the offline-first migration; the invariants are unchanged, only their home moved (from server SQL to the client engine). This document is the contract that engine satisfies. Implementations must preserve every invariant below; new behavior must extend this contract, not contradict it.
+The round-robin playback loop is implemented by the Rust desktop engine over the
+authoritative NAS SQLite database. This document is the contract that engine
+satisfies. Implementations must preserve every invariant below; new behavior
+must extend this contract, not contradict it.
 
 Advance *timing* — when an episode becomes watched — is governed by [Advance timing (per-episode)](#advance-timing-per-episode) below.
 
@@ -55,44 +58,28 @@ The skip marks the episode **watched** (a `watch_history` row is written; the sh
 
 ## Failure modes
 
-Offline-first: whenever a playable local round exists, the runner plays entirely
-off the replica and never blocks on the network; sync is best-effort. The only
-startup waits described below occur when no local round exists to play.
+The NAS SQLite database is authoritative and is opened directly by every app.
+There is no local database replica, dirty-row preference, push, pull, or merge.
 
-### Local-first startup ordering
+### Authoritative database ordering
 
-When the replica contains library state, launch loads the saved local round and
-makes it playable without waiting for the durable origin. Push/pull
-reconciliation runs independently. A cold, sleeping, locked, or unreachable
-shared database therefore cannot delay local playback.
+- Every state mutation commits to the shared database before the control returns.
+- SQLite serializes competing writers. If two apps update the same field, the
+  last committed statement is the visible value.
+- Reads are never served from an independently-owned database copy. An edit made
+  by another app is visible on the next read.
+- A database revision is incremented by triggers for library, history, queue,
+  and playback-preference changes. Each app watches that revision and refreshes
+  its status subscribers when another connection commits.
+- An already-loaded in-memory round remains immutable under M1. External edits
+  affect the next database read or round boundary; they do not restructure the
+  playlist currently handed to mpv.
+- The local media-file cache remains disposable. It does not contain library or
+  watch-state authority.
 
-The launch reconciliation preserves these invariants:
-
-- Remote I/O never occurs while holding the replica connection mutex. A push
-  snapshots dirty rows locally, releases the replica, performs origin I/O, then
-  acknowledges only rows whose `updated_at` still matches the snapshot. A local
-  mutation made during the push stays dirty for the next push.
-- A pull may merge durable state into the replica, but it never replaces the
-  runner's already-loaded in-memory round. Pulled queue changes become eligible
-  only when the runner next loads a round boundary.
-- Origin operations are serialized. Manual sync and smart-moment pushes cannot
-  race the launch reconciliation against the shared SQLite file.
-- If an established replica has no playable local round for the selected
-  playlists, the runner performs one origin reconciliation and retries local
-  selection before declaring the playlists drained. This is the only
-  established-replica startup path allowed to wait, because there is no local
-  media to start and a pull may supply it.
-- A genuinely empty first-install replica may wait for its initial origin seed,
-  because there is no local round to play. The startup sync timeline identifies
-  this case explicitly; it is not used for an established replica.
-- A queue created during first-install or drained-retry startup is not pushed
-  until `local-round.load` is terminal. Startup trace completion therefore
-  cannot retain an unmatched `origin.connect` or `origin.push` start event.
-
-- **Empty playlist (no active shows)**: `engine.next_round` returns `[]`; at launch the runner reconciles once when local library state exists, retries selection, then treats a still-empty result as drained and parks until shutdown.
-- **Origin unreachable (network/server down)**: playback continues off the replica. `get_library` (pull) and `post_sync` (push) are best-effort — the `Syncer` flips its `online` flag on each attempt's success/failure (no polling), and queued local changes stay `dirty` until a later push lands.
-- **Token expiry**: the apiclient refreshes once on a `401` (`oauth.ensure_token`) and retries in place; playback is unaffected.
-- **Crash mid-round**: per-episode advances are already persisted to the replica (A1), so on restart the round is recomputed from that state and resumes at the next unwatched episode. Advances not yet pushed remain `dirty` and sync on the next push.
+- **Empty playlist (no active shows)**: `engine.next_round` returns `[]`; the runner treats the playlist as drained and parks until shutdown.
+- **Database unreachable**: startup fails explicitly because authoritative state cannot be read or mutated. Previously cached media is not treated as database state.
+- **Crash mid-round**: per-episode advances already committed on EOF remain watched; an unfinished episode remains unwatched.
 
 ## Defer: swap a show's next pick
 
