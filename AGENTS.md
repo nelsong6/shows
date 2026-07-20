@@ -1,6 +1,6 @@
 # shows
 
-App repo on the romaine.life AKS cluster. Cosmos-backed playlist API at `shows.romaine.life` plus a Rust Windows desktop app that drives libmpv for round-robin playback.
+Windows desktop app that drives libmpv for deterministic round-robin TV playback. The current product has no AKS service, HTTP API, Cosmos database, or authentication flow.
 
 ## Quality timeframe
 
@@ -8,159 +8,110 @@ This repo follows the long-term, heavy-solution operating mode codified in `roma
 
 When extending a feature documented at `docs/feature-contracts/`, name the affected contract in the PR and explain how the implementation proves the invariants still hold.
 
+## Architecture
+
+The Rust desktop is the engine. Round selection, advance, defer, resume, library management, and watch history run against a local SQLite replica at `%APPDATA%\shows\replica.db`.
+
+The durable origin is a shared SQLite database on the NAS, normally `S:\shows.db`. Each computer reconciles its local replica with that database through SQLite-to-SQLite sync:
+
+- `SHOWS_SHARED_DB` overrides the shared database path.
+- `SHOWS_REPLICA` overrides the local replica path for safe throwaway runs.
+- Startup pulls shared changes and pushes dirty local rows.
+- Changes use last-write-wins timestamps; unsynced local rows remain dirty until a later successful push.
+- Playback uses the local replica and does not wait on NAS I/O once a playable local round exists.
+- The current round's media files are copied from the NAS to `D:\Downloads\Watching` before playback. `SHOWS_LOCAL_WATCHING_DIR` overrides that cache path.
+
+There is no Cosmos or web-API source of truth in the current implementation.
+
 ## Layout
 
-Offline-first: the **desktop is the engine** (round selection / advance / defer /
-resume run locally against a SQLite replica) and the **server is a durable
-origin** it syncs with git-style (`GET /library` pull, `POST /sync` push,
-last-write-wins). The server-side round engine + the legacy import tooling have
-been removed; the round-and-advance contract now governs the desktop.
-
-```
-cmd/
-  shows-api/          HTTP server, runs in AKS (dumb store: /library + /sync)
-internal/
-  auth/               JWKS verifier + chi middleware for auth.romaine.life JWTs
-  store/              Cosmos SDK store layer (shows + watch_history; library/sync)
-  api/                chi routes, handlers, Prometheus metrics
-desktop-rs/           cargo workspace: the Rust client (mpv video composited
-                      under a transparent React overlay in one DirectComposition
-                      window) — the engine
-  core/               shows-core: pure, #![forbid(unsafe_code)], all the engine
+```text
+desktop-rs/           Cargo workspace
+  core/               shows-core; pure Rust, #![forbid(unsafe_code)]
     src/
-      ordering.rs     SHA-256 path ordering, bit-identical to the old Go server
-      roundlogic.rs   pure helpers (advance-set minus deferred, playlist parse)
-      scan.rs         scan a show's folder for episode files
-      replica.rs      local SQLite working copy (seed, mutate, dirty-track, LWW)
-      engine.rs       round/advance/defer engine over the replica
-      runner.rs       round-robin runner (round → queue → wait → advance + push)
-      apiclient.rs    shows.romaine.life client (get_library / post_sync + 401 refresh)
-      oauth.rs        user-login flow against auth.romaine.life (PKCE + loopback)
-      sync.rs         git-style sync: seed/push/connectivity (no polling)
-      model.rs        ⟂ replica/apiclient row/wire types
-      update.rs       latest-release check (GitHub Releases API)
-  desktop/            shows-desktop: the Windows shell (the only unsafe code lives here)
+      ordering.rs     SHA-256 path ordering
+      roundlogic.rs   round helpers and playlist parsing
+      scan.rs         folder scanning and episode discovery
+      replica.rs      local SQLite replica, mutations, dirty tracking, LWW merge
+      engine.rs       pure round/advance/defer engine
+      runner.rs       round-robin runner and local media cache orchestration
+      sync.rs         local/shared SQLite reconciliation
+      model.rs        persisted and sync row types
+      update.rs       GitHub Releases update check
+  desktop/            shows-desktop; Windows shell and the only unsafe code
     src/
-      main.rs         entry: single-instance guard, runner + control server wiring
-      compositor.rs   DirectComposition window + transparent WebView2 overlay
-                      over a D3D11 composition swapchain; input forwarding
-      gl.rs           WGL + WGL_NV_DX_interop2: mpv OpenGL render → shared D3D
-                      texture (the production video path; no ANGLE DLLs)
-      mpv.rs          libmpv FFI via libloading (vo=libmpv)
-      player.rs       libmpv handle wrapper + PlayerOps impl + event pump
-      webserver.rs    control server: serves the overlay + /status/stream live
-                      status, /status snapshots, /pause /skip /defer /seek
-                      /volume /sub /audio /sync-now /fullscreen
-                      /library/* /stats
-  frontend/           Vite + React + TS overlay (glimmung design-system tokens)
+      main.rs         process wiring and shared/local database configuration
+      compositor.rs   DirectComposition window and WebView2 overlay
+      gl.rs           libmpv OpenGL to shared D3D texture
+      mpv.rs          dynamically loaded libmpv FFI
+      player.rs       player wrapper and event pump
+      webserver.rs    localhost overlay/status/control server
+  frontend/           Vite, React, and TypeScript overlay
 docs/
-  feature-contracts/  durable invariant docs (round-and-advance, …)
-k8s/                  Helm chart (Deployment, Service, HTTPRoute, XListenerSet,
-                      Certificate, PodMonitor) — ArgoCD-synced
-tofu/                 shows-rg, shows-identity UAMI, Cosmos DB + role assignment
+  feature-contracts/  durable behavior and UI contracts
+scripts/              release installation and data-audit helpers
 ```
 
-## Bootstrap
-
-This repo was created by `infra-bootstrap`'s app module. Per-repo Azure identity, OIDC federated creds, ACR push, and tfstate access are provisioned there. Per-runtime resources (Cosmos database, runtime UAMI) are in `tofu/` here.
-
-Per the fleet convention:
-
-- **`tofu/`** — applied on push to main by `.github/workflows/tofu.yaml`. Creates `shows-rg`, the `shows-identity` UAMI federated to `system:serviceaccount:shows:shows`, the `shows` Cosmos SQL database, and the data-plane role assignment scoped to `dbs/shows`.
-- **`k8s/`** — Helm chart consumed by the ArgoCD `Application` defined in `infra-bootstrap/k8s/apps/shows.yaml`. ArgoCD auto-syncs on push.
-- **`.github/workflows/build-and-deploy.yaml`** — builds `cmd/shows-api`, pushes to `romainecr.azurecr.io/shows:<sha>`, bumps `k8s/values.yaml`, commits. ArgoCD picks up the new tag.
-
-The desktop app (`desktop-rs/`) is **not** deployed to AKS. `.github/workflows/build-desktop.yaml` cargo-builds it on a Windows runner, embeds the React dist, bundles `libmpv-2.dll` next to the exe, and publishes it as a GitHub Release.
-
-## Auth
-
-Every `/api/*` route requires an auth.romaine.life JWT with `role in {admin, user}`. Tokens are verified against the JWKS at `https://auth.romaine.life/api/auth/jwks` with required claims `["exp", "iat", "iss", "role"]` (mirrors `nelsong6/romaine-auth-py`).
-
-The desktop app uses the **user-login** path at `GET /api/auth/cli/user-login` (PKCE + loopback `redirect_uri`). If the user has no `.romaine.life` session cookie, auth.romaine.life bounces them through Microsoft/Google and returns; the server then redirects to the loopback with a one-time `?code=...`. The desktop POSTs `{grant_type: authorization_code, code, code_verifier, redirect_uri}` to `/api/auth/cli/user-token` and receives the user's own JWT (`role=user|admin`, no `purpose` claim — same shape the browser session would yield). The JWT never travels through the browser. Token caches at `%APPDATA%\shows\token.json`; on 401 the apiclient calls back into the oauth module's `ensure_token` for an in-place refresh.
-
-Library import is now in-app: the desktop scans a folder (`desktop-rs/core/src/scan.rs`) and creates the show locally, which syncs up via `/sync`. The old `cmd/shows-migrate` bulk-import tool and its bot-token CLI flow (`internal/device`) have been removed.
-
-## Cosmos store
-
-Two containers on `infra-cosmos-serverless` / `dbs/shows`:
-
-- **`shows`** — one doc per show, partitioned by `/playlist`. Episodes are embedded as a nested array; each `/advance` is a single point-write.
-- **`watch_history`** — append-only event log, partitioned by `/show_id`. Source of truth for the "took N days to watch" reveal.
-
-The runtime pod attaches to Cosmos via workload identity: `serviceaccount/shows:shows` ↔ `shows-identity` UAMI (federated cred in `tofu/identity.tf`) ↔ Cosmos data-plane `Built-in Data Contributor` role scoped to `dbs/shows` only.
+The root Go module and stale README descriptions are historical residue; do not infer a currently deployed Go API from them. Verify architecture against `desktop-rs/` and the feature contracts.
 
 ## Ordering invariant
 
-The deterministic-random round order is now computed **on the desktop** by `desktop-rs/core/src/ordering.rs` (the server no longer computes rounds):
+The deterministic round order is computed by `desktop-rs/core/src/ordering.rs`:
 
-```
+```text
 hash := SHA-256(UTF-8 bytes of: root_path + "\" + relative_path)
 order_value := uint32(first 4 hex chars of hash, parsed as base 16)
 shows in round are sorted by order_value ascending
 ```
 
-Bit-for-bit reproduces `Get-FileHash -InputStream` + `SubString(0,4)` + `[uint32]` from the legacy `play_ordered_show.ps1`. Locked by the in-file tests in `desktop-rs/core/src/engine.rs` (round selection/advance/defer) and `ordering.rs` (the SHA-256 path hashing). See [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md) for the invariants the round + advance pair satisfies — the contract the desktop engine now implements.
+This reproduces the legacy PowerShell ordering bit-for-bit. See `docs/feature-contracts/round-and-advance.md`; changes to round selection, advance, defer, previous, resume, queue persistence, or startup behavior must preserve that contract.
 
-## Migration source data
+## Shared database and concurrency
 
-Legacy state at `D:\Downloads\Group-Nelson\nelson.json` + the per-show JSONs it points at:
+Multiple computers may update the NAS database. Keep shared-database operations transactional, do not hold the local replica mutex during NAS I/O, and preserve the existing serialized sync orchestration. Failed NAS access must leave local dirty state recoverable for a later push.
 
-```json
-{
-  "Name": "Dr. Katz",
-  "Episodes": ["Dr. Katz S06\\Dr.Katz.S06E11.Big.TV.avi", ...],
-  "DateAdded": "1/29/2024 8:34:00 AM"
-}
-```
+Library import is in-app. Folder scanning derives backslash-joined `relative_path` values so the ordering hash remains stable.
 
-Episode paths were relative to the parent directory of the per-show JSON, joined with that parent to produce the absolute path stored as `episodes.relative_path` and the show's `root_path`. This one-time legacy import is done (the `cmd/shows-migrate` tool has been removed); new shows are now added in-app by scanning a folder (`desktop-rs/core/src/scan.rs`), which derives `relative_path` the same way (backslash-joined, to match the ordering hash).
+## Desktop status and controls
 
-## Observability
+The localhost control server exposes `GET /status/stream` as the React overlay's live SSE feed, `GET /status` as an on-demand snapshot, and the playback/library control routes in `desktop-rs/desktop/src/webserver.rs`. Sync status includes connectivity, pending row counts, the shared database path, and the retained startup-sync timeline.
 
-**Server side:** `shows_*` Prometheus metrics exposed at `/metrics` (no auth) on the AKS pod, scraped by the kube-prometheus-stack via `k8s/templates/podmonitor.yaml`. Catalog in [`docs/feature-contracts/round-and-advance.md`](docs/feature-contracts/round-and-advance.md). Grafana sees them in the `monitoring` namespace's dashboards.
+Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`.
 
-**Desktop side:** the running app's control server (localhost, ephemeral port logged at startup) serves `GET /status/stream` as the React overlay's live Server-Sent Events status feed, `GET /status` as an on-demand snapshot, plus `GET /shows` + `GET /health`. The overlay's `POST /pause` `/skip` `/defer` `/fullscreen` controls and library routes also use this same-origin server. Dev runs log to stderr; release builds (no console subsystem) append to `%APPDATA%\shows\shows.log`. The control surface lives in `desktop-rs/desktop/src/webserver.rs`.
+## New computer setup
 
-## Build & Local Testing
-
-The desktop app is built under `desktop-rs\target`, but the local test install
-lives at `D:\Downloads\shows\shows-desktop.exe`. Rebuilding does not update the
-test install path. Every release build that should be tested from the local
-install location must be copied over.
-
-1. Build the embedded React overlay:
+Map the NAS share as `S:`:
 
 ```powershell
-cd D:\repos\shows\desktop-rs\frontend
+New-PSDrive -Name S -PSProvider FileSystem -Root "\\192.168.50.41\files" -Persist
+```
+
+The library normally expects show roots under `S:\Group-Nelson`. See `docs/new-computer-setup.md` for sync and file-cache checks.
+
+## Build and local testing
+
+The frontend is embedded into the release executable. A release build is not ready for local testing until the installed executable has been replaced.
+
+```powershell
+cd desktop-rs\frontend
 npm run build
-```
 
-2. Build the release desktop binary:
-
-```powershell
-cd D:\repos\shows\desktop-rs
+cd ..
+cargo test --workspace
 cargo build --release -p shows-desktop
 ```
 
-3. Close the running desktop app, then replace the local test binary:
-
-> [!NOTE]
-> **AI Agents / Assistants:** You are encouraged to execute this step automatically on behalf of the user. The build process is considered incomplete until the executable is copied over. You can use `Stop-Process` or `taskkill` to forcefully close the running app, run the copy command below, and optionally restart the app for the user.
+The normal local test install is `D:\Downloads\shows\shows-desktop.exe`. After a successful release build, close the running app and copy the new executable:
 
 ```powershell
+Stop-Process -Name shows-desktop -Force -ErrorAction SilentlyContinue
 Copy-Item -Force `
-  D:\repos\shows\desktop-rs\target\release\shows-desktop.exe `
+  .\target\release\shows-desktop.exe `
   D:\Downloads\shows\shows-desktop.exe
 ```
 
-The frontend assets are embedded into `shows-desktop.exe`; do not copy the
-frontend directory for release testing.
+Use `scripts/test-install-release.ps1` when appropriate. Frontend assets are embedded; do not copy the frontend directory beside the executable.
 
-## Related
+## Release
 
-- `romaine-life/auth` — JWT issuer; CLI device flow contract this repo's auth depends on
-- `nelsong6/romaine-auth-py` — canonical JWT verifier (this repo's `internal/auth` is the Go port)
-- `romaine-life/glimmung` — design system reference (`design-system/colors_and_type.css`) + quality-timeframes / migration-policy / feature-contract patterns
-- `romaine-life/tank-operator` — PodMonitor + observability pattern
-- `romaine-life/infra-bootstrap` — the cluster + per-app Azure identity provisioning
-- `nelsong6/play_show` — the deprecated PowerShell predecessor this repo replaces
+`.github/workflows/build-desktop.yaml` builds on Windows, embeds the React distribution, bundles `libmpv-2.dll`, and publishes a GitHub Release. The desktop is not deployed to AKS.
