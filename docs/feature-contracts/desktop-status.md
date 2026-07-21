@@ -42,67 +42,17 @@ Each `round[]` item contains:
 - `sub_tracks`, `audio_tracks`
 - `sid`, `aid`
 
-## Sync
+## Database
 
-`sync` is present after the syncer is attached:
+`database` identifies the state authority:
 
-- `online`
-- `pending`
-- `pending_breakdown.shows`
-- `pending_breakdown.episodes`
-- `pending_breakdown.history`
-- `pending_breakdown.queue`
-- `last_error`
-- `shared_db_path`
+- `path`: configured NAS SQLite path.
+- `authoritative`: always `true`.
+- `revision`: monotonically increasing shared change counter.
 
-`pending` must equal the sum of `pending_breakdown`.
-
-## Startup Sync Timeline
-
-`startup_sync` is the retained, current-process account of the origin
-reconciliation started at launch. It is included in every `GET /status` and
-`GET /status/stream` snapshot so a frontend that connects after an early step
-still receives the complete timeline.
-
-- `state`: `running`, `succeeded`, or `degraded`. `degraded` means at least one
-  launch step failed (origin reconciliation or local file-cache preparation),
-  even when playback can continue from the usable local subset.
-- `started_at`: RFC 3339 timestamp for the launch reconciliation.
-- `finished_at`: RFC 3339 terminal timestamp, or `null` while running.
-- `elapsed_ms`: total terminal duration, or `null` while running. The frontend
-  derives a live elapsed value from `started_at`; the server does not poll just
-  to advance a clock.
-- `shared_db_path`: the configured durable-origin path.
-- `playlists`: playlists included in the reconciliation.
-- `events`: ordered structured progress records. Launch events already
-  published are retained; a later event never rewrites an earlier one. After
-  launch reaches a terminal state, later smart-moment pushes and manual syncs
-  are excluded from this launch-scoped trace.
-
-Each `events[]` record contains:
-
-- `seq`: monotonically increasing within this process.
-- `at`: RFC 3339 timestamp.
-- `stage`: a stable identifier such as `startup.plan`, `local-round.load`,
-  `origin.connect`, `origin.push`, `origin.pull`, `replica.merge`,
-  `origin.complete`, `file-cache.check`, or `startup.complete`.
-- `state`: `started`, `succeeded`, `skipped`, or `failed`.
-- `message`: human-readable statement of what the desktop is doing or learned.
-- `duration_ms`: completed-step duration, otherwise `null`.
-- `counts`: optional `shows`, `episodes`, `history`, `queue`, and `total`.
-  Whenever counts are present, `total` must equal the other four fields' sum.
-
-A potentially blocking origin operation publishes its `started` event before
-performing I/O and a terminal event afterward. This is the observability
-invariant that makes a cold or unreachable shared database distinguishable from
-local round loading and the media-file cache pass.
-
-`startup.complete` is server-generated and is always the final retained event.
-It is emitted only after both `origin.complete` and a terminal
-`local-round.load` event have arrived, regardless of which finishes first.
-Any startup-created round-queue push begins only after that local terminal
-event, so it is a later smart-moment operation and cannot leave an unmatched
-started event inside the frozen launch trace.
+`sync` and `startup_sync` are absent. A revision change is broadcast through the
+normal status stream so the frontend can refresh library reads after another
+computer commits an edit.
 
 ## File Sync
 
@@ -128,7 +78,7 @@ entry is already present in the local cache.
 
 - `error_kind`: currently `round_unplayable` for a round that produced no playable media; otherwise `null`.
 - `round_blocked`: true only while a round-unplayable error is active.
-- `alerts`: derived server-side from status and sync/file-sync state.
+- `alerts`: derived server-side from status and file-sync state.
 
 Any non-error phase patch must clear stale round error state by setting
 `error_kind: null` and `round_blocked: false`.
@@ -137,7 +87,7 @@ Any non-error phase patch must clear stale round error state by setting
 
 When `round_blocked` is true and `file_sync.problems` includes bad entries, the
 frontend may call `POST /round/remove-entry` for one or more `episode_id`s. The
-server removes those rows from `round_queue` and pushes sync.
+server removes those rows from the authoritative `round_queue`.
 
 The frontend must then call `POST /round/reload`. Reload interrupts the player,
 causing the runner to rebuild from the repaired `round_queue` without restarting

@@ -10,15 +10,12 @@ When extending a feature documented at `docs/feature-contracts/`, name the affec
 
 ## Architecture
 
-The Rust desktop is the engine. Round selection, advance, defer, resume, library management, and watch history run against a local SQLite replica at `%APPDATA%\shows\replica.db`.
-
-The durable origin is a shared SQLite database on the NAS, normally `S:\shows.db`. Each computer reconciles its local replica with that database through SQLite-to-SQLite sync:
+The Rust desktop is the engine. Round selection, advance, defer, resume, library management, and watch history run directly against the authoritative SQLite database on the NAS, normally `S:\shows.db`:
 
 - `SHOWS_SHARED_DB` overrides the shared database path.
-- `SHOWS_REPLICA` overrides the local replica path for safe throwaway runs.
-- Startup pulls shared changes and pushes dirty local rows.
-- Changes use last-write-wins timestamps; unsynced local rows remain dirty until a later successful push.
-- Playback uses the local replica and does not wait on NAS I/O once a playable local round exists.
+- There is no local database replica, dirty-row preference, or manual sync.
+- SQLite commit order is authoritative when multiple computers write.
+- Database triggers increment a shared revision; running apps watch it so externally committed edits refresh their status consumers.
 - The current round's media files are copied from the NAS to `D:\Downloads\Watching` before playback. `SHOWS_LOCAL_WATCHING_DIR` overrides that cache path.
 
 There is no Cosmos or web-API source of truth in the current implementation.
@@ -32,11 +29,10 @@ desktop-rs/           Cargo workspace
       ordering.rs     SHA-256 path ordering
       roundlogic.rs   round helpers and playlist parsing
       scan.rs         folder scanning and episode discovery
-      replica.rs      local SQLite replica, mutations, dirty tracking, LWW merge
+      replica.rs      authoritative SQLite schema, reads, and transactions
       engine.rs       pure round/advance/defer engine
       runner.rs       round-robin runner and local media cache orchestration
-      sync.rs         local/shared SQLite reconciliation
-      model.rs        persisted and sync row types
+      model.rs        persisted row types
       update.rs       GitHub Releases update check
   desktop/            shows-desktop; Windows shell and the only unsafe code
     src/
@@ -49,7 +45,7 @@ desktop-rs/           Cargo workspace
   frontend/           Vite, React, and TypeScript overlay
 docs/
   feature-contracts/  durable behavior and UI contracts
-scripts/              release installation and data-audit helpers
+scripts/              NAS channel publisher, launcher, release install, and audits
 ```
 
 The root Go module and stale README descriptions are historical residue; do not infer a currently deployed Go API from them. Verify architecture against `desktop-rs/` and the feature contracts.
@@ -68,13 +64,13 @@ This reproduces the legacy PowerShell ordering bit-for-bit. See `docs/feature-co
 
 ## Shared database and concurrency
 
-Multiple computers may update the NAS database. Keep shared-database operations transactional, do not hold the local replica mutex during NAS I/O, and preserve the existing serialized sync orchestration. Failed NAS access must leave local dirty state recoverable for a later push.
+Multiple computers may update the NAS database. Keep multi-statement mutations transactional and preserve last-commit-wins behavior. The local media cache is disposable and must never become a database authority. If the database is unreachable, fail explicitly rather than creating divergent local state.
 
 Library import is in-app. Folder scanning derives backslash-joined `relative_path` values so the ordering hash remains stable.
 
 ## Desktop status and controls
 
-The localhost control server exposes `GET /status/stream` as the React overlay's live SSE feed, `GET /status` as an on-demand snapshot, and the playback/library control routes in `desktop-rs/desktop/src/webserver.rs`. Sync status includes connectivity, pending row counts, the shared database path, and the retained startup-sync timeline.
+The localhost control server exposes `GET /status/stream` as the React overlay's live SSE feed, `GET /status` as an on-demand snapshot, and the playback/library control routes in `desktop-rs/desktop/src/webserver.rs`. Database status includes the authoritative path and shared revision.
 
 Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`.
 
@@ -86,11 +82,11 @@ Map the NAS share as `S:`:
 New-PSDrive -Name S -PSProvider FileSystem -Root "\\192.168.50.41\files" -Persist
 ```
 
-The library normally expects show roots under `S:\Group-Nelson`. See `docs/new-computer-setup.md` for sync and file-cache checks.
+The library normally expects show roots under `S:\Group-Nelson`. See `docs/new-computer-setup.md` for launcher, channel publishing, database, and file-cache checks.
 
 ## Build and local testing
 
-The frontend is embedded into the release executable. A release build is not ready for local testing until the installed executable has been replaced.
+The frontend is embedded into the release executable. Use the NAS publisher for cross-computer testing:
 
 ```powershell
 cd desktop-rs\frontend
@@ -99,6 +95,7 @@ npm run build
 cd ..
 cargo test --workspace
 cargo build --release -p shows-desktop
+..\scripts\publish-shows-channel.ps1 -Channel dev
 ```
 
 The normal local test install is `D:\Downloads\shows\shows-desktop.exe`. After a successful release build, close the running app and copy the new executable:
@@ -110,7 +107,7 @@ Copy-Item -Force `
   D:\Downloads\shows\shows-desktop.exe
 ```
 
-Use `scripts/test-install-release.ps1` when appropriate. Frontend assets are embedded; do not copy the frontend directory beside the executable.
+Use `scripts/test-install-release.ps1` for the legacy fixed-path smoke test when appropriate. The normal cross-computer path is the versioned launcher governed by `docs/feature-contracts/desktop-distribution.md`.
 
 ## Release
 

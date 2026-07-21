@@ -57,49 +57,6 @@ export type Playback = {
   aid: number | string | null;
 };
 
-// Offline-first sync state: are we reaching the server, and how many local
-// changes are queued to push (the git "ahead" count).
-export type SyncState = {
-  online: boolean;
-  pending: number;
-  pending_breakdown?: {
-    shows: number;
-    episodes: number;
-    history: number;
-    queue: number;
-  };
-  last_error?: string | null;
-  shared_db_path?: string | null;
-};
-
-export type StartupSyncCounts = {
-  shows: number;
-  episodes: number;
-  history: number;
-  queue: number;
-  total: number;
-};
-
-export type StartupSyncEvent = {
-  seq: number;
-  at: string;
-  stage: string;
-  state: 'started' | 'succeeded' | 'skipped' | 'failed';
-  message: string;
-  duration_ms?: number | null;
-  counts?: StartupSyncCounts | null;
-};
-
-export type StartupSyncStatus = {
-  state: 'running' | 'succeeded' | 'degraded';
-  started_at: string;
-  finished_at?: string | null;
-  elapsed_ms?: number | null;
-  shared_db_path?: string | null;
-  playlists: string[];
-  events: StartupSyncEvent[];
-};
-
 export type StatusAlert = {
   level: 'danger' | 'warning' | 'info';
   title: string;
@@ -143,8 +100,11 @@ export type Status = {
   round_id?: number | null;
   last_advance?: AdvanceResult;
   playback?: Playback;
-  sync?: SyncState;
-  startup_sync?: StartupSyncStatus;
+  database?: {
+    path?: string;
+    authoritative: boolean;
+    revision: number;
+  };
   file_sync?: FileSyncStatus;
   alerts?: StatusAlert[];
   error_kind?: 'round_unplayable' | string;
@@ -319,10 +279,6 @@ export async function setAudio(aid: number | string): Promise<ControlResult> {
 }
 
 // Manual "check connectivity" / reconcile — push queued changes + pull.
-export async function syncNow(): Promise<ControlResult> {
-  return postControl('/sync-now');
-}
-
 export async function removeRoundEntry(episodeId: string): Promise<ControlResult> {
   return postControl('/round/remove-entry', {episode_id: episodeId});
 }
@@ -331,7 +287,7 @@ export async function reloadRound(): Promise<ControlResult> {
   return postControl('/round/reload');
 }
 
-// ── library management (desktop scans the dir, the change syncs up) ──
+// ── library management (desktop scans the dir and commits to the NAS DB) ──
 export async function addShow(
   name: string,
   root_path: string,
