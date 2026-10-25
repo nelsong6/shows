@@ -2,11 +2,15 @@
 
 ## NAS Mapping
 
-Map the NAS file share as `S:`:
+Map the NAS file share as `S:` by hostname, never by IP:
 
 ```powershell
-New-PSDrive -Name S -PSProvider FileSystem -Root "\\192.168.50.41\files" -Persist
+New-PSDrive -Name S -PSProvider FileSystem -Root "\\NelsonNAS\files" -Persist
 ```
+
+A mapping to a literal IP dies if the NAS's address ever moves: `net use`
+reports `S:` as `Unavailable`, and the app refuses to start because it cannot
+open `S:\shows.db`.
 
 The library expects show roots under `S:\Group-Nelson` unless a show row points
 elsewhere.

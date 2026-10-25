@@ -76,10 +76,10 @@ Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`.
 
 ## New computer setup
 
-Map the NAS share as `S:`:
+Map the NAS share as `S:` by hostname:
 
 ```powershell
-New-PSDrive -Name S -PSProvider FileSystem -Root "\\192.168.50.41\files" -Persist
+New-PSDrive -Name S -PSProvider FileSystem -Root "\\NelsonNAS\files" -Persist
 ```
 
 The library normally expects show roots under `S:\Group-Nelson`. See `docs/new-computer-setup.md` for launcher, channel publishing, database, and file-cache checks.
