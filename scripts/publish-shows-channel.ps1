@@ -3,6 +3,7 @@ param(
   [string]$Channel = "dev",
   [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
   [string]$NasRoot = "S:\shows-app",
+  [string]$Release,
   [string]$LibmpvPath = "D:\Downloads\shows\libmpv-2.dll",
   [string]$Version,
   [switch]$SkipBuild
@@ -10,24 +11,39 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $Version) {
-  $sha = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()
-  if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "Could not determine git revision" }
-  $Version = if ($Channel -eq "dev") {
-    "$sha-$(Get-Date -Format 'yyyyMMddHHmmss')"
-  } else {
-    $sha
+$launcher = Join-Path $PSScriptRoot "launch-shows.ps1"
+$installer = Join-Path $PSScriptRoot "install-shows-launcher.ps1"
+$download = $null
+
+if ($Channel -eq "stable") {
+  # Stable is the bundle CI built and released, never a local build.
+  if ($Version -or $SkipBuild) { throw "-Version and -SkipBuild apply to dev; stable publishes a GitHub release" }
+  if (-not $Release) {
+    $Release = gh release view --repo nelsong6/shows --json tagName --jq .tagName
+    if ($LASTEXITCODE -ne 0 -or -not $Release) { throw "Could not determine the latest release" }
   }
+  if ($Release -notmatch '^desktop-([0-9a-f]+)$') { throw "Not a desktop release tag: $Release" }
+  $Version = $Matches[1]
+
+  $download = Join-Path ([IO.Path]::GetTempPath()) "shows-release-$([guid]::NewGuid().ToString('N'))"
+  gh release download $Release --repo nelsong6/shows --pattern shows-desktop-windows-amd64.zip --dir $download
+  if ($LASTEXITCODE -ne 0) { throw "Could not download release $Release" }
+  Expand-Archive -LiteralPath (Join-Path $download "shows-desktop-windows-amd64.zip") -DestinationPath (Join-Path $download "bundle")
+  $exe = Join-Path $download "bundle\shows-desktop.exe"
+  $LibmpvPath = Join-Path $download "bundle\libmpv-2.dll"
+} else {
+  if (-not $Version) {
+    $sha = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "Could not determine git revision" }
+    $Version = "$sha-$(Get-Date -Format 'yyyyMMddHHmmss')"
+  }
+  $workspace = Join-Path $RepoRoot "desktop-rs"
+  $frontend = Join-Path $workspace "frontend"
+  $exe = Join-Path $workspace "target\release\shows-desktop.exe"
 }
 if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid version: $Version" }
 
-$workspace = Join-Path $RepoRoot "desktop-rs"
-$frontend = Join-Path $workspace "frontend"
-$exe = Join-Path $workspace "target\release\shows-desktop.exe"
-$launcher = Join-Path $PSScriptRoot "launch-shows.ps1"
-$installer = Join-Path $PSScriptRoot "install-shows-launcher.ps1"
-
-if (-not $SkipBuild) {
+if ($Channel -eq "dev" -and -not $SkipBuild) {
   Push-Location $frontend
   try { npm run build; if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" } }
   finally { Pop-Location }
@@ -100,6 +116,7 @@ try {
   Move-Item -Force -LiteralPath $installerTemp -Destination (Join-Path $NasRoot "install-shows-launcher.ps1")
 } finally {
   if (Test-Path -LiteralPath $stage) { Remove-Item -Recurse -Force -LiteralPath $stage }
+  if ($download) { Remove-Item -Recurse -Force -LiteralPath $download }
 }
 
 Write-Host "Published shows $Version to $Channel at $NasRoot"

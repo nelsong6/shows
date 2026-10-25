@@ -12,7 +12,9 @@ without running an executable from the network share.
   bundle into `versions`. Only afterward does it replace the channel manifest.
 - **P3. Explicit channels.** `stable` and `dev` have independent manifests.
   Computers opt into one channel through their shortcut.
-- **P4. Reproducible identity.** Stable builds use a source revision; dev builds
+- **P4. Reproducible identity.** Stable publishes the bundle CI attached to a
+  `desktop-<sha>` GitHub release, versioned by that SHA, so the stable channel
+  only ever carries a build CI produced from `main`. Dev builds are local and
   add a publication timestamp so repeated builds of one revision remain
   immutable.
 

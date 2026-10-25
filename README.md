@@ -24,9 +24,10 @@ The NAS also hosts immutable desktop builds and two explicit update channels:
 - `stable` for normal use
 - `dev` for testing a local development build on another computer
 
-Publish a build from the repository root:
+Publish from the repository root. `stable` takes the bundle CI attached to the latest GitHub release; `dev` builds locally:
 
 ```powershell
+.\scripts\publish-shows-channel.ps1 -Channel stable
 .\scripts\publish-shows-channel.ps1 -Channel dev
 ```
 
