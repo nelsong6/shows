@@ -34,16 +34,23 @@ builds. The shortcut checks the channel manifest before every launch, verifies
 the bundle hashes, installs it into a new versioned local directory, retains the
 previous version for rollback, and starts the local executable.
 
-## Publish a development build
+## Publish a build
 
-From the repository computer:
+Advance the stable channel to CI's latest release (or name one with
+`-Release desktop-<sha>`); nothing is compiled locally:
+
+```powershell
+.\scripts\publish-shows-channel.ps1 -Channel stable
+```
+
+Publish a local development build to the dev channel:
 
 ```powershell
 .\scripts\publish-shows-channel.ps1 -Channel dev
 ```
 
-Use `-Channel stable` to advance the stable NAS channel. A channel manifest is
-replaced only after the complete versioned bundle has reached the NAS.
+A channel manifest is replaced only after the complete versioned bundle has
+reached the NAS.
 
 ## Database health check
 

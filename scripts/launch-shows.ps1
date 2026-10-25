@@ -18,7 +18,8 @@ $state = if (Test-Path -LiteralPath $statePath) {
 
 function Save-State([object]$nextState) {
   $temp = "$statePath.$([guid]::NewGuid().ToString('N')).tmp"
-  $nextState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temp -Encoding utf8NoBOM
+  # The shortcut runs Windows PowerShell 5.1, which has no utf8NoBOM encoding.
+  [IO.File]::WriteAllText($temp, ($nextState | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))
   Move-Item -Force -LiteralPath $temp -Destination $statePath
 }
 
