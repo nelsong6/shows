@@ -121,7 +121,6 @@ pub trait PlayerOps: Send + Sync {
     fn wait_for_round_end(&self, stop: &StopFlag) -> Result<(), PlayerShutdown>;
 }
 
-
 #[derive(Debug, Clone)]
 pub struct RoundEntry {
     pub show_id: String,
@@ -539,17 +538,7 @@ impl Runner {
             .position(|(_, s_id, _, _, _, _, _)| s_id == show_id);
 
         if let Some(idx) = existing_pos {
-            // Reset previous playing episode to pending if it was playing in the DB
-            let old_pos = self.inner.lock().unwrap().pos;
-            if old_pos < filtered_raw.len() && old_pos != idx {
-                let (old_ep_id, _, _, old_state, old_playlist, _, _) = filtered_raw[old_pos];
-                if old_state == "playing" {
-                    self.replica
-                        .update_round_entry_state(old_ep_id, "pending", old_playlist);
-                }
-            }
-
-            // Update local state and tell the player to navigate
+            // The selected file's load moves `playing` to it (M3).
             {
                 let mut inner = self.inner.lock().unwrap();
                 inner.pos = idx;
@@ -599,7 +588,7 @@ impl Runner {
             inner.loaded_any = true;
         }
         self.replica
-            .update_round_entry_state(&cur.episode_id, "playing", &cur.playlist);
+            .set_round_playing(&cur.episode_id, &self.playlists);
         let prefs = self.replica.playback_preferences(&cur.episode_id);
         if let Some(sid) = prefs.subtitle_track.as_deref() {
             self.player.set_sub(sid);
@@ -647,6 +636,7 @@ impl Runner {
     fn load_round_from_db(&self) -> (Vec<RoundEntry>, usize) {
         let raw = self.replica.get_round_queue();
         let mut round = Vec::new();
+        let mut playing_pos = None;
         let mut first_pending_pos = None;
 
         for (ep_id, show_id, play_order, state, playlist, _updated_at, _dirty) in raw {
@@ -676,15 +666,17 @@ impl Runner {
                 position: ep.position,
             };
 
-            if state == "pending" || state == "playing" {
-                if first_pending_pos.is_none() {
-                    first_pending_pos = Some(round.len());
-                }
+            if state == "playing" {
+                playing_pos = Some(round.len());
+            } else if state == "pending" && first_pending_pos.is_none() {
+                first_pending_pos = Some(round.len());
             }
             round.push(entry);
         }
 
-        match first_pending_pos {
+        // Resume where playback last was, even on an already-watched episode;
+        // a round with nothing playing starts at its first pending entry.
+        match playing_pos.or(first_pending_pos) {
             Some(pos) => (round, pos),
             None => (vec![], 0),
         }
@@ -1725,6 +1717,7 @@ mod tests {
         let outcome = run.play_show(&s2.id);
         assert!(outcome.ok());
         assert_eq!(outcome.status(), "playing_selected_show");
+        run.on_file_loaded();
 
         // Verify that:
         // 1. inner.pos is now idx_c
@@ -1736,7 +1729,47 @@ mod tests {
         assert_eq!(q.len(), 2);
         assert_eq!(q[0].0, round[0].episode_id);
         assert_eq!(q[1].0, round[1].episode_id);
-        // 4. s1's "a" state was reset from "playing" to "pending"
+        // 4. "playing" moved from s1's "a" (back to "pending") to s2's "c"
         assert_eq!(q[idx_a].3, "pending");
+        assert_eq!(q[idx_c].3, "playing");
+    }
+
+    #[test]
+    fn restart_resumes_at_last_loaded_entry_after_revisiting_a_finished_one() {
+        let r = replica(&[
+            show("s1", "nelson", &["a", "b"]),
+            show("s2", "nelson", &["c"]),
+        ]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(
+            r.clone(),
+            p,
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        let round = run.compute_and_save_new_round();
+        run.inner.lock().unwrap().round = Some(round.clone());
+        let idx_a = round.iter().position(|e| e.episode_id == "a").unwrap();
+        let idx_c = round.iter().position(|e| e.episode_id == "c").unwrap();
+
+        // Finish "a", step back to it, then move on to "c" without finishing.
+        play_sim(&run, idx_a);
+        run.set_pos(idx_a);
+        run.on_file_loaded();
+        run.set_pos(idx_c);
+        run.on_file_loaded();
+
+        let (_, pos) = run.load_round_from_db();
+        assert_eq!(pos, idx_c);
+        assert!(watched(&r, "a").is_some());
+        assert!(watched(&r, "c").is_none());
+
+        // Stepping back to the finished "a" is where playback last was.
+        run.set_pos(idx_a);
+        run.on_file_loaded();
+        let (_, pos) = run.load_round_from_db();
+        assert_eq!(pos, idx_a);
+        assert!(watched(&r, "a").is_some());
     }
 }

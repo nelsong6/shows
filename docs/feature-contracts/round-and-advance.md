@@ -114,7 +114,7 @@ Invariants:
 
 - **M1. Round queue contents are immutable once decided.** The list of shows and episodes in a round, along with their relative play positions, is fixed at the start of the round. Clicking "Play Show" never prepends, inserts, or restructures the database queue.
 - **M2. Manual play is pure navigation.** Selecting a show to play simply moves the player's active playlist position directly to the show's stable index in the player (`playlist-pos`).
-- **M3. State resetting on navigation.** To prevent state inconsistencies, when the player jumps to the new episode's index, the database state of the previously playing episode is reset from `"playing"` to `"pending"` (so that the app does not incorrectly resume from the interrupted episode upon restart).
+- **M3. One entry is playing.** A round has at most one `"playing"` entry per playlist: the episode whose file loaded last, however playback got there (natural advance, skip, previous, defer or Play Show). A file load moves `"playing"` to its entry in one transaction; the entry it leaves returns to `"watched"` if its episode is watched, otherwise `"pending"`. A partial unique index on `round_queue` enforces it. Startup resumes at the `"playing"` entry, even when that episode is already watched, and falls back to the first `"pending"` entry. Watched status itself is untouched by navigation.
 
 ## Cross-playlist rounds
 
