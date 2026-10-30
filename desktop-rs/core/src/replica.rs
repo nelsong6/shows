@@ -108,8 +108,61 @@ CREATE TRIGGER IF NOT EXISTS preferences_revision_delete AFTER DELETE ON episode
 END;
 ";
 
+/// A round has at most one now-playing entry per playlist (contract M3).
+const ONE_PLAYING_INDEX: &str = "round_queue_one_playing";
+
+/// The state a demoted `playing` entry returns to: the episode's own watched
+/// status decides, so a revisited finished episode goes back to `watched`.
+const DEMOTED_STATE: &str = "CASE WHEN EXISTS(SELECT 1 FROM episodes e \
+     WHERE e.id=round_queue.episode_id AND e.watched_at IS NOT NULL) \
+     THEN 'watched' ELSE 'pending' END";
+
 fn now() -> String {
     chrono::Utc::now().to_rfc3339()
+}
+
+/// Databases written before the index existed can hold several `playing`
+/// entries per playlist. Keep the one whose episode was updated last (the
+/// latest resume save) and demote the rest, then create the index.
+fn ensure_one_playing_index(conn: &mut Connection) -> Result<(), rusqlite::Error> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
+        params![ONE_PLAYING_INDEX],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        let keepers: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT q.playlist, q.episode_id FROM round_queue q \
+                 LEFT JOIN episodes e ON e.id=q.episode_id \
+                 WHERE q.state='playing' \
+                 ORDER BY q.playlist, e.updated_at DESC, q.play_order DESC",
+            )?;
+            let rows: Vec<(String, String)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            let mut seen = HashSet::new();
+            rows.into_iter()
+                .filter(|(playlist, _)| seen.insert(playlist.clone()))
+                .map(|(_, episode_id)| episode_id)
+                .collect()
+        };
+        let marks = vec!["?"; keepers.len()].join(",");
+        let keep = if keepers.is_empty() {
+            String::new()
+        } else {
+            format!(" AND episode_id NOT IN ({marks})")
+        };
+        tx.execute(
+            &format!("UPDATE round_queue SET state={DEMOTED_STATE} WHERE state='playing'{keep}"),
+            params_from_iter(keepers.iter()),
+        )?;
+        tx.execute_batch(&format!(
+            "CREATE UNIQUE INDEX {ONE_PLAYING_INDEX} ON round_queue(playlist) WHERE state='playing'"
+        ))?;
+    }
+    tx.commit()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -128,9 +181,10 @@ impl Replica {
     }
 
     pub fn try_new(path: &str) -> Result<Replica, rusqlite::Error> {
-        let conn = Connection::open(path)?;
+        let mut conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(15))?;
         conn.execute_batch(SCHEMA)?;
+        ensure_one_playing_index(&mut conn)?;
         Ok(Replica {
             db: Mutex::new(conn),
         })
@@ -684,6 +738,44 @@ impl Replica {
         )
         .expect("stamp playlist queue");
         tx.commit().expect("commit update_round_entry_state tx");
+    }
+
+    /// Make `episode_id` the one `playing` entry (M3): the entry it replaces in
+    /// any of `playlists` returns to `watched` or `pending` by its episode's
+    /// watched status, in the same transaction.
+    pub fn set_round_playing(&self, episode_id: &str, playlists: &[String]) {
+        let now = now();
+        let mut conn = self.db.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .expect("begin set_round_playing tx");
+        let marks = (3..playlists.len() + 3)
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut args: Vec<&str> = vec![now.as_str(), episode_id];
+        args.extend(playlists.iter().map(String::as_str));
+        tx.execute(
+            &format!(
+                "UPDATE round_queue SET state={DEMOTED_STATE}, updated_at=?1, dirty=0 \
+                 WHERE state='playing' AND episode_id<>?2 AND playlist IN ({marks})"
+            ),
+            params_from_iter(args.iter()),
+        )
+        .expect("demote playing round entry");
+        tx.execute(
+            "UPDATE round_queue SET state='playing', updated_at=?1, dirty=0 WHERE episode_id=?2",
+            params![now, episode_id],
+        )
+        .expect("set playing round entry");
+        for playlist in playlists {
+            tx.execute(
+                "UPDATE round_queue SET updated_at=?1, dirty=0 WHERE playlist=?2",
+                params![now, playlist],
+            )
+            .expect("stamp playlist queue");
+        }
+        tx.commit().expect("commit set_round_playing tx");
     }
 
     pub fn remove_round_entry(&self, episode_id: &str) -> Option<(String, String)> {
@@ -1299,5 +1391,102 @@ mod tests {
             Some(("s2".to_string(), "nelson".to_string()))
         );
         assert!(r.get_round_queue().is_empty());
+    }
+
+    fn queue_states(r: &Replica) -> Vec<(String, String)> {
+        r.get_round_queue()
+            .into_iter()
+            .map(|(episode_id, _, _, state, ..)| (episode_id, state))
+            .collect()
+    }
+
+    fn queue(r: &Replica, states: &[(&str, &str, &str)]) {
+        let entries: Vec<_> = states
+            .iter()
+            .enumerate()
+            .map(|(i, (ep, show, state))| {
+                (
+                    ep.to_string(),
+                    show.to_string(),
+                    i as i32,
+                    state.to_string(),
+                    "nelson".to_string(),
+                )
+            })
+            .collect();
+        r.save_round_queue(&entries, T0);
+    }
+
+    #[test]
+    fn set_round_playing_keeps_one_playing_and_restores_watched() {
+        let r = Replica::new(":memory:");
+        seed(&r);
+        queue(&r, &[("a", "s1", "pending"), ("c", "s2", "pending")]);
+        let playlists = ["nelson".to_string()];
+
+        r.set_round_playing("a", &playlists);
+        r.advance(&[("s1".into(), "a".into())]);
+        // Revisit the finished episode, then move on.
+        r.set_round_playing("a", &playlists);
+        r.set_round_playing("c", &playlists);
+
+        assert_eq!(
+            queue_states(&r),
+            vec![
+                ("a".into(), "watched".into()),
+                ("c".into(), "playing".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn second_playing_entry_is_rejected() {
+        let r = Replica::new(":memory:");
+        seed(&r);
+        queue(&r, &[("a", "s1", "playing"), ("c", "s2", "pending")]);
+
+        let conn = r.db.lock().unwrap();
+        assert!(
+            conn.execute(
+                "UPDATE round_queue SET state='playing' WHERE episode_id='c'",
+                []
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn opening_repairs_several_playing_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shows.db");
+        {
+            // A database from before the index: three entries left `playing`.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch(
+                "INSERT INTO shows(id,playlist,name,root_path,updated_at) VALUES
+                   ('s1','nelson','S1','D:\\A','t'),('s2','nelson','S2','D:\\B','t');
+                 INSERT INTO episodes(id,show_id,relative_path,position,watched_at,updated_at) VALUES
+                   ('a','s1','a.mkv',0,'2026-10-13','2026-10-17'),
+                   ('b','s1','b.mkv',1,NULL,'2026-10-14'),
+                   ('c','s2','c.mkv',0,NULL,'2026-10-24');
+                 INSERT INTO round_queue(episode_id,show_id,play_order,state,playlist,updated_at) VALUES
+                   ('a','s1',0,'playing','nelson','t'),
+                   ('b','s1',1,'playing','nelson','t'),
+                   ('c','s2',2,'playing','nelson','t');",
+            )
+            .unwrap();
+        }
+
+        let r = Replica::new(&path.to_string_lossy());
+
+        assert_eq!(
+            queue_states(&r),
+            vec![
+                ("a".into(), "watched".into()),
+                ("b".into(), "pending".into()),
+                ("c".into(), "playing".into()),
+            ]
+        );
     }
 }
