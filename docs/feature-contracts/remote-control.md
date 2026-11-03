@@ -70,6 +70,23 @@ round. The target owns playback and all authoritative NAS transactions.
   seconds. `r` explicitly reconnects with a fresh agent and replays no command.
   Quitting tears down the owned SSH child and leaves TV playback running.
 
+- **C6. Opt-in video view.** `v` and the fzt palette switch between the round
+  list and an ASCII video preview. The target alone reads its already-rendered
+  GPU video surface, downscaling to 160×90 before CPU readback. No extra decoder,
+  filesystem capture, NAS read or playback mutation is introduced. The native
+  loopback-only `GET /remote/preview` route rejects browser Origin headers;
+  the SSH agent carries a bounded `preview` read through the existing protocol.
+  Successful captures are shared across clients for 250 ms, and concurrent
+  capture requests fail explicitly instead of queuing. The UI has at most one
+  read outstanding, requests no more than four per second, backs off on errors,
+  and stops requesting when the view is off or the palette owns the terminal.
+  The UI hides frames after two seconds, reports loading/unavailable/disconnected
+  states, and keeps playback results separate from preview results. Hidden or
+  minimized target windows report unavailability instead of stale video. All
+  waits for a window reply time out after 500 ms; no request is
+  replayed as a playback action. Terminal sizing preserves the source surface's
+  aspect ratio and validates dimensions and printable ASCII before rendering.
+
 ## Distribution and evidence
 
 The executable belongs to the same immutable, hash-verified channel bundle as

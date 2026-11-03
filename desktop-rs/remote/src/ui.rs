@@ -8,6 +8,7 @@ use ratatui::{
     widgets::{Block, Gauge, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::Value;
+use shows_control::preview::{INTERVAL, VideoPreview};
 use shows_control::{Command, Frame};
 
 use crate::{
@@ -23,6 +24,11 @@ struct Model {
     selected: usize,
     notice: String,
     pending: Option<(u64, Instant)>,
+    visualizer: bool,
+    preview: Option<(VideoPreview, Instant)>,
+    preview_pending: Option<(u64, Instant)>,
+    preview_attempt: Option<Instant>,
+    preview_error: Option<String>,
 }
 
 impl Model {
@@ -33,12 +39,19 @@ impl Model {
             selected: 0,
             notice: "Connecting to the running Shows instance…".into(),
             pending: Some((id, Instant::now())),
+            visualizer: false,
+            preview: None,
+            preview_pending: None,
+            preview_attempt: None,
+            preview_error: None,
         }
     }
 
     fn disconnect(&mut self, message: String) {
         self.connected = false;
         self.pending = None;
+        self.preview = None;
+        self.preview_pending = None;
         self.notice =
             format!("Disconnected: {message}  Press r to reconnect; commands are never replayed.");
     }
@@ -53,6 +66,26 @@ impl Model {
                 self.connected = true;
                 self.status = status;
                 self.selected = self.selected.min(self.round_len().saturating_sub(1));
+            }
+            Frame::Reply { id, result } if self.preview_pending.is_some_and(|p| p.0 == id) => {
+                self.preview_pending = None;
+                if self.visualizer {
+                    match result.and_then(|value| {
+                        let frame: VideoPreview = serde_json::from_value(value)
+                            .map_err(|e| format!("Invalid video preview: {e}"))?;
+                        frame.validate()?;
+                        Ok(frame)
+                    }) {
+                        Ok(frame) => {
+                            self.preview = Some((frame, Instant::now()));
+                            self.preview_error = None;
+                        }
+                        Err(error) => {
+                            self.preview = None;
+                            self.preview_error = Some(error);
+                        }
+                    }
+                }
             }
             Frame::Reply { id, result } if self.pending.is_some_and(|p| p.0 == id) => {
                 self.pending = None;
@@ -71,6 +104,44 @@ impl Model {
 
     fn round_len(&self) -> usize {
         self.status["round"].as_array().map_or(0, Vec::len)
+    }
+
+    fn toggle_visualizer(&mut self) {
+        self.visualizer = !self.visualizer;
+        self.preview = None;
+        self.preview_error = None;
+        self.preview_attempt = None;
+    }
+
+    fn request_preview(&mut self, session: &mut Session) {
+        if self
+            .preview_pending
+            .is_some_and(|p| p.1.elapsed() > Duration::from_secs(2))
+        {
+            // Keep the outstanding id until its reply arrives; never queue another read behind it.
+            self.preview = None;
+            self.preview_error =
+                Some("Video preview timed out; playback controls remain available".into());
+        }
+        let interval = if self.preview_error.is_some() {
+            Duration::from_secs(2)
+        } else {
+            INTERVAL
+        };
+        if self.visualizer
+            && self.connected
+            && self.pending.is_none()
+            && self.preview_pending.is_none()
+            && self
+                .preview_attempt
+                .is_none_or(|at| at.elapsed() >= interval)
+        {
+            self.preview_attempt = Some(Instant::now());
+            match session.send(Command::Preview {}) {
+                Ok(id) => self.preview_pending = Some((id, Instant::now())),
+                Err(error) => self.disconnect(error),
+            }
+        }
     }
 
     fn ready(&self) -> bool {
@@ -170,33 +241,60 @@ fn draw(frame: &mut TerminalFrame, model: &Model, target: &str) {
             .gauge_style(Style::default().fg(color)),
         areas[1],
     );
-    let pos = model.status["round_pos"].as_u64().unwrap_or(0) as usize;
-    let items: Vec<ListItem> = model.status["round"]
-        .as_array()
-        .map(|round| {
-            round
-                .iter()
-                .enumerate()
-                .map(|(i, entry)| {
-                    ListItem::new(format!(
-                        "{} {:>2}. {}",
-                        if i == pos { ">" } else { " " },
-                        i + 1,
-                        text(&entry["show_name"])
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let list = List::new(items)
-        .block(Block::bordered().title(" Target's current round · ↑↓ select · Enter play "))
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    let mut selection = ListState::default().with_selected(if model.round_len() > 0 {
-        Some(model.selected)
+    if model.visualizer {
+        let block = Block::bordered().title(" ASCII video · v playlist ");
+        let mut area = block.inner(areas[2]);
+        frame.render_widget(block, areas[2]);
+        let lines = if !model.connected {
+            vec!["Disconnected — press r to reconnect".into()]
+        } else if let Some(error) = model.preview_error.as_ref() {
+            vec![format!("Video preview unavailable: {error}")]
+        } else if let Some((preview, at)) = model.preview.as_ref() {
+            if at.elapsed() > Duration::from_secs(2) {
+                vec!["Waiting for a fresh video frame…".into()]
+            } else {
+                preview.fit(area.width, area.height)
+            }
+        } else {
+            vec!["Loading video preview…".into()]
+        };
+        area.y += area.height.saturating_sub(lines.len() as u16) / 2;
+        area.height = area.height.min(lines.len() as u16);
+        frame.render_widget(
+            Paragraph::new(lines.join("\n"))
+                .alignment(ratatui::layout::Alignment::Center)
+                .style(Style::default().fg(Color::White).bg(Color::Black)),
+            area,
+        );
     } else {
-        None
-    });
-    frame.render_stateful_widget(list, areas[2], &mut selection);
+        let pos = model.status["round_pos"].as_u64().unwrap_or(0) as usize;
+        let items: Vec<ListItem> = model.status["round"]
+            .as_array()
+            .map(|round| {
+                round
+                    .iter()
+                    .enumerate()
+                    .map(|(i, entry)| {
+                        ListItem::new(format!(
+                            "{} {:>2}. {}",
+                            if i == pos { ">" } else { " " },
+                            i + 1,
+                            text(&entry["show_name"])
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let list = List::new(items)
+            .block(Block::bordered().title(" Target's current round · ↑↓ select · Enter play "))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        let mut selection = ListState::default().with_selected(if model.round_len() > 0 {
+            Some(model.selected)
+        } else {
+            None
+        });
+        frame.render_stateful_widget(list, areas[2], &mut selection);
+    }
     let alerts = model.status["alerts"]
         .as_array()
         .map(|alerts| {
@@ -228,12 +326,22 @@ fn draw(frame: &mut TerminalFrame, model: &Model, target: &str) {
             .style(Style::default().fg(color)),
         areas[3],
     );
-    frame.render_widget(Paragraph::new("/ commands · f fullscreen · Space play/pause · n skip (marks watched)\nb previous · d defer · ←→ seek 10s · +/- volume · r reconnect · q quit")
+    frame.render_widget(Paragraph::new("/ commands · v video/playlist · f fullscreen · Space play/pause\nn skip (marks watched) · b previous · d defer · ←→ seek · +/- volume · r reconnect · q quit")
         .wrap(Wrap { trim: true }), areas[4]);
 }
 
 fn palette(model: &Model) -> Result<Option<String>, String> {
     let mut choices = vec![
+        Choice {
+            id: "visualizer".into(),
+            name: if model.visualizer {
+                "Show playlist"
+            } else {
+                "Show ASCII video"
+            }
+            .into(),
+            description: "Switch the remote's view; leave TV playback unchanged".into(),
+        },
         Choice {
             id: "switch".into(),
             name: "Change instance".into(),
@@ -346,6 +454,9 @@ pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Re
                 model.disconnect("Response timed out. A sent command's outcome may be unknown; inspect status before retrying.".into());
                 connection.take();
             }
+            if let Some(session) = connection.as_mut() {
+                model.request_preview(session);
+            }
             terminal
                 .draw(|frame| draw(frame, &model, if local { "this PC" } else { target }))
                 .map_err(|e| e.to_string())?;
@@ -389,6 +500,10 @@ pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Re
                 match selected {
                     Ok(Some(action)) if action == "switch" => return Ok(true),
                     Ok(Some(action)) if action == "quit" => return Ok(false),
+                    Ok(Some(action)) if action == "visualizer" => {
+                        model.toggle_visualizer();
+                        continue;
+                    }
                     Ok(Some(action)) if action == "reconnect" => {
                         model.disconnect("Reconnecting".into());
                         code = KeyCode::Char('r');
@@ -402,10 +517,14 @@ pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Re
                 }
             }
             match code {
-                KeyCode::Down => {
+                KeyCode::Char('v') => model.toggle_visualizer(),
+                KeyCode::Enter if model.visualizer && selected_command.is_none() => (),
+                KeyCode::Down if !model.visualizer => {
                     model.selected = (model.selected + 1).min(model.round_len().saturating_sub(1))
                 }
-                KeyCode::Up => model.selected = model.selected.saturating_sub(1),
+                KeyCode::Up if !model.visualizer => {
+                    model.selected = model.selected.saturating_sub(1)
+                }
                 KeyCode::Char('r') if !model.connected => {
                     connection.take();
                     match Session::connect(target, channel, local)
@@ -413,7 +532,9 @@ pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Re
                     {
                         Ok((session, id)) => {
                             connection = Some(session);
+                            let visualizer = model.visualizer;
                             model = Model::connecting(id);
+                            model.visualizer = visualizer;
                             started = Instant::now();
                             last_activity = Instant::now();
                         }
@@ -452,6 +573,48 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
+
+    #[test]
+    fn preview_replies_do_not_acknowledge_controls_and_disabling_discards_late_frames() {
+        let mut model = Model::connecting(1);
+        model.connected = true;
+        model.toggle_visualizer();
+        model.preview_pending = Some((2, Instant::now()));
+        model.receive(Frame::Reply {
+            id: 2,
+            result: Err("window is covered".into()),
+        });
+        assert_eq!(model.pending.unwrap().0, 1);
+        assert_eq!(model.preview_error.as_deref(), Some("window is covered"));
+        model.preview_pending = Some((3, Instant::now()));
+        model.toggle_visualizer();
+        let preview = VideoPreview::from_rgba(&vec![0; 160 * 90 * 4], 1.0, 0.1).unwrap();
+        model.receive(Frame::Reply {
+            id: 3,
+            result: Ok(serde_json::to_value(preview).unwrap()),
+        });
+        assert!(model.preview.is_none());
+        assert!(model.preview_pending.is_none());
+    }
+
+    #[test]
+    fn visualizer_replaces_round_and_shows_errors_at_small_sizes() {
+        let mut model = Model::connecting(1);
+        model.connected = true;
+        model.status = json!({"round_pos":0,"round":[{"show_name":"Current show"},{"show_name":"Hidden round entry"}]});
+        model.toggle_visualizer();
+        model.preview_error = Some("window is covered".into());
+        for (width, height) in [(100, 30), (20, 8), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| draw(f, &model, "upstairspc")).unwrap();
+            if width == 100 {
+                let rendered = format!("{:?}", terminal.backend().buffer());
+                assert!(rendered.contains("window is covered"));
+                assert!(!rendered.contains("Hidden round entry"));
+                assert!(rendered.contains("video/playlist"));
+            }
+        }
+    }
 
     #[test]
     fn palette_actions_use_target_show_ids_and_existing_explicit_commands() {

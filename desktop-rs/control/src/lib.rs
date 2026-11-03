@@ -7,6 +7,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub mod preview;
+
 pub const CONTROL_ADDR: &str = "127.0.0.1:45831";
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME: u64 = 1024 * 1024;
@@ -61,6 +63,7 @@ pub enum Command {
     Status {},
     Queue {},
     Watch {},
+    Preview {},
     Play {},
     Pause {},
     Skip {},
@@ -195,6 +198,7 @@ impl Client {
         match command {
             Command::Status {} => self.get("/status"),
             Command::Queue {} => Ok(self.get("/status")?["round"].clone()),
+            Command::Preview {} => self.get("/remote/preview"),
             Command::Watch {} => Err("watch requires a status stream".into()),
             _ => {
                 let response = self

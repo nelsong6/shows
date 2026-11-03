@@ -52,6 +52,8 @@ fn version() -> String {
 
 #[derive(Subcommand)]
 enum Action {
+    /// Capture one ASCII video frame without changing playback.
+    Preview,
     /// Show the target's current playback state.
     Status,
     /// List the target's current round and show IDs.
@@ -132,6 +134,7 @@ fn run() -> Result<(), String> {
     let command = match action {
         Action::Status => Command::Status {},
         Action::Queue => Command::Queue {},
+        Action::Preview => Command::Preview {},
         Action::Play { show: Some(query) } => Command::PlayShow {
             show_id: resolve_show(&session.call(Command::Status {})?, &query)?,
         },
@@ -155,6 +158,11 @@ fn run() -> Result<(), String> {
         println!("{}", if args.local { "Local Shows" } else { target });
         match command {
             Command::Status {} => print_status(&result),
+            Command::Preview {} => {
+                let preview: shows_control::preview::VideoPreview = serde_json::from_value(result).map_err(|e| e.to_string())?;
+                preview.validate()?;
+                for line in preview.fit(100, 40) { println!("{line}"); }
+            }
             Command::Queue {} => {
                 if let Some(round) = result.as_array() {
                     for (i, entry) in round.iter().enumerate() {

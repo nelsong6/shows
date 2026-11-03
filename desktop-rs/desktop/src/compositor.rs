@@ -58,6 +58,9 @@ const WM_SET_STAY_ON_TOP: u32 = WM_APP + 5;
 // handle. The overlay decides what surface is draggable (it owns the DOM); the
 // host authorizes the move from live `is_on_top`, never echoed browser state.
 const WM_BEGIN_DRAG: u32 = WM_APP + 6;
+const WM_VIDEO_PREVIEW: u32 = WM_APP + 7;
+
+type PreviewReply = mpsc::SyncSender<std::result::Result<shows_control::preview::VideoPreview, String>>;
 // Observability: id for the global Ctrl+Alt+F hotkey that stamps a monitor-flash
 // marker into the log. Global (not an overlay keybind) because the flash happens
 // while shows is backgrounded and another app holds focus.
@@ -382,6 +385,7 @@ struct State {
     /// set on resize/relayout, first paint, and standby resume so the surface is
     /// never left stale while the pump is otherwise gated to new-frames-only.
     force_present: Cell<bool>,
+    preview_requests: Option<mpsc::Receiver<PreviewReply>>,
 }
 
 thread_local! {
@@ -576,6 +580,7 @@ impl Compositor {
                 prepin_rect: None,
                 standby: Cell::new(false),
                 force_present: Cell::new(true),
+                preview_requests: None,
             });
         });
 
@@ -638,6 +643,22 @@ impl Compositor {
                 WPARAM(0),
                 LPARAM(0),
             ).map_err(|e| format!("Could not request fullscreen: {e}"))
+        })
+    }
+
+    pub fn preview_callback(&self) -> crate::webserver::PreviewCb {
+        let (tx, rx) = mpsc::sync_channel::<PreviewReply>(1);
+        STATE.with(|s| s.borrow_mut().as_mut().unwrap().preview_requests = Some(rx));
+        let raw = self.hwnd.0 as usize;
+        Box::new(move || {
+            let (reply, result) = mpsc::sync_channel(1);
+            tx.try_send(reply).map_err(|_| "Video preview is busy or its window has closed")?;
+            unsafe {
+                PostMessageW(Some(HWND(raw as *mut _)), WM_VIDEO_PREVIEW, WPARAM(0), LPARAM(0))
+                    .map_err(|e| format!("Could not request video preview: {e}"))?;
+            }
+            result.recv_timeout(std::time::Duration::from_millis(500))
+                .map_err(|_| "The target window did not provide a video preview within 500 ms")?
         })
     }
 
@@ -1204,6 +1225,21 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 STATE.with(|s| {
                     if let Some(st) = s.borrow_mut().as_mut() {
                         relayout(hwnd, st, cw, ch);
+                    }
+                });
+                LRESULT(0)
+            }
+            m if m == WM_VIDEO_PREVIEW => {
+                STATE.with(|s| {
+                    if let Some(state) = s.borrow().as_ref() {
+                        if let Some(reply) = state.preview_requests.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                            let result = if state.standby.get() || IsIconic(hwnd).as_bool() {
+                                Err("Video preview is unavailable while the TV window is minimized or covered".into())
+                            } else {
+                                state.gl.preview()
+                            };
+                            let _ = reply.send(result);
+                        }
                     }
                 });
                 LRESULT(0)

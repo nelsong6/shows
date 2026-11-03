@@ -21,12 +21,27 @@ Arrows select a show; Enter plays it. Space sets play/pause, `s` plays, `p` paus
 left/right seek 10 seconds, and `+`/`-` change volume. `q` leaves Shows running;
 `r` reconnects after a disconnect.
 
+Press **v** or choose **Show ASCII video** in the palette to replace the round
+list with a live monochrome rendering of the target's video. Press **v** again
+or choose **Show playlist** to return. Playback controls and connection messages
+remain visible; choosing a show is still available through the palette.
+
+The visualizer samples the existing GPU video surface, downscales to 160×90
+before readback, and transfers at most four frames per second (about 60 KB/s
+before SSH overhead). It starts no decoder and saves no images. Turning it off,
+opening the palette, changing instance or quitting stops requests. Only one
+preview request is outstanding; failures back off and remain visible without
+disabling playback controls. Frames older than two seconds are hidden. A
+minimized or fully covered target window reports that its video is unavailable
+rather than showing the stale surface from before it was hidden.
+
 ```powershell
 shows-remote upstairspc status
 shows-remote upstairspc queue
 shows-remote upstairspc play
 shows-remote upstairspc pause
 shows-remote upstairspc fullscreen
+shows-remote upstairspc preview
 shows-remote upstairspc play "The Simpsons"
 shows-remote upstairspc seek -30
 shows-remote upstairspc volume 50

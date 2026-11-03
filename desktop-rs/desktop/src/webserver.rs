@@ -229,6 +229,7 @@ type FullscreenCb = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
 // Takes the desired pin state, not a flip — the overlay sends the target it
 // wants so duplicate POSTs from one click converge instead of cancelling out.
 type StayOnTopCb = Box<dyn Fn(bool) + Send + Sync>;
+pub type PreviewCb = Box<dyn Fn() -> Result<shows_control::preview::VideoPreview, String> + Send + Sync>;
 
 pub struct ControlServer {
     playlists: Vec<String>,
@@ -241,6 +242,8 @@ pub struct ControlServer {
     on_fullscreen: Mutex<Option<FullscreenCb>>,
     on_stay_on_top: Mutex<Option<StayOnTopCb>>,
     on_window_action: Mutex<Option<WindowActionCb>>,
+    on_preview: Mutex<Option<PreviewCb>>,
+    preview_cache: Mutex<Option<(std::time::Instant, shows_control::preview::VideoPreview)>>,
 }
 
 impl ControlServer {
@@ -271,6 +274,8 @@ impl ControlServer {
             on_fullscreen: Mutex::new(None),
             on_stay_on_top: Mutex::new(None),
             on_window_action: Mutex::new(None),
+            on_preview: Mutex::new(None),
+            preview_cache: Mutex::new(None),
         })
     }
 
@@ -283,6 +288,9 @@ impl ControlServer {
     }
     pub fn set_on_fullscreen(&self, f: FullscreenCb) {
         *self.on_fullscreen.lock().unwrap() = Some(f);
+    }
+    pub fn set_on_preview(&self, f: PreviewCb) {
+        *self.on_preview.lock().unwrap() = Some(f);
     }
     pub fn set_on_stay_on_top(&self, f: StayOnTopCb) {
         *self.on_stay_on_top.lock().unwrap() = Some(f);
@@ -361,6 +369,7 @@ impl ControlServer {
                 "pid": std::process::id(),
             })),
             (Method::Get, "/status/stream") => self.status_stream(request),
+            (Method::Get, "/remote/preview") => self.video_preview(request),
             (Method::Get, "/shows") => {
                 let v = json!(self.replica.overlay_shows(&self.playlists));
                 respond_json(request, 200, &v)
@@ -701,6 +710,35 @@ impl ControlServer {
         match result {
             Ok(()) => respond_control_ok(request, "fullscreen_requested", "fullscreen toggle requested; window status confirms the result"),
             Err(message) => respond_json(request, 503, &json!({"ok": false, "message": message})),
+        }
+    }
+
+    fn video_preview(&self, request: Request) {
+        if request.headers().iter().any(|h| h.field.equiv("Origin")) {
+            return respond_json(request, 403, &json!({"ok":false,"message":"Video preview requires a native client"}));
+        }
+        let Ok(mut cache) = self.preview_cache.try_lock() else {
+            return respond_json(request, 429, &json!({"ok":false,"message":"Video preview is busy"}));
+        };
+        if let Some((at, frame)) = cache.as_ref() {
+            if at.elapsed() < shows_control::preview::INTERVAL {
+                return respond_json(request, 200, &json!(frame));
+            }
+        }
+        let result = self.on_preview.lock().unwrap().as_ref()
+            .ok_or_else(|| "The target video window is unavailable".to_string())
+            .and_then(|capture| capture());
+        match result {
+            Ok(frame) => {
+                log::debug!("video preview: capture {:.2} ms, {} characters", frame.capture_ms, shows_control::preview::WIDTH * shows_control::preview::HEIGHT);
+                if frame.capture_ms > 20.0 { log::warn!("Slow video preview capture: {:.2} ms", frame.capture_ms); }
+                respond_json(request, 200, &json!(frame));
+                *cache = Some((std::time::Instant::now(), frame));
+            }
+            Err(message) => {
+                *cache = None;
+                respond_json(request, 503, &json!({"ok":false,"message":message}));
+            }
         }
     }
 
@@ -1533,6 +1571,34 @@ mod tests {
         assert!(client.execute(&shows_control::Command::Play {}).unwrap_err().contains("no playable episode"));
         worker.join().unwrap();
         assert_eq!(control.replica.revision(), revision);
+    }
+
+    #[test]
+    fn preview_reads_are_bounded_cached_and_do_not_change_playback_or_database() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let capture_calls = calls.clone();
+        control.set_on_preview(Box::new(move || {
+            capture_calls.fetch_add(1, Ordering::SeqCst);
+            shows_control::preview::VideoPreview::from_rgba(&vec![0; 160 * 90 * 4], 16.0 / 9.0, 1.0)
+        }));
+        let before = control.status_json();
+        let revision = control.replica.revision();
+        let listener = Server::http("127.0.0.1:0").unwrap();
+        let address = listener.server_addr().to_string();
+        let copy = control.clone();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..3 { copy.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap()); }
+        });
+        let client = shows_control::Client::connect_to(&address).unwrap();
+        let first = client.execute(&shows_control::Command::Preview {}).unwrap();
+        let second = client.execute(&shows_control::Command::Preview {}).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(control.status_json(), before);
+        assert_eq!(control.replica.revision(), revision);
+        worker.join().unwrap();
     }
 
     #[test]

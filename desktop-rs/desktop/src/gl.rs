@@ -36,6 +36,15 @@ use crate::mpv::{Handle, MpvRenderParam, MPV_RENDER_PARAM_API_TYPE, MPV_RENDER_P
 const GL_TEXTURE_2D: u32 = 0x0DE1;
 const GL_FRAMEBUFFER: u32 = 0x8D40;
 const GL_COLOR_ATTACHMENT0: u32 = 0x8CE0;
+const GL_READ_FRAMEBUFFER: u32 = 0x8CA8;
+const GL_DRAW_FRAMEBUFFER: u32 = 0x8CA9;
+const GL_FRAMEBUFFER_COMPLETE: u32 = 0x8CD5;
+const GL_RGBA8: u32 = 0x8058;
+const GL_RGBA: u32 = 0x1908;
+const GL_UNSIGNED_BYTE: u32 = 0x1401;
+const GL_COLOR_BUFFER_BIT: u32 = 0x4000;
+const GL_LINEAR: u32 = 0x2601;
+const WGL_ACCESS_READ_ONLY_NV: u32 = 0x0000;
 const WGL_ACCESS_WRITE_DISCARD_NV: u32 = 0x0000_0002;
 
 // mpv render params used here (mpv/render.h + render_gl.h).
@@ -99,6 +108,15 @@ struct GlProcs {
     framebuffer_texture_2d: unsafe extern "system" fn(u32, u32, u32, u32, i32),
     viewport: unsafe extern "system" fn(i32, i32, i32, i32),
     flush: unsafe extern "system" fn(),
+    bind_texture: unsafe extern "system" fn(u32, u32),
+    tex_image_2d: unsafe extern "system" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void),
+    delete_textures: unsafe extern "system" fn(i32, *const u32),
+    delete_framebuffers: unsafe extern "system" fn(i32, *const u32),
+    check_framebuffer: unsafe extern "system" fn(u32) -> u32,
+    blit_framebuffer: unsafe extern "system" fn(i32, i32, i32, i32, i32, i32, i32, i32, u32, u32),
+    read_pixels: unsafe extern "system" fn(i32, i32, i32, i32, u32, u32, *mut c_void),
+    get_error: unsafe extern "system" fn() -> u32,
+    dx_object_access: unsafe extern "system" fn(*mut c_void, u32) -> i32,
     dx_open_device: unsafe extern "system" fn(*mut c_void) -> *mut c_void,
     dx_register_object:
         unsafe extern "system" fn(*mut c_void, *mut c_void, u32, u32, u32) -> *mut c_void,
@@ -116,6 +134,15 @@ impl GlProcs {
             framebuffer_texture_2d: load(c"glFramebufferTexture2D")?,
             viewport: load(c"glViewport")?,
             flush: load(c"glFlush")?,
+            bind_texture: load(c"glBindTexture")?,
+            tex_image_2d: load(c"glTexImage2D")?,
+            delete_textures: load(c"glDeleteTextures")?,
+            delete_framebuffers: load(c"glDeleteFramebuffers")?,
+            check_framebuffer: load(c"glCheckFramebufferStatus")?,
+            blit_framebuffer: load(c"glBlitFramebuffer")?,
+            read_pixels: load(c"glReadPixels")?,
+            get_error: load(c"glGetError")?,
+            dx_object_access: load(c"wglDXObjectAccessNV")?,
             dx_open_device: load(c"wglDXOpenDeviceNV")?,
             dx_register_object: load(c"wglDXRegisterObjectNV")?,
             dx_unregister_object: load(c"wglDXUnregisterObjectNV")?,
@@ -345,6 +372,53 @@ impl GlVideo {
     pub fn video_aspect(&self) -> Option<f64> {
         let a: f64 = self.handle.get_property("video-params/aspect")?.parse().ok()?;
         (a.is_finite() && a > 0.0).then_some(a)
+    }
+
+    pub fn preview(&self) -> Result<shows_control::preview::VideoPreview, String> {
+        use shows_control::preview::{HEIGHT, VideoPreview, WIDTH};
+        let started = std::time::Instant::now();
+        if self.handle.get_property("path").is_none() {
+            return Err("No video is loaded on the target".into());
+        }
+        unsafe {
+            let p = &self.procs;
+            let mut object = self.gl_object;
+            // Read-only access preserves the displayed frame, including while paused.
+            if (p.dx_object_access)(object, WGL_ACCESS_READ_ONLY_NV) == 0 {
+                return Err("Could not read the target video texture".into());
+            }
+            if (p.dx_lock_objects)(self.dx_device, 1, &mut object) == 0 {
+                (p.dx_object_access)(object, WGL_ACCESS_WRITE_DISCARD_NV);
+                return Err("Could not lock the target video texture".into());
+            }
+            let mut texture = 0;
+            let mut framebuffer = 0;
+            (p.gen_textures)(1, &mut texture);
+            (p.bind_texture)(GL_TEXTURE_2D, texture);
+            (p.tex_image_2d)(GL_TEXTURE_2D, 0, GL_RGBA8 as i32, WIDTH as i32, HEIGHT as i32, 0, GL_RGBA, GL_UNSIGNED_BYTE, std::ptr::null());
+            (p.gen_framebuffers)(1, &mut framebuffer);
+            (p.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, framebuffer);
+            (p.framebuffer_texture_2d)(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+            let complete = (p.check_framebuffer)(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+            let mut pixels = vec![0u8; WIDTH * HEIGHT * 4];
+            if complete {
+                (p.bind_framebuffer)(GL_READ_FRAMEBUFFER, self.fbo);
+                (p.blit_framebuffer)(0, 0, self.w, self.h, 0, 0, WIDTH as i32, HEIGHT as i32, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                (p.bind_framebuffer)(GL_READ_FRAMEBUFFER, framebuffer);
+                (p.read_pixels)(0, 0, WIDTH as i32, HEIGHT as i32, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_mut_ptr().cast());
+            }
+            let error = (p.get_error)();
+            (p.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo);
+            (p.bind_texture)(GL_TEXTURE_2D, 0);
+            (p.delete_framebuffers)(1, &framebuffer);
+            (p.delete_textures)(1, &texture);
+            let unlocked = (p.dx_unlock_objects)(self.dx_device, 1, &mut object) != 0;
+            let restored = (p.dx_object_access)(object, WGL_ACCESS_WRITE_DISCARD_NV) != 0;
+            if !complete || error != 0 || !unlocked || !restored {
+                return Err(format!("Video preview capture failed (GL {error:#x})"));
+            }
+            VideoPreview::from_rgba(&pixels, self.w as f64 / self.h as f64, started.elapsed().as_secs_f64() * 1000.0)
+        }
     }
 
     /// Render the current mpv frame into the shared texture.
