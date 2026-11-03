@@ -34,6 +34,8 @@ desktop-rs/           Cargo workspace
       runner.rs       round-robin runner and local media cache orchestration
       model.rs        persisted row types
       update.rs       GitHub Releases update check
+  control/            shows-control; typed loopback/SSH control protocol and client
+  remote/             shows-remote; terminal remote and SSH agent, no database or player
   desktop/            shows-desktop; Windows shell and the only unsafe code
     src/
       main.rs         process wiring and shared/local database configuration
@@ -73,6 +75,11 @@ Library import is in-app. Folder scanning derives backslash-joined `relative_pat
 The localhost control server exposes `GET /status/stream` as the React overlay's live SSE feed, `GET /status` as an on-demand snapshot, and the playback/library control routes in `desktop-rs/desktop/src/webserver.rs`. Database status includes the authoritative path and shared revision.
 
 Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`.
+
+The control listener is loopback-only at `127.0.0.1:45831` (`SHOWS_CONTROL_PORT`
+overrides the port). `shows-remote` controls an already running desktop over
+existing Windows OpenSSH, using the installed target agent and the same SSE
+status feed. See `docs/feature-contracts/remote-control.md`.
 
 ## New computer setup
 

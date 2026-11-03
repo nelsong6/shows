@@ -1,10 +1,15 @@
+[CmdletBinding(PositionalBinding = $false)]
 param(
   [ValidateSet("stable", "dev")]
   [string]$Channel = "stable",
   [string]$NasRoot = "S:\shows-app",
   [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "shows"),
   [switch]$NoUpdate,
-  [switch]$Wait
+  [switch]$Wait,
+  [ValidateSet("desktop", "remote")]
+  [string]$App = "desktop",
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$RemoteArgs
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +33,7 @@ function Install-Version([object]$manifest) {
   if ($manifest.channel -ne $Channel) { throw "Channel manifest is for $($manifest.channel), expected $Channel" }
   if ($manifest.version -notmatch '^[A-Za-z0-9._-]+$') { throw "Unsafe version in manifest" }
   $fileNames = @($manifest.files | ForEach-Object { $_.name })
-  foreach ($required in @("shows-desktop.exe", "libmpv-2.dll")) {
+  foreach ($required in @("shows-desktop.exe", "shows-remote.exe", "libmpv-2.dll")) {
     if ($required -notin $fileNames) { throw "Manifest is missing $required" }
   }
 
@@ -86,8 +91,13 @@ if (-not $NoUpdate) {
 
 if (-not $selectedVersion) { throw "No installed shows version and updates are disabled or unavailable" }
 $selectedDir = Join-Path $versions $selectedVersion
-$exe = Join-Path $selectedDir "shows-desktop.exe"
+$exe = Join-Path $selectedDir "shows-$App.exe"
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Installed executable is missing: $exe" }
+
+if ($App -eq "remote") {
+  & $exe @RemoteArgs
+  exit $LASTEXITCODE
+}
 
 $process = Start-Process -FilePath $exe -WorkingDirectory $selectedDir -PassThru
 if ($Wait) { $process.WaitForExit(); exit $process.ExitCode }

@@ -199,6 +199,23 @@ impl Player {
     pub fn set_pause(&self, paused: bool) {
         self.handle.set_property("pause", if paused { "yes" } else { "no" });
     }
+    pub fn set_pause_confirmed(&self, paused: bool) -> Result<(), String> {
+        let value = if paused { "yes" } else { "no" };
+        self.handle.set_property_checked("pause", value)?;
+        if self.handle.get_property("pause").as_deref() != Some(value) {
+            return Err("mpv did not confirm the requested pause state".into());
+        }
+        Ok(())
+    }
+    pub fn seek_confirmed(&self, seconds: f64) -> Result<(), String> {
+        self.handle.command_checked(&["seek", &seconds.to_string(), "relative"])
+    }
+    pub fn set_volume_confirmed(&self, level: f64) -> Result<(), String> {
+        self.handle.set_property_checked("volume", &level.to_string())?;
+        let observed = self.prop_f64("volume").ok_or("mpv did not report its volume")?;
+        if (observed - level).abs() > 0.1 { return Err("mpv did not confirm the requested volume".into()); }
+        Ok(())
+    }
     pub fn seek_relative(&self, seconds: f64) {
         self.handle
             .command(&["seek", &seconds.to_string(), "relative"]);

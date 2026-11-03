@@ -5,6 +5,10 @@ The desktop control server owns the frontend status contract exposed by
 as `event: status` Server-Sent Events; the one-shot endpoint returns the same
 shape.
 
+The listener is loopback-only at `127.0.0.1:45831` by default;
+`SHOWS_CONTROL_PORT` overrides the local port. The terminal companion consumes
+these same snapshots through SSH; see [remote-control.md](remote-control.md).
+
 This contract is intentionally frontend-facing. Any field used by
 `desktop-rs/frontend` belongs here before it becomes a stable UI dependency.
 

@@ -120,10 +120,10 @@ jobs:
           7z x /tmp/libmpv.7z -odesktop-rs/desktop/third_party/libmpv -y
           test -f desktop-rs/desktop/third_party/libmpv/libmpv-2.dll
 
-      - name: cargo test (shows-core)
+      - name: cargo test (workspace)
         if: steps.changes.outputs.skip != 'true'
         working-directory: desktop-rs
-        run: cargo test -p shows-core --release
+        run: cargo test --workspace --release --locked
 
       - name: cargo build --release
         if: steps.changes.outputs.skip != 'true'
@@ -137,9 +137,14 @@ jobs:
         env:
           SHOWS_BUILD_SHA: ${{ github.sha }}
           SHOWS_UPDATE_CHANNEL: stable
-        run: cargo build --release -p shows-desktop
+        run: cargo build --release -p shows-desktop -p shows-remote --locked
 
-      # Stage the bundle: shows-desktop.exe + libmpv-2.dll
+      - name: Verify terminal channel installation
+        if: steps.changes.outputs.skip != 'true'
+        shell: pwsh
+        run: ./scripts/test-remote-distribution.ps1
+
+      # Stage the bundle: desktop, terminal remote, and libmpv runtime.
       - name: Stage release bundle
         if: steps.changes.outputs.skip != 'true'
         shell: pwsh
@@ -147,8 +152,10 @@ jobs:
           $out = "desktop-rs/dist/shows-desktop"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           Copy-Item desktop-rs/target/release/shows-desktop.exe "$out/" -Force
+          Copy-Item desktop-rs/target/release/shows-remote.exe "$out/" -Force
           Copy-Item desktop-rs/desktop/third_party/libmpv/libmpv-2.dll "$out/" -Force
           if (-not (Test-Path "$out/shows-desktop.exe")) { throw "build failed: shows-desktop.exe missing" }
+          if (-not (Test-Path "$out/shows-remote.exe"))  { throw "build failed: shows-remote.exe missing" }
           if (-not (Test-Path "$out/libmpv-2.dll"))     { throw "bundle missing libmpv-2.dll" }
 
       - name: Zip bundle
