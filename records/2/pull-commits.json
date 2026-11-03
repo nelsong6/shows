@@ -1,0 +1,254 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/d802a9dd7f4fb582911cec71d04585c52995fe7b/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-26T22:49:40Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-26T22:49:40Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "desktop: occlusion standby + skip render while minimized\n\nStop driving the video swapchain when the window is not visible (per DXGI\nguidance) to cut churn across focus/occlusion transitions, while investigating\nthe alt-tab monitor re-sync on the VRR/DSC display.\n\n- render(): on Present -\u003e DXGI_STATUS_OCCLUDED, enter standby; while in standby\n  only poll with DXGI_PRESENT_TEST (no draw/present/commit), resume when visible.\n- WM_TIMER: skip render entirely while IsIconic (minimized).\n- WM_ACTIVATE + standby enter/leave logged — instrumentation to correlate focus\n  changes with the re-sync on the affected hardware.\n- State: add standby: Cell\u003cbool\u003e.\n\nPhase 2 (suppress idle presents) deferred: needs an mpv render-update signal the\ncompositor does not expose. Phase 3 (allow-tearing) dropped: not applicable to a\nDWM-composited CreateSwapChainForComposition swapchain.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+      "tree": {
+        "sha": "278545a21645c93194af817602b2bd59337ee18b",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/278545a21645c93194af817602b2bd59337ee18b"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/d802a9dd7f4fb582911cec71d04585c52995fe7b",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/d802a9dd7f4fb582911cec71d04585c52995fe7b",
+    "node_id": "C_kwDOS5KECdoAKGQ4MDJhOWRkN2Y0ZmI1ODI5MTFjZWM3MWQwNDU4NWM1Mjk5NWZlN2I",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/7a91b44cd3206732a32eb0600e7c33ec631afa32",
+        "sha": "7a91b44cd3206732a32eb0600e7c33ec631afa32",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/7a91b44cd3206732a32eb0600e7c33ec631afa32"
+      }
+    ],
+    "sha": "d802a9dd7f4fb582911cec71d04585c52995fe7b",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/d802a9dd7f4fb582911cec71d04585c52995fe7b"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/2189a91cec0a971957a037d4e4ea8a95a40c2209/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-26T23:03:58Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-26T23:03:58Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "DIAGNOSTIC (do not merge): freeze presentation in render()\n\nAction 1 of the alt-tab monitor re-sync investigation. Gates Present/Commit\nbehind FREEZE_PRESENTATION=true so the render loop issues no presentation while\nthe build runs (on-screen frame frozen). Isolates whether the present loop\ndrives the flash: if the re-sync persists with zero presents, the present loop\nis not the cause and the transition is DWM/driver-level. Revert after observation.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+      "tree": {
+        "sha": "c8a5ed38eb2728ba1e45b6f85cecbf076acfef54",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/c8a5ed38eb2728ba1e45b6f85cecbf076acfef54"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/2189a91cec0a971957a037d4e4ea8a95a40c2209",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/2189a91cec0a971957a037d4e4ea8a95a40c2209",
+    "node_id": "C_kwDOS5KECdoAKDIxODlhOTFjZWMwYTk3MTk1N2EwMzdkNGU0ZWE4YTk1YTQwYzIyMDk",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/d802a9dd7f4fb582911cec71d04585c52995fe7b",
+        "sha": "d802a9dd7f4fb582911cec71d04585c52995fe7b",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/d802a9dd7f4fb582911cec71d04585c52995fe7b"
+      }
+    ],
+    "sha": "2189a91cec0a971957a037d4e4ea8a95a40c2209",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/2189a91cec0a971957a037d4e4ea8a95a40c2209"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/c02e564449715c3e2f78d0b4d4096ae5b8b01af0/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-26T23:14:25Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-26T23:14:25Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "desktop: gate presentation on focus (Action 2; supersedes freeze diagnostic)\n\nRevert the freeze-presentation diagnostic (a null result there was dubious: with\nno video there is no trigger). Instead present only while the window is focused;\nwhile defocused, render() issues no Present/Commit and the frame freezes until\nrefocus, with normal playback when focused.\n\nTests whether presenting through a focus change drives the alt-tab monitor\nre-sync, while keeping video playing so the triggering conditions still exist.\n\n- State: add focused: Cell\u003cbool\u003e (init true).\n- render(): early-return when not focused.\n- WM_ACTIVATE: set focused from activation state.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+      "tree": {
+        "sha": "a09841ab898786bad8332aea4a4d34c84a18997e",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/a09841ab898786bad8332aea4a4d34c84a18997e"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+    "node_id": "C_kwDOS5KECdoAKGMwMmU1NjQ0NDk3MTVjM2UyZjc4ZDBiNGQ0MDk2YWU1YjhiMDFhZjA",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/2189a91cec0a971957a037d4e4ea8a95a40c2209",
+        "sha": "2189a91cec0a971957a037d4e4ea8a95a40c2209",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/2189a91cec0a971957a037d4e4ea8a95a40c2209"
+      }
+    ],
+    "sha": "c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/c02e564449715c3e2f78d0b4d4096ae5b8b01af0"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/65f9d41f1d505429641cd1b9eeedf53c26d0e3af/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-26T23:22:44Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-26T23:22:44Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "desktop: revert focus-gating; restore standby-only presentation\n\nFocus-gating (c02e564) did not resolve the alt-tab monitor re-sync — the flash\nwas observed with no presents during defocus — and it freezes defocused video,\nwhich is undesirable to ship. Restore the standby-only render loop (the spec-\ngrounded occlusion handling) plus the WM_ACTIVATE focus-transition logging.\n\nDetermination: the re-sync is DWM's focus-driven switch of the window swapchain\nbetween Composed (unfocused) and Independent-Flip/MPO direct-scanout (focused),\nwhich re-trains the VRR/DSC link. DWM owns that decision; the composition-\nswapchain API exposes no supported \"always composed\" control. Documented\nmitigations are system-side (DWM MPO disable / NVCP G-Sync fullscreen-only) and\nare out of scope. Not fixable in-app without a large, unverifiable rearchitecture\noff the DWM-composited flip-swapchain model.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+      "tree": {
+        "sha": "e929c16a9d82f40bc52df58aa85b04e5db367fde",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/e929c16a9d82f40bc52df58aa85b04e5db367fde"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+    "node_id": "C_kwDOS5KECdoAKDY1ZjlkNDFmMWQ1MDU0Mjk2NDFjZDFiOWVlZWRmNTNjMjZkMGUzYWY",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+        "sha": "c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/c02e564449715c3e2f78d0b4d4096ae5b8b01af0"
+      }
+    ],
+    "sha": "65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/65f9d41f1d505429641cd1b9eeedf53c26d0e3af"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/af8a395dd85b1b21f7a8a67196a612a81caa66bb/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-27T06:33:38Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-27T06:33:38Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "desktop: force video plane to Composed via sub-unity opacity (flash candidate)\n\nApply a DComp opacity effect (0.99) to the video visual so DWM must\nalpha-blend it, making the swapchain ineligible for the independent-flip /\nMPO scanout path. PresentMon recorded the video swapchain churning between\n\"Composed: Flip\" and \"Hardware Composed: Independent Flip\" across focus\nedges; that present-mode promotion/demotion is the candidate trigger for the\nVRR+DSC display-link re-train (\"flash\") on alt-tab. Pinning the plane to\nComposed removes the churn.\n\nCandidate fix under objective grading (PresentMon must show zero Independent\nFlip frames even when focused). 1% transparency is a test artifact to be\nrefined to a no-op filter effect if the mechanism is confirmed.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+      "tree": {
+        "sha": "05b2ded245ab9e5ab88d22b75d48629831a7f227",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/05b2ded245ab9e5ab88d22b75d48629831a7f227"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+    "node_id": "C_kwDOS5KECdoAKGFmOGEzOTVkZDg1YjFiMjFmN2E4YTY3MTk2YTYxMmE4MWNhYTY2YmI",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+        "sha": "65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/65f9d41f1d505429641cd1b9eeedf53c26d0e3af"
+      }
+    ],
+    "sha": "af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/af8a395dd85b1b21f7a8a67196a612a81caa66bb"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/a56dd6ce82eb289b631bb7a47b3dec64bf939cc4/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-27T06:56:01Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-27T06:56:01Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "docs: record force-composed video-plane decision (ADR-0002 + shell contract)\n\nDocument the alt-tab monitor flash root cause (DWM promoting the video\nswapchain to independent-flip/MPO on focus edges, re-training the DSC/VRR\nlink) and the fix (sub-unity opacity pins the plane to DWM composition).\nCaptures the SDR coupling caveat (forcing composition defeats HDR\npassthrough) and the PresentMon grading method.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+      "tree": {
+        "sha": "927aaef78f25affd958d372e837b8af8d65d4c17",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/927aaef78f25affd958d372e837b8af8d65d4c17"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/a56dd6ce82eb289b631bb7a47b3dec64bf939cc4",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/a56dd6ce82eb289b631bb7a47b3dec64bf939cc4",
+    "node_id": "C_kwDOS5KECdoAKGE1NmRkNmNlODJlYjI4OWI2MzFiYjdhNDdiM2RlYzY0YmY5MzljYzQ",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+        "sha": "af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/af8a395dd85b1b21f7a8a67196a612a81caa66bb"
+      }
+    ],
+    "sha": "a56dd6ce82eb289b631bb7a47b3dec64bf939cc4",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/a56dd6ce82eb289b631bb7a47b3dec64bf939cc4"
+  }
+]

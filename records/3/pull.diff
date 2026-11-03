@@ -1,0 +1,575 @@
+diff --git a/desktop-rs/desktop/src/compositor.rs b/desktop-rs/desktop/src/compositor.rs
+index c36fd84..e15993e 100644
+--- a/desktop-rs/desktop/src/compositor.rs
++++ b/desktop-rs/desktop/src/compositor.rs
+@@ -363,6 +363,10 @@ struct State {
+     saved_style: isize,
+     saved_exstyle: isize,
+     saved_rect: RECT,
++    // Pre-pin "normal" rect, captured on entering pin mode. Pin snaps the window
++    // to the video aspect (a smaller, frameless-looking shape); persisting that
++    // on close would reopen the windowed app mis-sized, so we save this instead.
++    prepin_rect: Option<RECT>,
+     // Occlusion standby. Set when `Present` reports `DXGI_STATUS_OCCLUDED`
+     // (window fully covered), cleared when a `DXGI_PRESENT_TEST` poll reports it
+     // visible again. While set, the frame timer only polls — no render, present,
+@@ -569,6 +573,7 @@ impl Compositor {
+                 saved_style: 0,
+                 saved_exstyle: 0,
+                 saved_rect: RECT::default(),
++                prepin_rect: None,
+                 standby: Cell::new(false),
+             });
+         });
+@@ -1043,6 +1048,25 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                 });
+                 LRESULT(0)
+             }
++            WM_GETMINMAXINFO => {
++                // Never let the window shrink below its own custom chrome: if the
++                // client width drops under the window-button cluster, nc_hit's
++                // caption test (`cx < width - buttons`) has no room left and the
++                // titlebar stops dragging entirely. Scale with the per-window DPI
++                // so it tracks nc_hit at every scale factor. (Fires before STATE
++                // exists during window creation — it touches no STATE, so safe.)
++                let dpi = GetDpiForWindow(hwnd) as i32;
++                let min_w = scale_for_dpi(WINDOW_BUTTONS_LOGICAL_W + 80, dpi);
++                let min_h = scale_for_dpi(TITLEBAR_LOGICAL_H + 80, dpi);
++                let mmi = &mut *(l.0 as *mut MINMAXINFO);
++                if mmi.ptMinTrackSize.x < min_w {
++                    mmi.ptMinTrackSize.x = min_w;
++                }
++                if mmi.ptMinTrackSize.y < min_h {
++                    mmi.ptMinTrackSize.y = min_h;
++                }
++                LRESULT(0)
++            }
+             WM_SIZING => {
+                 // Lock the window to the video's aspect ratio while in pin mode,
+                 // so the floating player never grows letterbox bars (wasted
+@@ -1106,6 +1130,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                         restore_style: isize,
+                         restore_exstyle: isize,
+                         restore_rect: RECT,
++                        was_on_top: bool,
+                     },
+                 }
+                 let action = STATE.with(|s| -> Option<Action> {
+@@ -1140,6 +1165,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                             restore_style: st.saved_style,
+                             restore_exstyle: st.saved_exstyle,
+                             restore_rect: st.saved_rect,
++                            was_on_top: st.is_on_top,
+                         };
+                         st.is_fullscreen = false;
+                         if let Some(cb) = &st.status_callback {
+@@ -1169,6 +1195,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                         restore_style,
+                         restore_exstyle,
+                         restore_rect: r,
++                        was_on_top,
+                     }) => {
+                         SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
+                         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, restore_exstyle);
+@@ -1185,6 +1212,22 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                                 SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+                             );
+                         }
++                        // The restored exstyle predates any pin done WHILE
++                        // fullscreen, so it lacks WS_EX_TOPMOST. Re-assert the real
++                        // Z-order from the live pin state, or the host would think
++                        // it is pinned (titlebar hidden) while the window no longer
++                        // floats — and the titlebar would never come back.
++                        if was_on_top {
++                            let _ = SetWindowPos(
++                                hwnd,
++                                Some(HWND_TOPMOST),
++                                0,
++                                0,
++                                0,
++                                0,
++                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
++                            );
++                        }
+                         let _ = SetForegroundWindow(hwnd);
+                     }
+                     None => {}
+@@ -1224,8 +1267,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                         }
+                         // Aspect is only needed when entering pin mode; query it
+                         // now so we don't hold a STATE borrow across SetWindowPos
+-                        // (which dispatches WM_SIZE and re-borrows STATE).
+-                        let aspect = st.is_on_top.then(|| st.gl.video_aspect()).flatten();
++                        // (which dispatches WM_SIZE and re-borrows STATE). Skip it
++                        // while fullscreen — snapping a fullscreen window to the
++                        // video aspect would shrink it off the monitor.
++                        let aspect = (st.is_on_top && !st.is_fullscreen)
++                            .then(|| st.gl.video_aspect())
++                            .flatten();
+                         Some((st.is_on_top, aspect))
+                     })
+                 });
+@@ -1241,6 +1288,35 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                     );
+                     log::info!("window on_top={on_top}");
++                    if on_top {
++                        // Remember the windowed rect before pin reshapes it, so a
++                        // close-while-pinned persists the right size (see State).
++                        let mut wp = WINDOWPLACEMENT {
++                            length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
++                            ..Default::default()
++                        };
++                        let prepin = GetWindowPlacement(hwnd, &mut wp)
++                            .is_ok()
++                            .then_some(wp.rcNormalPosition);
++                        STATE.with(|s| {
++                            if let Some(st) = s.borrow_mut().as_mut() {
++                                st.prepin_rect = prepin;
++                            }
++                        });
++                        // The aspect snap below resizes; if the window is maximized
++                        // it would shrink while WS_MAXIMIZE stays set, leaving
++                        // IsZoomed() true so nc_hit drops the resize borders. Clear
++                        // the maximized state first so pin gets a real floating rect.
++                        if IsZoomed(hwnd).as_bool() {
++                            let _ = ShowWindow(hwnd, SW_RESTORE);
++                        }
++                    } else {
++                        STATE.with(|s| {
++                            if let Some(st) = s.borrow_mut().as_mut() {
++                                st.prepin_rect = None;
++                            }
++                        });
++                    }
+                     // Entering pin mode removes the titlebar, so the old window
+                     // shape (sized for video + titlebar) would letterbox the
+                     // video. Snap to the video aspect — keep the top-left and
+@@ -1290,6 +1366,25 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                     Some(WPARAM(HTCAPTION as usize)),
+                     Some(LPARAM(lp)),
+                 );
++                // SendMessageW returns only when the modal move loop ends. The
++                // loop swallowed all pointer input, so the overlay saw no movement
++                // and its idle timer may have hidden the bottom control bar — the
++                // ONLY way to unpin with the mouse in pin mode (no titlebar). Feed
++                // the overlay the post-drag cursor position so the bar reveals.
++                let mut after = POINT::default();
++                if GetCursorPos(&mut after).is_ok() {
++                    let _ = ScreenToClient(hwnd, &mut after);
++                    STATE.with(|s| {
++                        if let Some(st) = s.borrow().as_ref() {
++                            let _ = st.controller.SendMouseInput(
++                                COREWEBVIEW2_MOUSE_EVENT_KIND_MOVE,
++                                COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
++                                0,
++                                after,
++                            );
++                        }
++                    });
++                }
+                 LRESULT(0)
+             }
+             m if m == WM_WINDOW_MINIMIZE => {
+@@ -1379,16 +1474,29 @@ fn save_window_placement(hwnd: HWND) {
+             let mut rect = wp.rcNormalPosition;
+ 
+             // Fullscreen swaps the window rect, so persist the pre-fullscreen
+-            // rect instead of the borderless one. Stay-on-top never changes the
+-            // rect, so the live placement is already correct there.
++            // rect instead of the borderless one. Pin mode aspect-snaps the rect,
++            // so persist the pre-pin windowed rect instead. (Fullscreen wins when
++            // both hold — its saved_rect already predates any in-fullscreen pin.)
+             let saved_transient = STATE.with(|s| {
+-                s.borrow()
+-                    .as_ref()
+-                    .map(|st| (st.is_fullscreen, st.saved_rect, st.saved_style))
++                s.borrow().as_ref().map(|st| {
++                    (
++                        st.is_fullscreen,
++                        st.saved_rect,
++                        st.saved_style,
++                        st.is_on_top,
++                        st.prepin_rect,
++                    )
++                })
+             });
+-            if let Some((true, saved_rect, saved_style)) = saved_transient {
+-                rect = saved_rect;
+-                maximized = (saved_style as u32 & WS_MAXIMIZE.0) != 0;
++            match saved_transient {
++                Some((true, saved_rect, saved_style, _, _)) => {
++                    rect = saved_rect;
++                    maximized = (saved_style as u32 & WS_MAXIMIZE.0) != 0;
++                }
++                Some((false, _, _, true, Some(prepin))) => {
++                    rect = prepin;
++                }
++                _ => {}
+             }
+ 
+             let json = serde_json::json!({
+diff --git a/desktop-rs/desktop/src/webserver.rs b/desktop-rs/desktop/src/webserver.rs
+index 426d127..aec3941 100644
+--- a/desktop-rs/desktop/src/webserver.rs
++++ b/desktop-rs/desktop/src/webserver.rs
+@@ -1120,6 +1120,7 @@ impl StatusBroadcaster {
+             subscriber,
+             buffer: Vec::new(),
+             offset: 0,
++            flush_pending: false,
+         }
+     }
+ 
+@@ -1160,10 +1161,29 @@ struct StatusSubscriberState {
+     next: Option<String>,
+ }
+ 
++/// A >1 KiB SSE comment used purely to force a socket flush. tiny_http buffers
++/// the response in a 1024-byte `BufWriter` and never flushes a streaming body
++/// (`raw_print` "does not flush the writer"), so a sub-1 KiB frame sits unsent
++/// until enough following bytes overflow the buffer — which, on an idle stream,
++/// may be never (e.g. unpin while the video is paused: no playback frames
++/// follow, the overlay never sees the change, the titlebar never returns).
++/// Writing this oversized comment right after a frame overflows the buffer and
++/// pushes the frame to the socket at once. Clients ignore lines starting ':'.
++fn flush_comment() -> Vec<u8> {
++    let mut v = Vec::with_capacity(1203);
++    v.push(b':');
++    v.resize(1201, b' ');
++    v.extend_from_slice(b"\n\n");
++    v
++}
++
+ struct StatusStream {
+     subscriber: Arc<StatusSubscriber>,
+     buffer: Vec<u8>,
+     offset: usize,
++    // True once a real frame has been handed out and not yet flushed: the next
++    // read, if no further frame is queued, emits `flush_comment()` to push it.
++    flush_pending: bool,
+ }
+ 
+ impl Read for StatusStream {
+@@ -1174,19 +1194,34 @@ impl Read for StatusStream {
+ 
+         while self.offset >= self.buffer.len() {
+             let mut state = self.subscriber.state.lock().unwrap();
+-            while state.next.is_none() {
+-                let (guard, timeout) = self
+-                    .subscriber
+-                    .cv
+-                    .wait_timeout(state, Duration::from_secs(30))
+-                    .unwrap();
+-                state = guard;
+-                if timeout.timed_out() && state.next.is_none() {
+-                    state.next = Some(": keepalive\n\n".to_string());
+-                }
++            if let Some(frame) = state.next.take() {
++                // A frame is queued: deliver it. It will be flushed either by the
++                // bytes of the following frame or, if the stream then idles, by
++                // the flush comment below.
++                drop(state);
++                self.buffer = frame.into_bytes();
++                self.offset = 0;
++                self.flush_pending = !self.buffer.is_empty();
++                break;
++            }
++            if self.flush_pending {
++                // Just delivered a frame and nothing follows yet — force it out
++                // to the socket now instead of letting it sit in the BufWriter.
++                self.flush_pending = false;
++                drop(state);
++                self.buffer = flush_comment();
++                self.offset = 0;
++                break;
++            }
++            // Genuinely idle: block for the next frame, or a keepalive on timeout.
++            let (mut guard, timeout) = self
++                .subscriber
++                .cv
++                .wait_timeout(state, Duration::from_secs(30))
++                .unwrap();
++            if timeout.timed_out() && guard.next.is_none() {
++                guard.next = Some(": keepalive\n\n".to_string());
+             }
+-            self.buffer = state.next.take().unwrap_or_default().into_bytes();
+-            self.offset = 0;
+         }
+ 
+         let n = out.len().min(self.buffer.len() - self.offset);
+@@ -1507,16 +1542,38 @@ mod tests {
+         let mut stream = hub.subscribe("first".to_string());
+         let mut initial = [0; 5];
+         stream.read_exact(&mut initial).unwrap();
++        assert_eq!(&initial, b"first");
+ 
+         hub.broadcast("stale".to_string());
+         hub.broadcast("latest".to_string());
+ 
++        // A frame is already queued when we read, so it is delivered directly
++        // (no flush comment); the single slot has coalesced "stale" to "latest".
+         let mut buf = [0; 6];
+         stream.read_exact(&mut buf).unwrap();
+-
+         assert_eq!(&buf, b"latest");
+     }
+ 
++    #[test]
++    fn status_stream_flushes_idle_frame_with_oversized_comment() {
++        // Regression for the "titlebar never returns on unpin while paused" bug:
++        // tiny_http's 1024-byte BufWriter holds a frame unsent until following
++        // bytes overflow it. When the stream would otherwise idle after a frame,
++        // the reader emits a >1 KiB comment that forces that frame to the socket.
++        let hub = StatusBroadcaster::default();
++        let mut stream = hub.subscribe("frame".to_string());
++        let mut frame = [0; 5];
++        stream.read_exact(&mut frame).unwrap();
++        assert_eq!(&frame, b"frame");
++
++        let flush = flush_comment();
++        assert!(flush.len() > 1024, "comment must exceed the 1024-byte BufWriter");
++        assert!(flush.starts_with(b":") && flush.ends_with(b"\n\n"));
++        let mut buf = vec![0u8; flush.len()];
++        stream.read_exact(&mut buf).unwrap();
++        assert_eq!(buf, flush);
++    }
++
+     #[test]
+     fn control_outcome_json_reports_noop_status() {
+         let value = control_outcome_json(&ControlOutcome::Noop {
+diff --git a/desktop-rs/frontend/src/App.tsx b/desktop-rs/frontend/src/App.tsx
+index 7194d77..2063767 100644
+--- a/desktop-rs/frontend/src/App.tsx
++++ b/desktop-rs/frontend/src/App.tsx
+@@ -324,10 +324,27 @@ function App() {
+   // double-clicks (e.g. toggle fullscreen) still work. The host owns the actual
+   // move loop; the overlay just decides the gesture began on draggable surface.
+   const surfaceDragStart = useRef<{ x: number; y: number } | null>(null);
++  // Two distinct notions of "pinned", deliberately kept separate:
++  //  - `onTopRef` / `pinned`: the optimistic INTENT — drives the button
++  //    highlight and the direction of the next toggle command. Updated
++  //    immediately on click so the control feels instant, and rolled back to
++  //    host truth if a command is lost (see pumpOnTopQueue).
++  //  - `hostOnTopRef`: the HOST-CONFIRMED truth echoed as status.window_on_top.
++  //    It alone decides whether a native caption exists, so the surface-drag
++  //    handle must gate on it (never on the optimistic intent) to stay in
++  //    lockstep with the host's nc_hit `has_titlebar`. Otherwise a lost command
++  //    can leave the window with zero drag handles (caption gone AND surface
++  //    drag suppressed) — the "can't move the window" failure.
+   const onTopRef = useRef(false);
++  const hostOnTopRef = useRef(false);
++  const [pinned, setPinned] = useState(false);
++  const setPinnedOptimistic = useCallback((next: boolean) => {
++    onTopRef.current = next;
++    setPinned(next);
++  }, []);
+   const surfaceDragProps = {
+     onPointerDown: (e: ReactPointerEvent) => {
+-      if (!onTopRef.current || e.button !== 0) return;
++      if (!hostOnTopRef.current || e.button !== 0) return;
+       surfaceDragStart.current = { x: e.screenX, y: e.screenY };
+     },
+     onPointerMove: (e: ReactPointerEvent) => {
+@@ -346,27 +363,34 @@ function App() {
+     },
+   };
+ 
+-  // Pin (stay-on-top): the same optimistic desired/in-flight reconcile that
+-  // pause and volume already use (see pauseSync above and
+-  // docs/adr/0001-ui-control-state-sync.md). We hold the user's DESIRED state,
+-  // send it as an idempotent set, and reconcile against the echoed
+-  // window_on_top — so a lossy/laggy status stream can never make us derive a
+-  // command from a stale value. `onTopRef` is the optimistic current state; the
+-  // reconcile effect and requestStayOnTop are its only writers.
++  // Pin (stay-on-top) follows ADR-0001's optimistic + idempotent-set +
++  // reconcile pattern, with one correction the pause/volume controls don't
++  // need: those are re-echoed on every mpv heartbeat, so a missed reconcile
++  // self-heals; window_on_top is emitted ONLY on change, so a stranded
++  // optimistic value would never recover. We therefore (a) keep ONE optimistic
++  // value (`pinned`/`onTopRef`) as the single source for both highlight and
++  // command direction, (b) roll it back to host truth when a command is lost,
++  // and (c) track the host-confirmed value in `hostOnTopRef` for the drag gate.
+   const onTopSync = useRef<{ desired: boolean | null; inFlight: boolean }>({
+     desired: null,
+     inFlight: false,
+   });
+ 
++  // Mirror the host-confirmed pin state into a ref the instant it is echoed, so
++  // failure-rollback and the surface-drag gate always read current host truth.
++  useEffect(() => {
++    if (status.window_on_top != null) hostOnTopRef.current = Boolean(status.window_on_top);
++  }, [status.window_on_top]);
++
+   useEffect(() => {
+     if (status.window_on_top == null) return;
+     const observed = Boolean(status.window_on_top);
+     const desired = onTopSync.current.desired;
+     if (desired === null || observed === desired) {
+       onTopSync.current.desired = null;
+-      onTopRef.current = observed;
++      setPinnedOptimistic(observed);
+     }
+-  }, [status.window_on_top]);
++  }, [status.window_on_top, setPinnedOptimistic]);
+ 
+   const pumpOnTopQueue = useCallback(() => {
+     const sync = onTopSync.current;
+@@ -377,7 +401,15 @@ function App() {
+     void setStayOnTop(sent)
+       .catch(() => {
+         const current = onTopSync.current;
+-        if (current.desired === sent) current.desired = null;
++        if (current.desired === sent) {
++          current.desired = null;
++          // Command lost: undo the optimistic advance back to the host's
++          // last-confirmed state. Without this the next click computes the
++          // wrong direction (a silent no-op against the idempotent host) and
++          // the surface-drag gate desyncs from the real caption state.
++          setPinnedOptimistic(hostOnTopRef.current);
++          showControlToast('pin failed', 'danger');
++        }
+       })
+       .finally(() => {
+         const current = onTopSync.current;
+@@ -386,13 +418,13 @@ function App() {
+           pumpOnTopQueue();
+         }
+       });
+-  }, []);
++  }, [setPinnedOptimistic, showControlToast]);
+ 
+   const requestStayOnTop = useCallback((onTop: boolean) => {
+-    onTopRef.current = onTop;
++    setPinnedOptimistic(onTop);
+     onTopSync.current.desired = onTop;
+     pumpOnTopQueue();
+-  }, [pumpOnTopQueue]);
++  }, [pumpOnTopQueue, setPinnedOptimistic]);
+ 
+   // Button and `i` keybind both route through here. A click can reach the
+   // webview as two events where a keypress can't, so we also drop a duplicate
+@@ -505,7 +537,7 @@ function App() {
+     // the paused check the bar and cursor would hide while paused — leaving the
+     // controls invisible and unclickable until the mouse moves. Paused = show
+     // the controls, like every other player.
+-    const playing = status.phase === 'playing' && !status.playback?.paused;
++    const playing = status.phase === 'playing' && !displayPaused;
+     const keepOpen = showSettings || controlsPointerDown || controlsHovered;
+     window.clearTimeout(controlsIdleTimer.current);
+     if (!playing || keepOpen) {
+@@ -543,7 +575,7 @@ function App() {
+       window.removeEventListener('mousemove', onActivity);
+       document.removeEventListener('mouseleave', onLeaveWindow);
+     };
+-  }, [status.phase, status.playback?.paused, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
++  }, [status.phase, displayPaused, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
+ 
+   useEffect(() => {
+     const clearPointerDown = () => setControlsPointerDown(false);
+@@ -945,6 +977,7 @@ function App() {
+         onVolumeChange={requestVolume}
+         onVolumeWheel={handleVolumeWheel}
+         displayPaused={displayPaused}
++        pinned={pinned}
+         onRequestPause={requestPause}
+         onPrevious={() => runControl(previous)}
+         onSeekRelative={(seconds) => runControl(() => seekRelative(seconds))}
+@@ -1160,6 +1193,7 @@ function BottomControlBar({
+   onVolumeChange,
+   onVolumeWheel,
+   displayPaused,
++  pinned,
+   onRequestPause,
+   onPrevious,
+   onSeekRelative,
+@@ -1183,6 +1217,7 @@ function BottomControlBar({
+   onVolumeChange: (volume: number, flash?: boolean) => void;
+   onVolumeWheel: WheelEventHandler<HTMLDivElement>;
+   displayPaused: boolean;
++  pinned: boolean;
+   onRequestPause: (paused: boolean) => void;
+   onPrevious: () => void;
+   onSeekRelative: (seconds: number) => void;
+@@ -1230,7 +1265,10 @@ function BottomControlBar({
+ 
+   const isMuted = pb ? volume === 0 : false;
+   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
+-  const onTop = Boolean(status.window_on_top);
++  // Optimistic intent (echoed-state-independent) so the pin button highlights
++  // the instant it is clicked, instead of waiting a full status round-trip —
++  // the lag is what made it feel like the toggle "didn't take".
++  const onTop = pinned;
+   // The compact control layout follows window *width*, not any window mode — a
+   // small window gets it whether or not it is pinned on top.
+   const [compactViewport, setCompactViewport] = useState(() => window.innerWidth <= 900);
+diff --git a/docs/adr/0001-ui-control-state-sync.md b/docs/adr/0001-ui-control-state-sync.md
+index 69b28ba..bd3280d 100644
+--- a/docs/adr/0001-ui-control-state-sync.md
++++ b/docs/adr/0001-ui-control-state-sync.md
+@@ -64,10 +64,15 @@ References: [optimistic UI pattern](https://www.freecodecamp.org/news/how-to-use
+ - Backend control endpoints for these controls take a desired value and are
+   idempotent (a request matching current state is a no-op); they do not flip
+   internal state.
+-- **Outstanding:** the pin / stay-on-top control does **not** yet follow this
+-  pattern — it is a backend-owned toggle. It is to be migrated to an `onTopSync`
+-  mirroring `pauseSync`, with `/stay-on-top` taking `{"on_top": bool}` as an
+-  idempotent set. Until then it is the known-nonconformant control.
++- The pin / stay-on-top control now follows this pattern (`onTopSync` +
++  `/stay-on-top {"on_top": bool}`). It needed one addition the heartbeat-backed
++  controls don't: `window_on_top` is echoed **only on change**, so a missed
++  reconcile cannot self-heal the way a missed pause/volume echo does. Pin
++  therefore also (a) keeps one optimistic value driving both highlight and
++  command direction, (b) rolls that value back to host truth on a failed
++  command, and (c) gates the window drag handle on the host-confirmed value, not
++  the optimistic one. See
++  [`desktop-shell.md` → Pin toggle: one click, one command](../feature-contracts/desktop-shell.md#pin-toggle-one-click-one-command).
+ 
+ ## Rejected alternative
+ 
+diff --git a/docs/feature-contracts/desktop-shell.md b/docs/feature-contracts/desktop-shell.md
+index f198d81..7c2a065 100644
+--- a/docs/feature-contracts/desktop-shell.md
++++ b/docs/feature-contracts/desktop-shell.md
+@@ -38,6 +38,41 @@ policy, the old path (`window_pip`, `mini_pointer_inside`, `/pip`, the
+ `mini-controls` PiP coupling, the native-frame swap) is deleted, not kept behind
+ a flag.
+ 
++## Pin toggle: one click, one command
++
++`window_on_top` is harder than the other remote-state controls (pause, volume)
++for one reason: **it is echoed only on change.** Pause and volume ride every mpv
++heartbeat, so a missed reconcile self-heals on the next frame; `window_on_top` is
++emitted only when `WM_SET_STAY_ON_TOP` actually flips `is_on_top`, so a stranded
++optimistic value would *never* recover. ADR-0001's pattern is necessary but not
++sufficient here. The additional invariants:
++
++1. **One optimistic value for intent.** `pinned`/`onTopRef` (overlay) is the
++   single source for both the button highlight *and* the direction of the next
++   toggle. It updates immediately on click (instant feedback — the lag was what
++   made the button feel like it "didn't take"). It is never read from
++   `status.window_on_top`.
++2. **Roll back on a lost command.** If a `/stay-on-top` POST fails, the overlay
++   resets the optimistic value to the host-confirmed `hostOnTopRef`. Otherwise
++   the next click derives the wrong direction and hits the host's idempotent
++   no-op — a silent dead toggle.
++3. **The drag handle gates on host truth, never on intent.** Exactly one drag
++   affordance must exist at all times: the native caption when not pinned, the
++   overlay surface-drag when pinned — never zero, never both. Both the host
++   (`nc_hit has_titlebar = !is_on_top`) and the overlay (`surfaceDragProps` gate,
++   titlebar render condition) key off the *same* host-confirmed value
++   (`status.window_on_top` / `hostOnTopRef`), so they can never disagree about
++   whether a caption exists. A failed command that desynced intent from host
++   truth must not be able to suppress the surface drag while the caption is also
++   gone.
++4. **The host re-asserts `is_on_top` after every transition that can change
++   Z-order.** Exiting fullscreen restores a pre-pin exstyle that lacks
++   `WS_EX_TOPMOST`, so the fullscreen-exit path re-applies `HWND_TOPMOST` from the
++   live `is_on_top`. Pin entry clears `WS_MAXIMIZE` (`SW_RESTORE`) before the
++   aspect snap so the floating window keeps working resize borders. The
++   invariant: **whenever fullscreen/maximize changes, real Z-order and the
++   emitted `window_on_top` are reconciled back to `is_on_top`.**
++
+ ## Chrome geometry — one source of truth, DPI-correct
+ 
+ The custom titlebar's dimensions are defined **once**, in logical (96-DPI)

@@ -1,0 +1,133 @@
+[
+  {
+    "author": {
+      "date": "2026-10-30T21:30:08Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-10-30T21:30:08Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/69fa081b1029163bab5aa6a3c29591d42f3e6a06",
+    "message": "Keep one playing round entry and resume there (APPS-57)",
+    "node_id": "C_kwDOS5KECdoAKDY5ZmEwODFiMTAyOTE2M2JhYjVhYTZhM2MyOTU5MWQ0MmYzZTZhMDY",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/0f3a3b3056340419ad7bdf6b51b45933dfeabf57",
+        "sha": "0f3a3b3056340419ad7bdf6b51b45933dfeabf57",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/0f3a3b3056340419ad7bdf6b51b45933dfeabf57"
+      }
+    ],
+    "sha": "69fa081b1029163bab5aa6a3c29591d42f3e6a06",
+    "tree": {
+      "sha": "8daab51b2d3161355365bcc11f8371fb7c3e2d6d",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/8daab51b2d3161355365bcc11f8371fb7c3e2d6d"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/69fa081b1029163bab5aa6a3c29591d42f3e6a06",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": "197529a49d1ee0ff5e3cb7af1b29024b38ca2d6f",
+    "commit_url": "https://api.github.com/repos/nelsong6/shows/commits/197529a49d1ee0ff5e3cb7af1b29024b38ca2d6f",
+    "created_at": "2026-10-30T21:35:51Z",
+    "event": "merged",
+    "id": 34734651774,
+    "node_id": "ME_lADOS5KECc8AAAABbTZkTs8AAAAIFli5fg",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/34734651774"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": null,
+    "commit_url": null,
+    "created_at": "2026-10-30T21:35:51Z",
+    "event": "closed",
+    "id": 34734651870,
+    "intent": null,
+    "node_id": "CE_lADOS5KECc8AAAABbTZkTs8AAAAIFli53g",
+    "performed_via_github_app": null,
+    "state_reason": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/34734651870"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": null,
+    "commit_url": null,
+    "created_at": "2026-10-30T21:35:53Z",
+    "event": "head_ref_deleted",
+    "id": 34734654186,
+    "node_id": "HRDE_lADOS5KECc8AAAABbTZkTs8AAAAIFljC6g",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/34734654186"
+  }
+]

@@ -1,0 +1,44 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/4c6aef41123de046c848f716ccf39dbbc24525e3/comments",
+    "commit": {
+      "author": {
+        "date": "2026-07-10T21:08:56Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-07-10T21:08:56Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Make desktop startup sync observable and nonblocking",
+      "tree": {
+        "sha": "9cfffa6e5e1c086baf4565a004b8dba4789e3ad7",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/9cfffa6e5e1c086baf4565a004b8dba4789e3ad7"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/4c6aef41123de046c848f716ccf39dbbc24525e3",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/4c6aef41123de046c848f716ccf39dbbc24525e3",
+    "node_id": "C_kwDOS5KECdoAKDRjNmFlZjQxMTIzZGUwNDZjODQ4ZjcxNmNjZjM5ZGJiYzI0NTI1ZTM",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/f71b705d883965eb91bf4d6399d51471223bc302",
+        "sha": "f71b705d883965eb91bf4d6399d51471223bc302",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/f71b705d883965eb91bf4d6399d51471223bc302"
+      }
+    ],
+    "sha": "4c6aef41123de046c848f716ccf39dbbc24525e3",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/4c6aef41123de046c848f716ccf39dbbc24525e3"
+  }
+]

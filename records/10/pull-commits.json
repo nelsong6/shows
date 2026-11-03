@@ -1,0 +1,44 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/d69ebfda9f5a89ca67c225f14cd9ee8084947817/comments",
+    "commit": {
+      "author": {
+        "date": "2026-07-20T03:43:30Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-07-20T03:43:30Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Fix repository architecture guidance",
+      "tree": {
+        "sha": "987d9e43a0781edcbc82a22faea1ebb438ae4e9d",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/987d9e43a0781edcbc82a22faea1ebb438ae4e9d"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/d69ebfda9f5a89ca67c225f14cd9ee8084947817",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/d69ebfda9f5a89ca67c225f14cd9ee8084947817",
+    "node_id": "C_kwDOS5KECdoAKGQ2OWViZmRhOWY1YTg5Y2E2N2MyMjVmMTRjZDllZTgwODQ5NDc4MTc",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/b18c1a3cbdc9dec667e7f17086ee06e6709c0c4d",
+        "sha": "b18c1a3cbdc9dec667e7f17086ee06e6709c0c4d",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/b18c1a3cbdc9dec667e7f17086ee06e6709c0c4d"
+      }
+    ],
+    "sha": "d69ebfda9f5a89ca67c225f14cd9ee8084947817",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/d69ebfda9f5a89ca67c225f14cd9ee8084947817"
+  }
+]

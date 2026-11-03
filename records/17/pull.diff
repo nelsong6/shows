@@ -1,0 +1,1553 @@
+diff --git a/.github/workflows/build-desktop.yaml b/.github/workflows/build-desktop.yaml
+index 676ed95..22e034d 100644
+--- a/.github/workflows/build-desktop.yaml
++++ b/.github/workflows/build-desktop.yaml
+@@ -11,6 +11,7 @@ on:
+     branches: [main]
+     paths:
+       - desktop-rs/**
++      - scripts/**
+       - .github/workflows/build-desktop.yaml
+   # No paths filter on PRs: keep the status check reporting, and
+   # short-circuit inside when nothing relevant changed.
+@@ -28,6 +29,9 @@ jobs:
+   build:
+     name: Package shows-desktop for Windows
+     runs-on: windows-latest
++    env:
++      SHOWS_BUILD_SHA: ${{ github.sha }}
++      SHOWS_UPDATE_CHANNEL: stable
+     steps:
+       - name: Checkout
+         uses: actions/checkout@v4
+@@ -61,8 +65,13 @@ jobs:
+           # HEAD — instead of a freshly shallow-fetched origin/main, which can
+           # land past the merge base when main advances during the PR.
+           changed="$(git diff --name-only "$BASE_SHA"...HEAD)"
++          if printf '%s\n' "$changed" | grep -qE '^(desktop-rs/(core|control|desktop|remote)/|desktop-rs/Cargo|scripts/|\.github/workflows/)'; then
++            echo "rust=true" >> "$GITHUB_OUTPUT"
++          else
++            echo "rust=false" >> "$GITHUB_OUTPUT"
++          fi
+           echo "$changed"
+-          if printf '%s\n' "$changed" | grep -qE '^(desktop-rs/|\.github/workflows/build-desktop\.yaml$)'; then
++          if printf '%s\n' "$changed" | grep -qE '^(desktop-rs/|scripts/|\.github/workflows/build-desktop\.yaml$)'; then
+             echo "skip=false" >> "$GITHUB_OUTPUT"
+           else
+             echo "skip=true" >> "$GITHUB_OUTPUT"
+@@ -70,11 +79,11 @@ jobs:
+           fi
+ 
+       - name: Setup Rust (stable MSVC)
+-        if: steps.changes.outputs.skip != 'true'
++        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'pull_request' || steps.changes.outputs.rust == 'true')
+         uses: dtolnay/rust-toolchain@stable
+ 
+       - name: Cache cargo target
+-        if: steps.changes.outputs.skip != 'true'
++        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'pull_request' || steps.changes.outputs.rust == 'true')
+         uses: Swatinem/rust-cache@v2
+         with:
+           workspaces: desktop-rs
+@@ -99,7 +108,7 @@ jobs:
+       # Rust dynamic loader (libloading) picks it up at runtime. Bump the
+       # cache key when libmpv bumps.
+       - name: Cache libmpv runtime
+-        if: steps.changes.outputs.skip != 'true'
++        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
+         id: libmpv-cache
+         uses: actions/cache@v4
+         with:
+@@ -107,7 +116,7 @@ jobs:
+           key: libmpv-windows-20250420-3600c71
+ 
+       - name: Fetch libmpv (cold cache only)
+-        if: steps.changes.outputs.skip != 'true' && steps.libmpv-cache.outputs.cache-hit != 'true'
++        if: steps.changes.outputs.skip != 'true' && steps.libmpv-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
+         shell: bash
+         run: |
+           set -euo pipefail
+@@ -121,12 +130,17 @@ jobs:
+           test -f desktop-rs/desktop/third_party/libmpv/libmpv-2.dll
+ 
+       - name: cargo test (workspace)
+-        if: steps.changes.outputs.skip != 'true'
++        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'pull_request' || steps.changes.outputs.rust == 'true')
+         working-directory: desktop-rs
+-        run: cargo test --workspace --release --locked
++        run: |
++          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
++            cargo test --workspace --locked
++          } else {
++            cargo test --workspace --release --locked
++          }
+ 
+       - name: cargo build --release
+-        if: steps.changes.outputs.skip != 'true'
++        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
+         working-directory: desktop-rs
+         # `SHOWS_BUILD_SHA` is read at compile time by `core/src/update.rs`
+         # via `option_env!`. With it set, the running app can compare its
+@@ -140,13 +154,20 @@ jobs:
+         run: cargo build --release -p shows-desktop -p shows-remote --locked
+ 
+       - name: Verify terminal channel installation
+-        if: steps.changes.outputs.skip != 'true'
++        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'pull_request' || steps.changes.outputs.rust == 'true')
+         shell: pwsh
+-        run: ./scripts/test-remote-distribution.ps1
++        run: |
++          $buildProfile = if ($env:GITHUB_EVENT_NAME -eq 'pull_request') { 'debug' } else { 'release' }
++          ./scripts/test-remote-distribution.ps1 -RemoteExe "desktop-rs/target/$buildProfile/shows-remote.exe"
++          foreach ($file in Get-ChildItem scripts/*.ps1) {
++            $tokens = $null; $parseErrors = $null
++            [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
++            if ($parseErrors) { throw ($parseErrors | Out-String) }
++          }
+ 
+       # Stage the bundle: desktop, terminal remote, and libmpv runtime.
+       - name: Stage release bundle
+-        if: steps.changes.outputs.skip != 'true'
++        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
+         shell: pwsh
+         run: |
+           $out = "desktop-rs/dist/shows-desktop"
+@@ -158,8 +179,16 @@ jobs:
+           if (-not (Test-Path "$out/shows-remote.exe"))  { throw "build failed: shows-remote.exe missing" }
+           if (-not (Test-Path "$out/libmpv-2.dll"))     { throw "bundle missing libmpv-2.dll" }
+ 
++      - name: Sign and verify home executables and runtime
++        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
++        shell: pwsh
++        env:
++          AT_TERMINAL_PFX: ${{ secrets.AT_TERMINAL_PFX }}
++          AT_TERMINAL_PFX_PASSWORD: ${{ secrets.AT_TERMINAL_PFX_PASSWORD }}
++        run: ./scripts/sign-shows-bundle.ps1 -BundleDirectory desktop-rs/dist/shows-desktop
++
+       - name: Zip bundle
+-        if: steps.changes.outputs.skip != 'true'
++        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
+         shell: pwsh
+         working-directory: desktop-rs
+         run: Compress-Archive -Path dist/shows-desktop/* -DestinationPath dist/shows-desktop-windows-amd64.zip -Force
+@@ -167,7 +196,7 @@ jobs:
+       # PR + dispatch: upload the zip for download/debugging. Push-to-main
+       # distributes via the Release below.
+       - name: Upload workflow artifact
+-        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'push' || github.ref != 'refs/heads/main')
++        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'push' || github.ref != 'refs/heads/main') && github.event_name != 'pull_request'
+         uses: actions/upload-artifact@v4
+         with:
+           name: shows-desktop-${{ github.sha }}
+diff --git a/.github/workflows/test.yaml b/.github/workflows/test.yaml
+index 3136d0e..76f2c35 100644
+--- a/.github/workflows/test.yaml
++++ b/.github/workflows/test.yaml
+@@ -17,10 +17,26 @@ jobs:
+     runs-on: ubuntu-latest
+     steps:
+       - uses: actions/checkout@v6
++        with:
++          fetch-depth: 0
++
++      - name: Detect Rust changes
++        id: changes
++        shell: bash
++        env:
++          BASE_SHA: ${{ github.event.pull_request.base.sha }}
++        run: |
++          if [ "${{ github.event_name }}" != "pull_request" ] || git diff --name-only "$BASE_SHA"...HEAD | grep -qE '^(desktop-rs/(core|control|desktop|remote)/|desktop-rs/Cargo|\.github/workflows/test\.yaml$)'; then
++            echo "rust=true" >> "$GITHUB_OUTPUT"
++          else
++            echo "rust=false" >> "$GITHUB_OUTPUT"
++          fi
+ 
+       - uses: dtolnay/rust-toolchain@stable
++        if: steps.changes.outputs.rust == 'true'
+ 
+       - uses: Swatinem/rust-cache@v2
++        if: steps.changes.outputs.rust == 'true'
+         with:
+           workspaces: desktop-rs
+ 
+@@ -30,5 +46,6 @@ jobs:
+       # is the cheap per-PR sanity check; the Windows-only shell goes through
+       # `build-desktop.yaml`.
+       - name: Test engine, control protocol and terminal remote
++        if: steps.changes.outputs.rust == 'true'
+         working-directory: desktop-rs
+         run: cargo test -p shows-core -p shows-control -p shows-remote --locked
+diff --git a/AGENTS.md b/AGENTS.md
+index 2cc7dec..368b321 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -93,28 +93,37 @@ The library normally expects show roots under `S:\Group-Nelson`. See `docs/new-c
+ 
+ ## Build and local testing
+ 
+-The frontend is embedded into the release executable. Use the NAS publisher for cross-computer testing:
++Use the fast development loop before opening a PR. See
++`docs/development.md` and `docs/feature-contracts/development-lifecycle.md`.
+ 
+ ```powershell
+-cd desktop-rs\frontend
+-npm run build
+-
+-cd ..
+-cargo test --workspace
+-cargo build --release -p shows-desktop
+-..\scripts\publish-shows-channel.ps1 -Channel dev
++.\scripts\dev-shows.ps1 ui -Target upstairspc
++.\scripts\dev-shows.ps1 remote -Target upstairspc status
++.\scripts\dev-shows.ps1 desktop
++.\scripts\dev-shows.ps1 test
++.\scripts\dev-shows.ps1 stop
+ ```
+ 
+-The normal local test install is `D:\Downloads\shows\shows-desktop.exe`. After a successful release build, close the running app and copy the new executable:
++UI previews use tracked Vite HMR against the real engine and SSE feed; they do
++not need a Rust build, a local player, or another database. Native previews
++start paused and require Vite; debug builds do not embed frontend assets.
++`SHOWS_DIST_DIR` and the fixed-path release-copy smoke script are retired.
++
++Keep debug output warm across worktrees in `D:\build\shows\cargo` (override
++`SHOWS_DEV_TARGET_DIR`). Local Cargo builds use at most four jobs. Release
++compilation is not an edit-preview step on nelsonpc.
++
++PRs run the relevant frontend/debug tests; main produces the optimized, embedded
++release bundle. After CI and merge, publish and install the exact main release
++on this PC and the TV in one operation:
+ 
+ ```powershell
+-Stop-Process -Name shows-desktop -Force -ErrorAction SilentlyContinue
+-Copy-Item -Force `
+-  .\target\release\shows-desktop.exe `
+-  D:\Downloads\shows\shows-desktop.exe
++.\scripts\dev-shows.ps1 ship -Target upstairspc
+ ```
+ 
+-Use `scripts/test-install-release.ps1` for the legacy fixed-path smoke test when appropriate. The normal cross-computer path is the versioned launcher governed by `docs/feature-contracts/desktop-distribution.md`.
++The update command preserves a running TV's selected episode and pause state,
++uses its interactive Windows session, and leaves a closed app closed. Stable
++remains the hash-verified CI artifact; preview code never replaces it.
+ 
+ ## Release
+ 
+diff --git a/desktop-rs/control/src/lib.rs b/desktop-rs/control/src/lib.rs
+index 95c4a3e..62bc60d 100644
+--- a/desktop-rs/control/src/lib.rs
++++ b/desktop-rs/control/src/lib.rs
+@@ -11,6 +11,25 @@ pub const CONTROL_ADDR: &str = "127.0.0.1:45831";
+ pub const PROTOCOL_VERSION: u32 = 1;
+ pub const MAX_FRAME: u64 = 1024 * 1024;
+ 
++pub fn overlay_url(port: u16, development: Option<&str>, debug: bool) -> Result<String, String> {
++    match (debug, development) {
++        (false, None) => Ok(format!("http://127.0.0.1:{port}/")),
++        (false, Some(_)) => Err("SHOWS_DEV_URL is supported only by debug builds".into()),
++        (true, None) => Err("Start the live overlay with scripts/dev-shows.ps1 desktop".into()),
++        (true, Some(value)) => {
++            let uri: ureq::http::Uri = value.parse().map_err(|_| "invalid SHOWS_DEV_URL")?;
++            let local = matches!(uri.host(), Some("localhost" | "127.0.0.1" | "[::1]"));
++            if uri.scheme_str() != Some("http")
++                || !local
++                || uri.authority().is_some_and(|a| a.as_str().contains('@'))
++            {
++                return Err("SHOWS_DEV_URL must be an HTTP loopback URL".into());
++            }
++            Ok(value.to_string())
++        }
++    }
++}
++
+ pub fn control_addr() -> Result<String, String> {
+     match std::env::var("SHOWS_CONTROL_PORT") {
+         Ok(port) => {
+@@ -200,7 +219,6 @@ impl Client {
+             .proxy(None)
+             .max_redirects(0)
+             .timeout_connect(Some(Duration::from_secs(8)))
+-            .timeout_recv_response(Some(Duration::from_secs(8)))
+             .build()
+             .into();
+         let response = agent
+diff --git a/desktop-rs/control/src/tests.rs b/desktop-rs/control/src/tests.rs
+index a3b5aee..d68bced 100644
+--- a/desktop-rs/control/src/tests.rs
++++ b/desktop-rs/control/src/tests.rs
+@@ -2,6 +2,28 @@ use super::*;
+ use std::io::Cursor;
+ use tiny_http::{Header, Response, Server};
+ 
++#[test]
++fn live_overlay_is_explicit_and_cannot_replace_release_assets() {
++    assert_eq!(
++        overlay_url(45831, None, false).unwrap(),
++        "http://127.0.0.1:45831/"
++    );
++    assert!(overlay_url(45831, Some("http://127.0.0.1:5173/"), false).is_err());
++    assert!(overlay_url(45831, None, true).is_err());
++    assert_eq!(
++        overlay_url(45831, Some("http://127.0.0.1:5173/"), true).unwrap(),
++        "http://127.0.0.1:5173/"
++    );
++    for url in [
++        "https://example.com/",
++        "http://upstairspc/",
++        "javascript:alert(1)",
++        "http://user@localhost/",
++    ] {
++        assert!(overlay_url(45831, Some(url), true).is_err());
++    }
++}
++
+ fn fixture(replies: Vec<(&'static str, u16, Value)>) -> (String, std::thread::JoinHandle<()>) {
+     let server = Server::http("127.0.0.1:0").unwrap();
+     let address = server.server_addr().to_string();
+@@ -167,3 +189,58 @@ fn live_stream_parses_multiline_unicode_status_and_reports_closure() {
+     assert!(error.contains("closed"));
+     worker.join().unwrap();
+ }
++
++#[test]
++fn live_stream_survives_idle_beyond_the_command_response_deadline() {
++    use std::io::{BufRead, BufReader, Write};
++    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++    let address = listener.local_addr().unwrap().to_string();
++    let worker = std::thread::spawn(move || {
++        for stream_number in 0..2 {
++            let (mut socket, _) = listener.accept().unwrap();
++            socket
++                .set_read_timeout(Some(Duration::from_secs(3)))
++                .unwrap();
++            let mut reader = BufReader::new(socket.try_clone().unwrap());
++            let mut line = String::new();
++            loop {
++                line.clear();
++                reader.read_line(&mut line).unwrap();
++                if line == "\r\n" {
++                    break;
++                }
++            }
++            if stream_number == 0 {
++                let body = identity().to_string();
++                write!(
++                    socket,
++                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
++                    body.len()
++                )
++                .unwrap();
++            } else {
++                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\nevent: status\ndata: {\"sequence\":1}\n\n").unwrap();
++                // ureq's response timeout also constrains subsequent body reads.
++                // An SSE connection must remain usable beyond the 8-second
++                // command/header deadline, even with no intervening event.
++                std::thread::sleep(Duration::from_secs(9));
++                let _ =
++                    socket.write_all(b": heartbeat\n\nevent: status\ndata: {\"sequence\":2}\n\n");
++            }
++        }
++    });
++    let client = Client::connect_to(&address).unwrap();
++    let mut sequences = Vec::new();
++    let result = client.watch(|frame| {
++        if let Frame::Status { status } = frame {
++            sequences.push(status["sequence"].as_u64().unwrap());
++            if sequences.len() == 2 {
++                return Err("test complete".into());
++            }
++        }
++        Ok(())
++    });
++    worker.join().unwrap();
++    assert_eq!(sequences, [1, 2]);
++    assert_eq!(result.unwrap_err(), "test complete");
++}
+diff --git a/desktop-rs/desktop/src/main.rs b/desktop-rs/desktop/src/main.rs
+index a8b3054..f00bafe 100644
+--- a/desktop-rs/desktop/src/main.rs
++++ b/desktop-rs/desktop/src/main.rs
+@@ -124,19 +124,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+     log::info!("opening authoritative database at {shared_db_path}");
+     let replica = Arc::new(Replica::try_new(&shared_db_path)?);
+ 
+-    // Control server serves the React overlay + the control surface. Picking
+-    // a dist dir: explicit env override > in-tree source dir (dev) > embedded (release).
+-    let dist_dir = std::env::var("SHOWS_DIST_DIR")
+-        .ok()
+-        .map(std::path::PathBuf::from)
+-        .or_else(|| {
+-            if cfg!(debug_assertions) {
+-                Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../frontend/dist"))
+-            } else {
+-                None
+-            }
+-        });
+-    let server = ControlServer::new(dist_dir, replica.clone(), playlists.clone());
++    // Releases embed the overlay. Debug builds use the tracked Vite server.
++    let server = ControlServer::new(replica.clone(), playlists.clone());
+     server.push_raw(serde_json::json!({
+         "database": {
+             "path": shared_db_path,
+@@ -145,7 +134,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+         }
+     }));
+     let port = server.start();
+-    let overlay_url = format!("http://127.0.0.1:{port}/");
++    let development_url = std::env::var("SHOWS_DEV_URL").ok();
++    let overlay_url = shows_control::overlay_url(port, development_url.as_deref(), cfg!(debug_assertions)).map_err(to_err)?;
+     log::info!("control server on {overlay_url}");
+ 
+     // mpv + player + compositor. The render context (created in the compositor)
+diff --git a/desktop-rs/desktop/src/mpv.rs b/desktop-rs/desktop/src/mpv.rs
+index 8ea0abb..a7615c5 100644
+--- a/desktop-rs/desktop/src/mpv.rs
++++ b/desktop-rs/desktop/src/mpv.rs
+@@ -155,6 +155,8 @@ impl Handle {
+         h.set_option("vo", "libmpv");
+         h.set_option("force-window", "no");
+         h.set_option("idle", "yes");
++        #[cfg(debug_assertions)]
++        h.set_option("pause", "yes");
+         h.set_option("keep-open", "no");
+         h.set_option("hwdec", "no");
+         let r = unsafe { (h.api.initialize)(h.ctx) };
+diff --git a/desktop-rs/desktop/src/webserver.rs b/desktop-rs/desktop/src/webserver.rs
+index fd1bec0..c879722 100644
+--- a/desktop-rs/desktop/src/webserver.rs
++++ b/desktop-rs/desktop/src/webserver.rs
+@@ -6,7 +6,7 @@
+ //! `/library/*`.
+ 
+ use std::io::Read;
+-use std::path::{Path, PathBuf};
++use std::path::Path;
+ use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::{Arc, Condvar, Mutex, Weak};
+ use std::time::Duration;
+@@ -20,10 +20,18 @@ use shows_core::scan;
+ 
+ use crate::player::Player;
+ 
++#[cfg(not(debug_assertions))]
+ #[derive(rust_embed::RustEmbed)]
+ #[folder = "../frontend/dist"]
+ struct Asset;
+ 
++fn embedded_asset(path: &str) -> Option<Vec<u8>> {
++    #[cfg(not(debug_assertions))]
++    { Asset::get(path).map(|file| file.data.into_owned()) }
++    #[cfg(debug_assertions)]
++    { let _ = path; None }
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub enum WindowAction {
+     Minimize,
+@@ -223,7 +231,6 @@ type FullscreenCb = Box<dyn Fn() + Send + Sync>;
+ type StayOnTopCb = Box<dyn Fn(bool) + Send + Sync>;
+ 
+ pub struct ControlServer {
+-    dist_dir: Option<PathBuf>,
+     playlists: Vec<String>,
+     replica: Arc<Replica>,
+     status: Mutex<serde_json::Map<String, Value>>,
+@@ -238,7 +245,6 @@ pub struct ControlServer {
+ 
+ impl ControlServer {
+     pub fn new(
+-        dist_dir: Option<PathBuf>,
+         replica: Arc<Replica>,
+         playlists: Vec<String>,
+     ) -> Arc<ControlServer> {
+@@ -255,7 +261,6 @@ impl ControlServer {
+         status.insert("window_fullscreen".into(), json!(false));
+         status.insert("window_on_top".into(), json!(false));
+         Arc::new(ControlServer {
+-            dist_dir,
+             playlists,
+             replica,
+             status: Mutex::new(status),
+@@ -313,13 +318,7 @@ impl ControlServer {
+     }
+ 
+     pub fn index_html(&self) -> Vec<u8> {
+-        if let Some(ref dist_dir) = self.dist_dir {
+-            std::fs::read(dist_dir.join("index.html")).unwrap_or_default()
+-        } else {
+-            Asset::get("index.html")
+-                .map(|file| file.data.into_owned())
+-                .unwrap_or_default()
+-        }
++        embedded_asset("index.html").unwrap_or_default()
+     }
+ 
+     pub fn start(self: &Arc<Self>) -> u16 {
+@@ -1093,20 +1092,8 @@ impl ControlServer {
+ 
+     fn static_file(&self, rel: &str) -> Option<(Vec<u8>, String)> {
+         let rel = rel.trim_start_matches('/');
+-        if let Some(ref dist_dir) = self.dist_dir {
+-            let full = dist_dir.join(rel).canonicalize().ok()?;
+-            let dist = dist_dir.canonicalize().ok()?;
+-            if !full.starts_with(&dist) {
+-                return None; // traversal guard
+-            }
+-            let data = std::fs::read(&full).ok()?;
+-            Some((data, content_type(&full)))
+-        } else {
+-            let file = Asset::get(rel)?;
+-            let data = file.data.into_owned();
+-            let ctype = content_type(Path::new(rel));
+-            Some((data, ctype))
+-        }
++        let data = embedded_asset(rel)?;
++        Some((data, content_type(Path::new(rel))))
+     }
+ }
+ 
+@@ -1494,7 +1481,7 @@ mod tests {
+ 
+     #[test]
+     fn native_remote_reports_unavailable_player_without_mutating_shared_state() {
+-        let control = ControlServer::new(None, Arc::new(Replica::new(":memory:")), vec!["nelson".into()]);
++        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec!["nelson".into()]);
+         let revision = control.replica.revision();
+         let listener = Server::http("127.0.0.1:0").unwrap();
+         let address = listener.server_addr().to_string();
+@@ -1514,7 +1501,7 @@ mod tests {
+     fn remote_rejects_browser_requests_before_applying_controls() {
+         use std::io::Write;
+         for headers in ["Content-Type: text/plain\r\n", "Content-Type: application/json\r\nOrigin: https://example.com\r\n"] {
+-            let control = ControlServer::new(None, Arc::new(Replica::new(":memory:")), vec![]);
++            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+             let listener = Server::http("127.0.0.1:0").unwrap();
+             let address = listener.server_addr().to_string();
+             let worker = std::thread::spawn(move || {
+@@ -1590,9 +1577,7 @@ mod tests {
+ 
+     #[test]
+     fn identical_shell_state_is_rebroadcast_as_an_acknowledgement() {
+-        let server = ControlServer::new(
+-            None,
+-            Arc::new(Replica::new(":memory:")),
++        let server = ControlServer::new(Arc::new(Replica::new(":memory:")),
+             vec!["nelson".to_string()],
+         );
+ 
+@@ -1619,9 +1604,7 @@ mod tests {
+ 
+     #[test]
+     fn initial_status_snapshot_has_frontend_contract_fields() {
+-        let server = ControlServer::new(
+-            None,
+-            Arc::new(Replica::new(":memory:")),
++        let server = ControlServer::new(Arc::new(Replica::new(":memory:")),
+             vec!["nelson".to_string()],
+         );
+         let value = server.status_json();
+diff --git a/desktop-rs/frontend/dev-server.mjs b/desktop-rs/frontend/dev-server.mjs
+new file mode 100644
+index 0000000..09fd537
+--- /dev/null
++++ b/desktop-rs/frontend/dev-server.mjs
+@@ -0,0 +1,130 @@
++import {spawn} from 'node:child_process';
++import http from 'node:http';
++import net from 'node:net';
++
++export function identity() {
++  return {
++    managed: process.env.DEVCTL_MANAGED === '1',
++    environment: process.env.DEVCTL_ENVIRONMENT_NAME ?? '',
++    project: process.env.DEVCTL_PROJECT ?? '',
++    repo_dir: process.env.DEVCTL_REPO_DIR ?? '',
++    revision: process.env.DEVCTL_SOURCE_REVISION ?? '',
++    configuration_id: process.env.DEVCTL_CONFIGURATION_ID ?? '',
++    port: Number(process.env.DEVCTL_FRONTEND_PORT ?? process.env.PORT ?? 0),
++    pid: process.pid,
++  };
++}
++
++function readInfo(port) {
++  return new Promise((resolve, reject) => {
++    const request = http.get({hostname: '127.0.0.1', port, path: '/remote/info', timeout: 2000}, response => {
++      let text = '';
++      response.setEncoding('utf8');
++      response.on('data', chunk => { text += chunk; if (text.length > 8192) request.destroy(new Error('oversized desktop identity')); });
++      response.on('end', () => {
++        try {
++          const info = JSON.parse(text);
++          if (response.statusCode !== 200 || info.application !== 'shows-desktop' || info.protocol !== 1) throw new Error('Target is not the current Shows desktop');
++          resolve(info);
++        } catch (error) { reject(error); }
++      });
++    });
++    request.on('timeout', () => request.destroy(new Error('Shows identity request timed out')));
++    request.on('error', reject);
++  });
++}
++
++function freePort() {
++  return new Promise((resolve, reject) => {
++    const listener = net.createServer();
++    listener.once('error', reject);
++    listener.listen(0, '127.0.0.1', () => {
++      const port = listener.address().port;
++      listener.close(error => error ? reject(error) : resolve(port));
++    });
++  });
++}
++
++// Vite owns the SSH child; devctl's Job Object owns both processes. Closing the
++// preview cannot leave an independently running tunnel or another player.
++export async function showsDevelopment() {
++  const target = process.env.SHOWS_DEV_TARGET ?? 'local';
++  if (!/^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/.test(target)) throw new Error('SHOWS_DEV_TARGET must be a hostname or local');
++  const controlPort = Number(process.env.SHOWS_CONTROL_PORT ?? 45831);
++  if (!Number.isInteger(controlPort) || controlPort < 1 || controlPort > 65535) throw new Error('Invalid Shows control port');
++  const port = target === 'local' ? controlPort : await freePort();
++  let tunnel;
++  let desktop;
++  let closing = false;
++  let failure;
++  return {
++    name: 'shows-development',
++    apply: 'serve',
++    config() {
++      return {server: {host: '127.0.0.1', proxy: {
++        '^/(status|shows|stats|history|health|pause|skip|prev|defer|seek|volume|sub|audio|fullscreen|stay-on-top|window|library|round|play-show|remote)(/|\\?|$)': {
++          target: `http://127.0.0.1:${port}`,
++          proxyTimeout: 0,
++          timeout: 0,
++        },
++      }}};
++    },
++    configureServer(server) {
++      const native = process.env.SHOWS_DEV_DESKTOP_EXE;
++      if (native) {
++        if (target !== 'local') throw new Error('Native preview must use the local engine');
++        server.httpServer?.once('listening', () => {
++          desktop = spawn(native, [], {env: {...process.env, SHOWS_DEV_URL: `http://127.0.0.1:${server.config.server.port}/`}, windowsHide: true, stdio: ['ignore','inherit','inherit']});
++          desktop.once('error', error => { failure = error.message; });
++        });
++      }
++      if (target !== 'local') {
++        tunnel = spawn(process.platform === 'win32' ? 'ssh.exe' : 'ssh', [
++          '-N', '-T', '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
++          '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=8',
++          '-o', 'ServerAliveInterval=5', '-o', 'ServerAliveCountMax=2',
++          '-L', `127.0.0.1:${port}:127.0.0.1:${controlPort}`, target,
++        ], {windowsHide: true, stdio: ['ignore', 'ignore', 'pipe']});
++        tunnel.stderr.setEncoding('utf8');
++        tunnel.stderr.on('data', text => { failure = text.trim().slice(-8192); });
++        tunnel.once('error', error => { failure = error.message; });
++        tunnel.once('exit', () => {
++          if (!closing) {
++            failure ??= 'SSH connection closed';
++            server.config.logger.error(`Shows preview lost ${target}: ${failure}`);
++            server.close().finally(() => process.exit(1));
++          }
++        });
++      }
++      server.httpServer?.once('close', () => { closing = true; tunnel?.kill(); });
++      server.middlewares.use(async (request, response, next) => {
++        const path = request.url?.split('?')[0];
++        if (target !== 'local' && /^\/(window\/|fullscreen$|stay-on-top$)/.test(path ?? '')) {
++          response.statusCode = 409;
++          response.setHeader('Content-Type', 'application/json');
++          response.end(JSON.stringify({ok: false, message: 'Window controls require the native desktop preview'}));
++          return;
++        }
++        if (path !== '/__devctl/health' && path !== '/api/__devctl/health') return next();
++        response.setHeader('Content-Type', 'application/json');
++        response.setHeader('Cache-Control', 'no-store');
++        try {
++          const body = {...identity(), target, nativeDesktop: Boolean(native)};
++          if (path === '/api/__devctl/health') {
++            if (failure) throw new Error(failure);
++            body.desktop = await readInfo(port);
++            // This PID identifies the managed local transport to the desktop.
++            body.pid = target === 'local' ? body.desktop.pid : tunnel.pid;
++          }
++          response.end(JSON.stringify(body));
++        } catch (error) {
++          response.statusCode = 503;
++          response.end(JSON.stringify({...identity(), target, error: error.message}));
++        }
++      });
++    },
++    transformIndexHtml() {
++      return [{tag: 'script', children: `document.title = ${JSON.stringify(`Shows preview — ${target}`)};`}];
++    },
++  };
++}
+diff --git a/desktop-rs/frontend/vite.config.ts b/desktop-rs/frontend/vite.config.ts
+index 1de925d..3daf3cd 100644
+--- a/desktop-rs/frontend/vite.config.ts
++++ b/desktop-rs/frontend/vite.config.ts
+@@ -1,10 +1,11 @@
+ import {defineConfig} from 'vite'
+ import react from '@vitejs/plugin-react'
++import {showsDevelopment} from './dev-server.mjs'
+ 
+ // https://vitejs.dev/config/
+-export default defineConfig({
++export default defineConfig(async ({command}) => ({
+   // Relative asset URLs so the bundle can be served from the desktop-qt
+   // control server's root (it serves index.html + /assets directly).
+   base: './',
+-  plugins: [react()]
+-})
++  plugins: [react(), ...(command === 'serve' ? [await showsDevelopment()] : [])]
++}))
+diff --git a/desktop-rs/remote/src/transport.rs b/desktop-rs/remote/src/transport.rs
+index 1e6e14d..31fd1fe 100644
+--- a/desktop-rs/remote/src/transport.rs
++++ b/desktop-rs/remote/src/transport.rs
+@@ -36,7 +36,9 @@ impl Session {
+         if !valid_host(host) {
+             return Err("target must be a computer hostname or SSH host alias".into());
+         }
+-        let mut command = if local {
++        let development_agent =
++            cfg!(debug_assertions) && std::env::var("SHOWS_REMOTE_DEV_AGENT").as_deref() == Ok("1");
++        let mut command = if local || development_agent {
+             let mut cmd = ProcessCommand::new(std::env::current_exe().map_err(|e| e.to_string())?);
+             cmd.arg("--agent");
+             cmd
+diff --git a/docs/development.md b/docs/development.md
+new file mode 100644
+index 0000000..07e5a17
+--- /dev/null
++++ b/docs/development.md
+@@ -0,0 +1,90 @@
++# Developing Shows
++
++Preview changes before opening a PR. Release packaging happens after iteration,
++not between each edit and trying it.
++
++From a Shows worktree, use `shows-dev` (installed with
++`scripts/install-shows-launcher.ps1 -DevelopmentRepo D:\repos\shows`), or invoke
++`scripts/dev-shows.ps1` directly. The command detects the current Shows worktree.
++
++```powershell
++shows-dev ui -Target upstairspc
++shows-dev remote -Target upstairspc status
++shows-dev remote -Target upstairspc
++shows-dev desktop
++shows-dev test
++shows-dev stop
++```
++
++## UI edits
++
++`ui` starts Vite through the existing generic `devctl frontend` definition with
++the Shows working directory and project. It prints a named localhost URL. HMR
++applies source edits without rebuilding Rust, packaging, restarting the player,
++or copying another executable. The page title identifies the controlled PC.
++
++For an upstairs target, Vite owns an authenticated SSH loopback tunnel to its
++running desktop. It proxies the real API and SSE stream. It starts no local
++player, opens no independent database, and copies no media. Playback and library
++controls affect the actual target and authoritative NAS state. Remote window
++close/move/fullscreen controls are rejected: shell work uses native preview.
++
++The preview proves its identity at `/__devctl/health`; `/api/__devctl/health`
++checks the target's application/protocol and the local transport process. A dead
++SSH child ends the preview process so devctl's bounded restart policy owns
++recovery. `devctl list`, `devctl logs <name>` and `devctl stop <name>` remain
++authoritative; no separate tunnel or dev-server process is left untracked.
++
++## Rust and terminal edits
++
++`remote` compiles only `shows-remote` and its dependencies in debug mode, then
++runs the requested command or interactive terminal. It runs the newly compiled
++agent locally through a tracked SSH preview bridge, so agent changes can be
++tried immediately without installing another TV executable. A bridge started by
++the command stops when that command exits; an existing matching preview is
++reused. Release clients continue to use the target's installed agent.
++`desktop` builds the native
++shell and starts it under the tracked Vite environment. Native previews start
++paused and use the real local engine/cache; the first media cache pass may take
++time. Use `ui` for menu work against a player whose files are already cached.
++
++Debug artifacts live in `D:\build\shows\cargo` across worktrees. Override with
++`SHOWS_DEV_TARGET_DIR`. Every local Cargo command uses four jobs. The command
++prints rebuild time; it never runs an optimized release build for a preview.
++
++Debug desktops require an explicit HTTP loopback `SHOWS_DEV_URL`, supplied by
++the managed preview. They do not embed `frontend/dist`, so Rust debugging needs
++no frontend build. Releases always embed assets and reject `SHOWS_DEV_URL`.
++`SHOWS_DIST_DIR` and the fixed-path release-copy smoke script are retired.
++
++`desktop` needs the current installed Shows bundle for libmpv. It gracefully
++restarts its own preview before rebuilding and refuses to replace a separate
++local player. The supervisor owns both Vite and its
++native child. `shows-dev stop` requests a graceful native close before stopping
++the environment, preserving the normal resume transaction.
++
++## Shipping once
++
++After local verification, open the PR. UI-only PRs run frontend checks without
++Rust compilation. Rust/script PRs run debug workspace and installation checks.
++Only main (or an explicit package dispatch) builds the release bundle. Build
++identity is set for both optimized tests and compilation, avoiding a second
++workspace recompilation just to add version metadata.
++
++After CI passes and the PR merges:
++
++```powershell
++shows-dev ship -Target upstairspc
++```
++
++This waits for the exact main release, publishes it through the existing NAS
++channel publisher, and installs it locally and on the target. It reuses existing
++SSH and an on-demand interactive user task, so an update reaches the actual TV
++session rather than a hidden SSH desktop. A running player closes gracefully,
++resumes its selected episode and retains its pause state; a closed player stays
++closed. The owned task registration is removed after the result is recorded.
++Timeouts and failed releases/installations fail explicitly.
++
++Publication retries verify the immutable existing files against the CI artifact
++and selected channel before proceeding with installation. Stable still ships
++only CI's main build; previews never replace stable binaries.
+diff --git a/docs/feature-contracts/desktop-distribution.md b/docs/feature-contracts/desktop-distribution.md
+index 8c96506..737243e 100644
+--- a/docs/feature-contracts/desktop-distribution.md
++++ b/docs/feature-contracts/desktop-distribution.md
+@@ -17,6 +17,9 @@ without running an executable from the network share.
+   only ever carries a build CI produced from `main`. Dev builds are local and
+   add a publication timestamp so repeated builds of one revision remain
+   immutable.
++- **P5. Signed Windows binaries.** CI signs both executables and libmpv with the
++  existing home code-signing identity, verifies Authenticode and its pinned
++  thumbprint, then archives the signed files. Manifests hash the signed bytes.
+ 
+ ## Installation invariants
+ 
+@@ -40,3 +43,14 @@ without running an executable from the network share.
+   with a `shows-remote.cmd` entry point.
+   Version selection also writes a native `agents/<channel>.cmd` entry point
+   so SSH can start the installed agent with stdin/stdout preserved.
++
++## Automated updates
++
++`publish-shows-channel.ps1 -WaitForRelease -InstallTargets local,upstairspc`
++waits for the exact CI release of main before publication, then updates the
++named PCs through existing SSH. An existing publication is reused only after
++its files match the downloaded artifact and it is still the selected channel.
++The installer uses PowerShell 7; no Windows PowerShell 5.1 launcher is retained.
++A running desktop closes through its resume-saving control, restarts in the
++interactive user session and regains its pause state. A closed app stays closed.
++See [development-lifecycle.md](development-lifecycle.md).
+diff --git a/docs/feature-contracts/development-lifecycle.md b/docs/feature-contracts/development-lifecycle.md
+new file mode 100644
+index 0000000..f10bc49
+--- /dev/null
++++ b/docs/feature-contracts/development-lifecycle.md
+@@ -0,0 +1,35 @@
++# Development lifecycle
++
++- **D1. Preview precedes release.** UI edits use tracked Vite HMR. Debug Rust
++  builds use a shared incremental cache and at most four jobs. Neither preview
++  path compiles an optimized release, publishes a channel, or waits for CI.
++- **D2. Real state stays authoritative.** Browser previews proxy the selected
++  running engine over local HTTP or existing SSH. They do not run another player,
++  open SQLite, or hold a replica. Native previews run the ordinary local engine
++  paused; round/advance/defer/resume transactions remain those in
++  [round-and-advance.md](round-and-advance.md).
++- **D3. Processes have owners.** devctl owns the frontend, SSH transport and any
++  native preview. Health proves frontend worktree/configuration and actual target
++  reachability. Stopping a native preview requests its normal close first.
++- **D4. Development cannot replace release UI.** Debug builds require an explicit
++  HTTP loopback Vite URL and do not compile embedded frontend assets. Release
++  builds embed their own assets and reject development URLs. The filesystem
++  `SHOWS_DIST_DIR` path is removed.
++- **D5. Checks match the change.** Frontend-only PRs compile/test the frontend.
++  Rust or script changes also run workspace/debug installation checks. Optimized
++  tests, packaging and publication run on main once iteration is complete.
++- **D6. Shipping is one operation.** The existing publisher waits for the exact
++  main release and can install verified bundles on named PCs. It preserves
++  [desktop-distribution.md](desktop-distribution.md) immutable files, hashes,
++  channels and local execution. Retrying an existing publication requires the
++  same artifact hashes and selected channel.
++- **D7. Updates preserve the viewing session.** A running desktop closes via its
++  normal resume-saving control and restarts in the interactive user session.
++  Pause state is restored after loading. A stopped desktop is not started. SSH,
++  release and installer failures are explicit and bounded; the installer issues
++  no new credentials and removes its owned task registration on completion.
++
++Verification includes a live source edit reaching Vite without a frontend PID
++change, a real target status stream through SSH, warm Rust build timings,
++debug/release URL tests, channel install/retry checks, and an actual interactive
++TV update retaining its episode and paused state.
+diff --git a/docs/new-computer-setup.md b/docs/new-computer-setup.md
+index f29acea..bfbdef1 100644
+--- a/docs/new-computer-setup.md
++++ b/docs/new-computer-setup.md
+@@ -28,7 +28,7 @@ If `SHOWS_LOCAL_WATCHING_DIR` is set, it overrides `D:\Downloads\Watching`.
+ After a channel has been published to `S:\shows-app`, run:
+ 
+ ```powershell
+-powershell -ExecutionPolicy Bypass -File `
++pwsh -ExecutionPolicy Bypass -File `
+   S:\shows-app\install-shows-launcher.ps1 `
+   -Channel stable
+ ```
+@@ -72,3 +72,15 @@ On a healthy round, `file_sync.cached` should match the current round size and
+ `missing` / `failed` should be zero after the first copy pass. If the app reports
+ missing files, verify the source path under `S:\Group-Nelson` and use the round
+ repair controls only for genuinely bad current-round entries.
++
++## Development setup
++
++PowerShell 7, Rust, Node, devctl and an installed Shows bundle are required.
++Install the development command from the default-branch checkout:
++
++```powershell
++.\scripts\install-shows-launcher.ps1 -DevelopmentRepo D:\repos\shows
++```
++
++`shows-dev` selects the current Shows worktree when invoked inside one. See
++[Developing Shows](development.md) for previews, warm builds and one-step shipping.
+diff --git a/scripts/dev-shows.ps1 b/scripts/dev-shows.ps1
+new file mode 100644
+index 0000000..0b0ccbc
+--- /dev/null
++++ b/scripts/dev-shows.ps1
+@@ -0,0 +1,131 @@
++#Requires -Version 7.0
++[CmdletBinding(PositionalBinding = $false)]
++param(
++  [Parameter(Position=0)][ValidateSet('ui','desktop','remote','test','stop','status','ship')][string]$Mode = 'ui',
++  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$')][string]$Target = 'upstairspc',
++  [string]$Name = 'shows-preview',
++  [string]$RepoRoot,
++  [Parameter(ValueFromRemainingArguments=$true)][string[]]$RemoteArgs
++)
++$ErrorActionPreference = 'Stop'
++if (-not $RepoRoot) {
++  $checkout = & git.exe rev-parse --show-toplevel 2>$null
++  if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $checkout 'desktop-rs\desktop\Cargo.toml'))) { $RepoRoot = $checkout }
++  else { $RepoRoot = Split-Path -Parent $PSScriptRoot }
++}
++$workspace = Join-Path $RepoRoot 'desktop-rs'
++$frontend = Join-Path $workspace 'frontend'
++$cache = if ($env:SHOWS_DEV_TARGET_DIR) { $env:SHOWS_DEV_TARGET_DIR } else { 'D:\build\shows\cargo' }
++
++if ($Mode -eq 'ship') {
++  & (Join-Path $PSScriptRoot 'publish-shows-channel.ps1') -Channel stable -RepoRoot $RepoRoot -WaitForRelease -InstallTargets @('local', $Target)
++  return
++}
++if ($Mode -eq 'stop') {
++  $entries = & devctl.exe list $Name -Json | ConvertFrom-Json
++  $entry = @($entries)[0]
++  if ($entry.port -and (Get-Process -Name shows-desktop -ErrorAction SilentlyContinue)) {
++    try {
++      $health = Invoke-RestMethod "http://127.0.0.1:$($entry.port)/__devctl/health" -TimeoutSec 2
++      if ($health.nativeDesktop) {
++        Invoke-RestMethod "http://127.0.0.1:$($entry.port)/window/close" -Method Post -TimeoutSec 3 | Out-Null
++        $deadline = (Get-Date).AddSeconds(5)
++        while ((Get-Date) -lt $deadline) {
++          try { Invoke-RestMethod "http://127.0.0.1:$($entry.port)/remote/info" -TimeoutSec 1 | Out-Null }
++          catch { break }
++          Start-Sleep -Milliseconds 50
++        }
++      }
++    } catch { Write-Warning $_.Exception.Message }
++  }
++  & devctl.exe stop $Name
++  exit $LASTEXITCODE
++}
++if ($Mode -eq 'status') { & devctl.exe status $Name; exit $LASTEXITCODE }
++if ($Mode -in @('ui','desktop') -and -not (Test-Path -LiteralPath (Join-Path $frontend 'dev-server.mjs'))) { throw 'This worktree predates the fast development loop; update it from main first' }
++if ($Mode -eq 'ui') {
++  if ($Target -eq 'local') {
++    $info = Invoke-RestMethod 'http://127.0.0.1:45831/remote/info' -TimeoutSec 2
++    if ($info.application -ne 'shows-desktop' -or $info.protocol -ne 1) { throw 'Open the current Shows desktop on this PC first' }
++  } else {
++    $controlPort = if ($env:SHOWS_CONTROL_PORT) { [uint16]::Parse($env:SHOWS_CONTROL_PORT) } else { 45831 }
++    if ($controlPort -eq 0) { throw 'Invalid control port' }
++    $start = [Diagnostics.ProcessStartInfo]::new('ssh.exe')
++    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
++    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
++    foreach ($argument in @('-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',$Target,'curl.exe','--fail','--silent','--show-error','--max-time','3',"http://127.0.0.1:$controlPort/remote/info")) { $start.ArgumentList.Add($argument) }
++    $probe = [Diagnostics.Process]::Start($start)
++    $output = $probe.StandardOutput.ReadToEndAsync(); $errors = $probe.StandardError.ReadToEndAsync()
++    if (-not $probe.WaitForExit(12000)) { $probe.Kill($true); throw "Shows preflight on $Target timed out" }
++    if ($probe.ExitCode -ne 0) { throw "Open Shows on $Target before previewing it: $($errors.GetAwaiter().GetResult())" }
++    $info = $output.GetAwaiter().GetResult() | ConvertFrom-Json
++    if ($info.application -ne 'shows-desktop' -or $info.protocol -ne 1) { throw 'Target is not the current Shows desktop' }
++  }
++}
++if ($Mode -eq 'desktop' -and (Get-Process -Name shows-desktop -ErrorAction SilentlyContinue)) {
++  $owned = & devctl.exe list $Name -Json | ConvertFrom-Json
++  $owned = @($owned)[0]
++  if (-not $owned.port) { throw 'A separate Shows player is running; leave it running and use ui mode, or close it before native development' }
++  $health = Invoke-RestMethod "http://127.0.0.1:$($owned.port)/__devctl/health" -TimeoutSec 2
++  if (-not $health.nativeDesktop -or [IO.Path]::GetFullPath($health.repo_dir) -ne [IO.Path]::GetFullPath($workspace)) { throw 'The running player belongs to a different environment' }
++  & $PSCommandPath stop -Name $Name -RepoRoot $RepoRoot
++  if ($LASTEXITCODE -ne 0) { throw 'Could not stop the owned native preview before rebuilding' }
++}
++$previousEnvironment = @{}
++foreach ($variable in @('CARGO_TARGET_DIR','SHOWS_DEV_TARGET','SHOWS_DEV_DESKTOP_EXE','SHOWS_CONTROL_PORT','SHOWS_REMOTE_DEV_AGENT')) { $previousEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable, 'Process') }
++$ownedRemotePreview = $null
++try {
++[Environment]::SetEnvironmentVariable('SHOWS_DEV_DESKTOP_EXE', $null, 'Process')
++if ($Mode -in @('remote','desktop','test')) {
++  $env:CARGO_TARGET_DIR = $cache
++  $arguments = @('--manifest-path', (Join-Path $workspace 'Cargo.toml'), '-j', '4', '--locked')
++  $started = [Diagnostics.Stopwatch]::StartNew()
++  if ($Mode -eq 'test') { & cargo.exe test @arguments --workspace; exit $LASTEXITCODE }
++  $package = if ($Mode -eq 'remote') { 'shows-remote' } else { 'shows-desktop' }
++  & cargo.exe build @arguments -p $package
++  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
++  Write-Host ("Incremental {0} build: {1:N2}s" -f $package, $started.Elapsed.TotalSeconds)
++  if ($Mode -eq 'remote') {
++    if ($Target -ne 'local') {
++      $bridgeName = $Name + '-remote'
++      $bridge = & devctl.exe list $bridgeName -Json | ConvertFrom-Json
++      $bridge = @($bridge)[0]
++      if ($bridge.status -in @('stopped','failed')) { $bridge = $null }
++      if (-not $bridge.port) {
++        & $PSCommandPath ui -Target $Target -Name $bridgeName -RepoRoot $RepoRoot
++        if ($LASTEXITCODE -ne 0) { throw 'Could not start the tracked remote development bridge' }
++        $ownedRemotePreview = $bridgeName
++        $bridge = @(& devctl.exe list $bridgeName -Json | ConvertFrom-Json)[0]
++      }
++      $health = Invoke-RestMethod "http://127.0.0.1:$($bridge.port)/__devctl/health" -TimeoutSec 2
++      if ($health.target -ne $Target -or [IO.Path]::GetFullPath($health.repo_dir) -ne [IO.Path]::GetFullPath($workspace)) { throw 'The named preview belongs to another target or worktree' }
++      $env:SHOWS_CONTROL_PORT = [string]$bridge.port
++    }
++    $env:SHOWS_REMOTE_DEV_AGENT = '1'
++    & (Join-Path $cache 'debug\shows-remote.exe') $Target @RemoteArgs
++    exit $LASTEXITCODE
++  }
++  $Target = 'local'
++  if (Get-Process -Name shows-desktop -ErrorAction SilentlyContinue) { throw 'Close Shows on this PC before starting its native desktop preview; ui mode can control the existing instance' }
++  $env:SHOWS_DEV_DESKTOP_EXE = Join-Path $cache 'debug\shows-desktop.exe'
++  $installedState = Join-Path $env:LOCALAPPDATA 'shows\launcher-state-stable.json'
++  if (-not (Test-Path -LiteralPath $installedState)) { throw 'Install the current Shows bundle once to provide the libmpv runtime for native development' }
++  $installed = Get-Content -Raw -LiteralPath $installedState | ConvertFrom-Json
++  if ($installed.current -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid installed Shows version' }
++  $runtime = Join-Path $env:LOCALAPPDATA ('shows\versions\' + $installed.current + '\libmpv-2.dll')
++  Copy-Item -LiteralPath $runtime -Destination (Join-Path $cache 'debug\libmpv-2.dll') -Force
++}
++
++if (-not (Test-Path -LiteralPath (Join-Path $frontend 'node_modules\vite\bin\vite.js'))) {
++  Push-Location $frontend
++  try { & npm.cmd ci; if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency install failed' } }
++  finally { Pop-Location }
++}
++$env:SHOWS_DEV_TARGET = $Target
++& devctl.exe clean $Name | Out-Null
++& devctl.exe up frontend -Name $Name -Cwd $frontend -Project shows
++if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
++} finally {
++  if ($ownedRemotePreview) { & devctl.exe stop $ownedRemotePreview | Out-Null }
++  foreach ($variable in $previousEnvironment.Keys) { [Environment]::SetEnvironmentVariable($variable, $previousEnvironment[$variable], 'Process') }
++}
+diff --git a/scripts/install-shows-launcher.ps1 b/scripts/install-shows-launcher.ps1
+index 8bd9f0c..28357df 100644
+--- a/scripts/install-shows-launcher.ps1
++++ b/scripts/install-shows-launcher.ps1
+@@ -2,7 +2,8 @@ param(
+   [ValidateSet("stable", "dev")]
+   [string]$Channel = "stable",
+   [string]$NasRoot = "S:\shows-app",
+-  [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath("Desktop")) "Shows.lnk")
++  [string]$ShortcutPath = (Join-Path ([Environment]::GetFolderPath("Desktop")) "Shows.lnk"),
++  [string]$DevelopmentRepo
+ )
+ 
+ $ErrorActionPreference = "Stop"
+@@ -11,10 +12,11 @@ if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "Launcher no
+ 
+ $installRoot = Join-Path $env:LOCALAPPDATA "shows"
+ $bin = Join-Path $env:USERPROFILE "bin"
+-New-Item -ItemType Directory -Force -Path $bin | Out-Null
++New-Item -ItemType Directory -Force -Path $installRoot, $bin | Out-Null
+ $localLauncher = Join-Path $installRoot "launch-shows.ps1"
+ Copy-Item -LiteralPath $launcher -Destination $localLauncher -Force
+-$remoteCommand = '@powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $localLauncher + '" -Channel ' + $Channel + ' -NasRoot "' + $NasRoot + '" -App remote %*'
++$powerShell = (Get-Command pwsh.exe -ErrorAction Stop).Source
++$remoteCommand = '@"' + $powerShell + '" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $localLauncher + '" -Channel ' + $Channel + ' -NasRoot "' + $NasRoot + '" -App remote %*'
+ [IO.File]::WriteAllText((Join-Path $bin "shows-remote.cmd"), $remoteCommand + "`r`n", [Text.Encoding]::ASCII)
+ $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+ if ($bin -notin ($userPath -split ';')) {
+@@ -24,7 +26,7 @@ if ($bin -notin ($env:Path -split ';')) { $env:Path = $bin + ';' + $env:Path }
+ 
+ $shell = New-Object -ComObject WScript.Shell
+ $shortcut = $shell.CreateShortcut($ShortcutPath)
+-$shortcut.TargetPath = (Get-Command powershell.exe).Source
++$shortcut.TargetPath = $powerShell
+ $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$localLauncher`" -Channel $Channel -NasRoot `"$NasRoot`""
+ $shortcut.WorkingDirectory = $installRoot
+ $shortcut.IconLocation = "shell32.dll,137"
+@@ -32,3 +34,10 @@ $shortcut.Save()
+ 
+ Write-Host "Installed $Channel Shows launcher at $ShortcutPath"
+ Write-Host "Installed shows-remote terminal command at $bin"
++if ($DevelopmentRepo) {
++  $developmentScript = Join-Path ([IO.Path]::GetFullPath($DevelopmentRepo)) 'scripts\dev-shows.ps1'
++  if (-not (Test-Path -LiteralPath $developmentScript)) { throw "Development entry point is missing: $developmentScript" }
++  $command = '@"' + $powerShell + '" -NoLogo -NoProfile -File "' + $developmentScript + '" %*' + "`r`n"
++  [IO.File]::WriteAllText((Join-Path $bin 'shows-dev.cmd'), $command, [Text.Encoding]::ASCII)
++  Write-Host "Installed shows-dev from $DevelopmentRepo"
++}
+diff --git a/scripts/install-shows-update.ps1 b/scripts/install-shows-update.ps1
+new file mode 100644
+index 0000000..12503ef
+--- /dev/null
++++ b/scripts/install-shows-update.ps1
+@@ -0,0 +1,146 @@
++#Requires -Version 7.0
++[CmdletBinding()]
++param(
++  [string]$Target = 'local',
++  [ValidateSet('stable', 'dev')][string]$Channel = 'stable',
++  [string]$NasRoot = '\\NelsonNAS\files\shows-app',
++  [string]$ResultPath
++)
++
++$ErrorActionPreference = 'Stop'
++$ProgressPreference = 'SilentlyContinue'
++
++function Invoke-Native([string]$File, [string[]]$NativeArguments) {
++  $start = [Diagnostics.ProcessStartInfo]::new($File)
++  $start.UseShellExecute = $false
++  $start.CreateNoWindow = $true
++  $start.RedirectStandardOutput = $true
++  $start.RedirectStandardError = $true
++  foreach ($argument in $NativeArguments) { $start.ArgumentList.Add($argument) }
++  $process = [Diagnostics.Process]::Start($start)
++  $output = $process.StandardOutput.ReadToEndAsync()
++  $errors = $process.StandardError.ReadToEndAsync()
++  if (-not $process.WaitForExit(120000)) { $process.Kill($true); throw "$File timed out" }
++  if ($process.ExitCode -ne 0) { throw "$File failed: $($errors.GetAwaiter().GetResult())" }
++  $output.GetAwaiter().GetResult()
++}
++
++if ($Target -ne 'local') {
++  if ($Target -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$') { throw 'Target must be a computer hostname or SSH alias' }
++  $request = @{
++    channel = $Channel
++    nas = $NasRoot
++    id = [guid]::NewGuid().ToString('N')
++  } | ConvertTo-Json -Compress
++  $requestObject = $request | ConvertFrom-Json
++  $remoteTemp = (Invoke-Native 'ssh.exe' @('-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',$Target,'echo %TEMP%')).Trim()
++  if ($remoteTemp -notmatch '^[A-Za-z]:\\[^\r\n]+$') { throw 'Target did not provide a Windows temporary directory' }
++  $remoteScript = $remoteTemp.TrimEnd('\') + '\shows-update-' + $requestObject.id + '.ps1'
++  Invoke-Native 'scp.exe' @('-q','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',$PSCommandPath, ('{0}:{1}' -f $Target, $remoteScript.Replace('\','/'))) | Out-Null
++  $request64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($request))
++  $bootstrap = @'
++$ErrorActionPreference = 'Stop'
++$ProgressPreference = 'SilentlyContinue'
++$request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('REQUEST64')) | ConvertFrom-Json
++$script = Join-Path $env:TEMP ('shows-update-' + $request.id + '.ps1')
++$result = $script + '.json'
++$name = 'Shows update ' + $request.id
++$arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -File "' + $script + '" -Channel ' + $request.channel + ' -NasRoot "' + $request.nas + '" -ResultPath "' + $result + '"'
++$action = New-ScheduledTaskAction -Execute 'C:\Program Files\PowerShell\7\pwsh.exe' -Argument $arguments
++$principal = New-ScheduledTaskPrincipal -UserId ($env:COMPUTERNAME + '\' + $env:USERNAME) -LogonType Interactive -RunLevel Limited
++Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Force | Out-Null
++Start-ScheduledTask -TaskName $name
++try {
++  $deadline = (Get-Date).AddSeconds(90)
++  while (-not (Test-Path -LiteralPath $result)) {
++    if ((Get-Date) -gt $deadline) { throw 'Interactive update timed out; inspect the owned Shows update task' }
++    Start-Sleep -Milliseconds 250
++  }
++  Get-Content -Raw -LiteralPath $result
++} finally {
++  if (Test-Path -LiteralPath $result) {
++    Unregister-ScheduledTask -TaskName $name -Confirm:$false
++  }
++}
++'@
++  $bootstrap = $bootstrap.Replace('REQUEST64', $request64)
++  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
++  $output = Invoke-Native 'ssh.exe' @('-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',$Target,'"C:\Program Files\PowerShell\7\pwsh.exe"','-NoProfile','-NonInteractive','-EncodedCommand',$encoded)
++  $result = $output | ConvertFrom-Json
++  if (-not $result.ok) { throw "$Target update failed: $($result.message)" }
++  $result | ConvertTo-Json -Depth 6
++  return
++}
++
++try {
++  $install = Join-Path $env:LOCALAPPDATA 'shows'
++  New-Item -ItemType Directory -Force -Path $install | Out-Null
++  $app = Get-Process -Name shows-desktop -ErrorAction SilentlyContinue | Select-Object -First 1
++  $before = $null
++  if ($app) {
++    foreach ($port in @(Get-NetTCPConnection -State Listen -OwningProcess $app.Id | Select-Object -ExpandProperty LocalPort)) {
++      try {
++        $candidate = Invoke-RestMethod -Uri "http://127.0.0.1:$port/status" -TimeoutSec 2
++        if ($candidate.phase) { $before = $candidate; $oldPort = $port; break }
++      } catch { }
++    }
++    if (-not $before) { throw 'Running Shows instance did not provide a status snapshot; it was left running' }
++  }
++  & (Join-Path $NasRoot 'install-shows-launcher.ps1') -Channel $Channel -NasRoot $NasRoot
++  $launcher = Join-Path $install 'launch-shows.ps1'
++  $log = Join-Path $env:TEMP ('shows-update-' + [guid]::NewGuid().ToString('N'))
++  $arguments = '-NoProfile -NonInteractive -File "' + $launcher + '" -Channel ' + $Channel + ' -NasRoot "' + $NasRoot + '" -App remote --version'
++  $selection = Start-Process -FilePath 'C:\Program Files\PowerShell\7\pwsh.exe' -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput ($log + '.out') -RedirectStandardError ($log + '.err')
++  if ($selection.ExitCode -ne 0) { throw (Get-Content -Raw -LiteralPath ($log + '.err')) }
++  $state = Get-Content -Raw -LiteralPath (Join-Path $install "launcher-state-$Channel.json") | ConvertFrom-Json
++  $manifest = Get-Content -Raw -LiteralPath (Join-Path $NasRoot "channels\$Channel.json") | ConvertFrom-Json
++  if ($state.current -ne $manifest.version) { throw 'The selected version does not match the channel' }
++
++  $after = $null
++  $info = $null
++  if ($app) {
++    # Window close commits the resume position before the old process exits.
++    Invoke-RestMethod -Uri "http://127.0.0.1:$oldPort/window/close" -Method Post -TimeoutSec 5 | Out-Null
++    if (-not $app.WaitForExit(10000)) { throw 'Shows did not close gracefully; the new copy was not started' }
++    $directory = Join-Path $install ('versions\' + $state.current)
++    $newApp = Start-Process -FilePath (Join-Path $directory 'shows-desktop.exe') -WorkingDirectory $directory -PassThru
++    $deadline = (Get-Date).AddSeconds(30)
++    do {
++      try {
++        $after = Invoke-RestMethod -Uri 'http://127.0.0.1:45831/status' -TimeoutSec 1
++        if ($after.phase -eq 'playing' -and $null -ne $after.playback.time_pos) {
++          if ($before.playback.paused) {
++            Invoke-RestMethod -Uri 'http://127.0.0.1:45831/remote/control' -Method Post -ContentType 'application/json' -Body '{"action":"pause"}' -TimeoutSec 3 | Out-Null
++          }
++          $after = Invoke-RestMethod -Uri 'http://127.0.0.1:45831/status' -TimeoutSec 2
++          $info = Invoke-RestMethod -Uri 'http://127.0.0.1:45831/remote/info' -TimeoutSec 2
++          break
++        }
++      } catch { }
++      if ($newApp.HasExited) { throw 'Updated Shows exited during startup; inspect shows.log' }
++      Start-Sleep -Milliseconds 100
++    } while ((Get-Date) -lt $deadline)
++    if (-not $info) { throw 'Updated Shows did not become playable within 30 seconds' }
++    if ($after.playback.paused -ne $before.playback.paused) { throw 'Updated Shows did not retain the pause state' }
++  }
++  $result = [ordered]@{
++    ok = $true
++    computer = $env:COMPUTERNAME
++    version = $state.current
++    restarted = [bool]$app
++    build = $info.build
++    paused = $after.playback.paused
++    before_episode = $(if ($before) { $before.round[$before.round_pos].episode_id } else { $null })
++    episode = $(if ($after) { $after.round[$after.round_pos].episode_id } else { $null })
++    time = $after.playback.time_pos
++  }
++} catch {
++  $result = @{ok=$false; computer=$env:COMPUTERNAME; message=$_.Exception.Message}
++}
++$json = $result | ConvertTo-Json -Depth 6
++if ($ResultPath) {
++  $temp = $ResultPath + '.tmp'
++  [IO.File]::WriteAllText($temp, $json, [Text.UTF8Encoding]::new($false))
++  Move-Item -LiteralPath $temp -Destination $ResultPath -Force
++} else { $json }
++if (-not $result.ok) { throw $result.message }
+diff --git a/scripts/launch-shows.ps1 b/scripts/launch-shows.ps1
+index e04be5d..b0e3a63 100644
+--- a/scripts/launch-shows.ps1
++++ b/scripts/launch-shows.ps1
+@@ -23,7 +23,6 @@ $state = if (Test-Path -LiteralPath $statePath) {
+ 
+ function Save-State([object]$nextState) {
+   $temp = "$statePath.$([guid]::NewGuid().ToString('N')).tmp"
+-  # The shortcut runs Windows PowerShell 5.1, which has no utf8NoBOM encoding.
+   [IO.File]::WriteAllText($temp, ($nextState | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))
+   Move-Item -Force -LiteralPath $temp -Destination $statePath
+ }
+diff --git a/scripts/publish-shows-channel.ps1 b/scripts/publish-shows-channel.ps1
+index b90c1f0..f5d1d2e 100644
+--- a/scripts/publish-shows-channel.ps1
++++ b/scripts/publish-shows-channel.ps1
+@@ -6,7 +6,9 @@ param(
+   [string]$Release,
+   [string]$LibmpvPath = "D:\Downloads\shows\libmpv-2.dll",
+   [string]$Version,
+-  [switch]$SkipBuild
++  [switch]$SkipBuild,
++  [switch]$WaitForRelease,
++  [string[]]$InstallTargets = @()
+ )
+ 
+ $ErrorActionPreference = "Stop"
+@@ -18,7 +20,26 @@ $download = $null
+ if ($Channel -eq "stable") {
+   # Stable is the bundle CI built and released, never a local build.
+   if ($Version -or $SkipBuild) { throw "-Version and -SkipBuild apply to dev; stable publishes a GitHub release" }
+-  if (-not $Release) {
++  if ($WaitForRelease) {
++    if (-not $Release) {
++      $releaseSha = (gh api repos/nelsong6/shows/commits/main --jq .sha).Trim()
++      if ($LASTEXITCODE -ne 0 -or $releaseSha -notmatch '^[0-9a-f]{40}$') { throw 'Could not identify main for release publication' }
++      $Release = 'desktop-' + $releaseSha.Substring(0,7)
++    }
++    $deadline = (Get-Date).AddMinutes(20)
++    while ($true) {
++      $published = gh release view $Release --repo nelsong6/shows --json assets 2>$null
++      if ($LASTEXITCODE -eq 0 -and (($published | ConvertFrom-Json).assets | Where-Object { $_.name -eq 'shows-desktop-windows-amd64.zip' -and $_.state -eq 'uploaded' })) { break }
++      if ((Get-Date) -gt $deadline) { throw "Timed out waiting for $Release" }
++      if ($releaseSha) {
++        $runs = gh api "repos/nelsong6/shows/actions/runs?head_sha=$releaseSha" | ConvertFrom-Json
++        $build = $runs.workflow_runs | Where-Object name -eq 'Build Desktop' | Select-Object -First 1
++        if ($build.conclusion -in @('failure','cancelled','timed_out','action_required')) { throw "Release build $($build.id) ended with $($build.conclusion)" }
++      }
++      Write-Host "Waiting for CI release $Release"
++      Start-Sleep -Seconds 10
++    }
++  } elseif (-not $Release) {
+     $Release = gh release view --repo nelsong6/shows --json tagName --jq .tagName
+     if ($LASTEXITCODE -ne 0 -or -not $Release) { throw "Could not determine the latest release" }
+   }
+@@ -74,7 +95,32 @@ New-Item -ItemType Directory -Force -Path $versions, $channels, $stagingRoot | O
+ 
+ $stage = Join-Path $stagingRoot ([guid]::NewGuid().ToString("N"))
+ $destination = Join-Path $versions $Version
+-if (Test-Path -LiteralPath $destination) { throw "Version already published: $destination" }
++if (Test-Path -LiteralPath $destination) {
++  $existing = Get-Content -Raw -LiteralPath (Join-Path $destination 'manifest.json') | ConvertFrom-Json
++  $sources = @{'shows-desktop.exe'=$exe; 'shows-remote.exe'=$remoteExe; 'libmpv-2.dll'=$LibmpvPath}
++  if (@($existing.files).Count -ne 3) { throw 'Previously published version has an incomplete manifest' }
++  foreach ($name in $sources.Keys) {
++    $file = @($existing.files | Where-Object name -eq $name)
++    if ($file.Count -ne 1) { throw "Previously published version is missing $name" }
++    $installed = Join-Path $destination $file.name
++    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash.ToLowerInvariant() -ne $file.sha256) { throw "Previously published version is damaged: $installed" }
++    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $sources[$name]).Hash.ToLowerInvariant() -ne $file.sha256) { throw "Release content differs from the immutable publication: $name" }
++  }
++  $current = Get-Content -Raw -LiteralPath (Join-Path $channels "$Channel.json") | ConvertFrom-Json
++  if ($current.version -ne $Version) { throw 'Version exists but is not the selected channel; refusing to change an existing publication' }
++  foreach ($target in $InstallTargets) {
++    $installNasRoot = $NasRoot
++    if ($installNasRoot -like 'S:\*') { $installNasRoot = Join-Path (Get-PSDrive S).DisplayRoot $installNasRoot.Substring(3) }
++    & (Join-Path $PSScriptRoot 'install-shows-update.ps1') -Target $target -Channel $Channel -NasRoot $installNasRoot
++  }
++  if ($download) {
++    $resolvedDownload = [IO.Path]::GetFullPath($download)
++    if (-not $resolvedDownload.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $resolvedDownload) -notlike 'shows-release-*') { throw 'Unsafe release cleanup path' }
++    Remove-Item -Recurse -Force -LiteralPath $resolvedDownload
++  }
++  Write-Host "Shows $Version is already verified on $Channel"
++  return
++}
+ New-Item -ItemType Directory -Path $stage | Out-Null
+ 
+ try {
+@@ -123,3 +169,8 @@ try {
+ }
+ 
+ Write-Host "Published shows $Version to $Channel at $NasRoot"
++foreach ($target in $InstallTargets) {
++  $installNasRoot = $NasRoot
++  if ($installNasRoot -like 'S:\*') { $installNasRoot = Join-Path (Get-PSDrive S).DisplayRoot $installNasRoot.Substring(3) }
++  & (Join-Path $PSScriptRoot 'install-shows-update.ps1') -Target $target -Channel $Channel -NasRoot $installNasRoot
++}
+diff --git a/scripts/sign-shows-bundle.ps1 b/scripts/sign-shows-bundle.ps1
+new file mode 100644
+index 0000000..1b0bfc0
+--- /dev/null
++++ b/scripts/sign-shows-bundle.ps1
+@@ -0,0 +1,27 @@
++#Requires -Version 7.0
++param([Parameter(Mandatory)][string]$BundleDirectory)
++$ErrorActionPreference = 'Stop'
++$expected = 'FE35227FED82F2429AFE763A36358ADDD79C7A4F'
++if (-not $env:AT_TERMINAL_PFX -or -not $env:AT_TERMINAL_PFX_PASSWORD) { throw 'The home code-signing identity is not configured' }
++$certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
++  [Convert]::FromBase64String($env:AT_TERMINAL_PFX), $env:AT_TERMINAL_PFX_PASSWORD,
++  [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
++try {
++  if ($certificate.Thumbprint -ne $expected -or -not $certificate.HasPrivateKey) { throw 'Unexpected home signing certificate' }
++  if ($env:CI -eq 'true') {
++    # The hosted runner starts without the public trust installed on home PCs.
++    # Only the already pinned public identity is added; its private key stays ephemeral.
++    $public = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
++    foreach ($name in @('Root','TrustedPeople')) {
++      $store = [Security.Cryptography.X509Certificates.X509Store]::new($name, 'CurrentUser')
++      try { $store.Open('ReadWrite'); $store.Add($public) } finally { $store.Close() }
++    }
++    $public.Dispose()
++  }
++  foreach ($name in @('shows-desktop.exe','shows-remote.exe','libmpv-2.dll')) {
++    $file = Join-Path $BundleDirectory $name
++    $signature = Set-AuthenticodeSignature -FilePath $file -Certificate $certificate -HashAlgorithm SHA256
++    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $expected) { throw "Signing verification failed for $name`: $($signature.Status)" }
++    Write-Host "Signed and verified $name"
++  }
++} finally { $certificate.Dispose() }
+diff --git a/scripts/test-install-release.ps1 b/scripts/test-install-release.ps1
+deleted file mode 100644
+index 2090d7f..0000000
+--- a/scripts/test-install-release.ps1
++++ /dev/null
+@@ -1,154 +0,0 @@
+-param(
+-  [string]$RepoRoot = "D:\repos\shows",
+-  [string]$InstallPath = "D:\Downloads\shows\shows-desktop.exe",
+-  [switch]$NoRestart,
+-  [switch]$SkipSmoke
+-)
+-
+-$ErrorActionPreference = "Stop"
+-
+-$frontend = Join-Path $RepoRoot "desktop-rs\frontend"
+-$workspace = Join-Path $RepoRoot "desktop-rs"
+-$builtExe = Join-Path $workspace "target\release\shows-desktop.exe"
+-$logPath = Join-Path $env:APPDATA "shows\shows.log"
+-$cargo = Get-Command cargo -ErrorAction SilentlyContinue
+-if (-not $cargo) {
+-  $cargoPath = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
+-  if (Test-Path $cargoPath) {
+-    $cargo = @{ Source = $cargoPath }
+-  } else {
+-    throw "cargo was not found on PATH or at $cargoPath"
+-  }
+-}
+-
+-Push-Location $frontend
+-try {
+-  npm run build
+-} finally {
+-  Pop-Location
+-}
+-
+-Push-Location $workspace
+-try {
+-  & $cargo.Source build --release -p shows-desktop
+-} finally {
+-  Pop-Location
+-}
+-
+-Get-Process shows-desktop -ErrorAction SilentlyContinue | Stop-Process -Force
+-
+-$installDir = Split-Path -Parent $InstallPath
+-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+-
+-$copyDeadline = (Get-Date).AddSeconds(20)
+-while ($true) {
+-  try {
+-    Copy-Item -Force $builtExe $InstallPath
+-    break
+-  } catch {
+-    if ((Get-Date) -ge $copyDeadline) {
+-      throw
+-    }
+-    Start-Sleep -Milliseconds 500
+-  }
+-}
+-
+-if ($NoRestart) {
+-  Write-Host "Copied $builtExe to $InstallPath"
+-  return
+-}
+-
+-$startLineCount = 0
+-if (Test-Path $logPath) {
+-  $startLineCount = (Get-Content $logPath).Count
+-}
+-
+-$appProcess = Start-Process -FilePath $InstallPath -WorkingDirectory $installDir -PassThru
+-
+-$deadline = (Get-Date).AddSeconds(30)
+-$controlUrl = $null
+-while ((Get-Date) -lt $deadline -and -not $controlUrl) {
+-  Start-Sleep -Milliseconds 500
+-  if (-not (Test-Path $logPath)) {
+-    continue
+-  }
+-  $newLines = Get-Content $logPath | Select-Object -Skip $startLineCount
+-  $line = $newLines | Where-Object { $_ -match "control server on (http://127\.0\.0\.1:\d+/)" } | Select-Object -Last 1
+-  if ($line -and $line -match "control server on (http://127\.0\.0\.1:\d+/)") {
+-    $controlUrl = $Matches[1]
+-  }
+-  if (-not $controlUrl -and $appProcess -and -not $appProcess.HasExited) {
+-    $listener = Get-NetTCPConnection -OwningProcess $appProcess.Id -State Listen -ErrorAction SilentlyContinue |
+-      Where-Object { $_.LocalAddress -eq "127.0.0.1" } |
+-      Select-Object -First 1
+-    if ($listener) {
+-      $controlUrl = "http://127.0.0.1:$($listener.LocalPort)/"
+-    }
+-  }
+-}
+-
+-if (-not $controlUrl) {
+-  throw "Started app, but could not discover control server URL in $logPath"
+-}
+-
+-function Get-DesktopStatus {
+-  Invoke-RestMethod -Method Get -Uri ($controlUrl + "status")
+-}
+-
+-function Invoke-Control {
+-  param([string]$Path)
+-  $result = Invoke-RestMethod -Method Post -Uri ($controlUrl + $Path)
+-  if ($null -ne $result.ok -and -not $result.ok) {
+-    throw "$Path failed: $($result.status) $($result.message)"
+-  }
+-  $result
+-}
+-
+-function Wait-StatusField {
+-  param(
+-    [string]$Field,
+-    [object]$Expected,
+-    [string]$Description
+-  )
+-
+-  $deadline = (Get-Date).AddSeconds(8)
+-  while ((Get-Date) -lt $deadline) {
+-    $status = Get-DesktopStatus
+-    if ($status.$Field -eq $Expected) {
+-      return
+-    }
+-    Start-Sleep -Milliseconds 250
+-  }
+-  $last = Get-DesktopStatus
+-  throw "Timed out waiting for $Description. Last $Field=$($last.$Field)"
+-}
+-
+-$status = Get-DesktopStatus
+-if (-not $status.phase) {
+-  throw "Control server responded, but /status did not include phase"
+-}
+-if ($null -eq $status.round_pos) {
+-  throw "Control server responded, but /status did not include round_pos"
+-}
+-
+-Invoke-Control "pause?state=true" | Out-Null
+-
+-if (-not $SkipSmoke) {
+-  Invoke-Control "stay-on-top" | Out-Null
+-  Wait-StatusField "window_on_top" $true "stay on top to turn on"
+-  Invoke-Control "stay-on-top" | Out-Null
+-  Wait-StatusField "window_on_top" $false "stay on top to turn off"
+-
+-  $beforeMaximize = [bool](Get-DesktopStatus).window_maximized
+-  Invoke-Control "window/maximize" | Out-Null
+-  Wait-StatusField "window_maximized" (-not $beforeMaximize) "maximize to toggle"
+-  Invoke-Control "window/maximize" | Out-Null
+-  Wait-StatusField "window_maximized" $beforeMaximize "maximize to toggle back"
+-}
+-
+-Invoke-Control "pause?state=true" | Out-Null
+-if ($SkipSmoke) {
+-  Write-Host "Built, copied, restarted, and paused $InstallPath at $controlUrl"
+-} else {
+-  Write-Host "Built, copied, restarted, smoked, and paused $InstallPath at $controlUrl"
+-}
+diff --git a/scripts/test-remote-distribution.ps1 b/scripts/test-remote-distribution.ps1
+index 2c75505..60964e9 100644
+--- a/scripts/test-remote-distribution.ps1
++++ b/scripts/test-remote-distribution.ps1
+@@ -32,6 +32,7 @@ try {
+     $installed = Join-Path $install ('versions\smoke\' + $file.name)
+     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash.ToLowerInvariant() -ne $file.sha256) { throw 'Installed hash differs from manifest' }
+   }
++  & (Join-Path $RepoRoot 'scripts\publish-shows-channel.ps1') -Channel dev -RepoRoot (Join-Path $fixture 'repo') -NasRoot $nas -LibmpvPath $runtime -Version smoke -SkipBuild
+   Write-Host 'Remote distribution smoke passed: complete manifest, verified install, argument forwarding and exit status'
+ } finally {
+   $resolved = [IO.Path]::GetFullPath($fixture)

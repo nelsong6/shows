@@ -1,0 +1,1843 @@
+diff --git a/desktop-rs/core/src/replica.rs b/desktop-rs/core/src/replica.rs
+index 0180c4f..c2fa400 100644
+--- a/desktop-rs/core/src/replica.rs
++++ b/desktop-rs/core/src/replica.rs
+@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS round_queue (
+   updated_at     TEXT NOT NULL,
+   dirty          INTEGER NOT NULL DEFAULT 0
+ );
++CREATE TABLE IF NOT EXISTS episode_playback_preferences (
++  episode_id     TEXT PRIMARY KEY,
++  subtitle_track TEXT,
++  audio_track    TEXT,
++  updated_at     TEXT NOT NULL
++);
+ ";
+ 
+ fn now() -> String {
+@@ -98,6 +104,12 @@ pub struct Dirty {
+     pub history: Vec<Value>,
+ }
+ 
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub struct EpisodePlaybackPreferences {
++    pub subtitle_track: Option<String>,
++    pub audio_track: Option<String>,
++}
++
+ pub struct Replica {
+     db: Mutex<Connection>,
+ }
+@@ -157,6 +169,23 @@ impl Replica {
+         .flatten()
+     }
+ 
++    pub fn playback_preferences(&self, episode_id: &str) -> EpisodePlaybackPreferences {
++        let conn = self.db.lock().unwrap();
++        conn.query_row(
++            "SELECT subtitle_track, audio_track FROM episode_playback_preferences WHERE episode_id=?1",
++            params![episode_id],
++            |r| {
++                Ok(EpisodePlaybackPreferences {
++                    subtitle_track: r.get(0)?,
++                    audio_track: r.get(1)?,
++                })
++            },
++        )
++        .optional()
++        .expect("playback_preferences")
++        .unwrap_or_default()
++    }
++
+     pub fn get_volume(&self) -> Option<f64> {
+         let conn = self.db.lock().unwrap();
+         conn.query_row(
+@@ -269,6 +298,40 @@ impl Replica {
+         .expect("set_resume");
+     }
+ 
++    pub fn set_subtitle_track(&self, episode_id: &str, sid: &str) {
++        self.set_playback_preference(episode_id, "subtitle_track", sid);
++    }
++
++    pub fn set_audio_track(&self, episode_id: &str, aid: &str) {
++        self.set_playback_preference(episode_id, "audio_track", aid);
++    }
++
++    fn set_playback_preference(&self, episode_id: &str, column: &str, value: &str) {
++        debug_assert!(matches!(column, "subtitle_track" | "audio_track"));
++        let now = now();
++        let conn = self.db.lock().unwrap();
++        let current: Option<String> = conn
++            .query_row(
++                &format!("SELECT {column} FROM episode_playback_preferences WHERE episode_id=?1"),
++                params![episode_id],
++                |r| r.get::<_, Option<String>>(0),
++            )
++            .optional()
++            .expect("lookup playback preference")
++            .flatten();
++        if current.as_deref() == Some(value) {
++            return;
++        }
++        conn.execute(
++            &format!(
++                "INSERT INTO episode_playback_preferences(episode_id,{column},updated_at) VALUES(?1,?2,?3)
++                 ON CONFLICT(episode_id) DO UPDATE SET {column}=excluded.{column}, updated_at=excluded.updated_at"
++            ),
++            params![episode_id, value, now],
++        )
++        .expect("set playback preference");
++    }
++
+     // ── library management (local-first; syncs up like any change) ───────
+     pub fn create_show(&self, playlist: &str, name: &str, root_path: &str, episodes: &[String]) -> String {
+         let now = now();
+@@ -1438,6 +1501,20 @@ mod tests {
+         assert_eq!(r.resume_pos("a"), Some(123.5));
+     }
+ 
++    #[test]
++    fn episode_playback_preferences_are_local_to_episode() {
++        let r = Replica::new(":memory:");
++        seed(&r);
++        r.set_subtitle_track("a", "no");
++        r.set_audio_track("a", "2");
++
++        let a = r.playback_preferences("a");
++        assert_eq!(a.subtitle_track.as_deref(), Some("no"));
++        assert_eq!(a.audio_track.as_deref(), Some("2"));
++        assert_eq!(r.playback_preferences("b"), EpisodePlaybackPreferences::default());
++        assert_eq!(r.pending().episodes, 0);
++    }
++
+     #[test]
+     fn set_resume_unchanged_is_not_dirty() {
+         let r = Replica::new(":memory:");
+diff --git a/desktop-rs/core/src/runner.rs b/desktop-rs/core/src/runner.rs
+index c25b9f6..e837f65 100644
+--- a/desktop-rs/core/src/runner.rs
++++ b/desktop-rs/core/src/runner.rs
+@@ -113,6 +113,8 @@ pub trait PlayerOps: Send + Sync {
+     fn previous(&self);
+     fn time_pos(&self) -> Option<f64>;
+     fn seek_absolute(&self, seconds: f64);
++    fn set_sub(&self, sid: &str);
++    fn set_audio(&self, aid: &str);
+     fn set_playlist_pos(&self, idx: usize);
+     /// Block until the queued round's playlist is exhausted (mpv goes idle /
+     /// playlist-pos -> -1), or stop/shutdown. Detecting the boundary this way —
+@@ -571,9 +573,27 @@ impl Runner {
+         }
+     }
+ 
++    pub fn set_current_subtitle_track(&self, sid: &str) -> ControlOutcome {
++        self.player.set_sub(sid);
++        let Some(cur) = self.current() else {
++            return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
++        };
++        self.replica.set_subtitle_track(&cur.episode_id, sid);
++        ControlOutcome::applied("subtitle_updated", "subtitle track updated")
++    }
++
++    pub fn set_current_audio_track(&self, aid: &str) -> ControlOutcome {
++        self.player.set_audio(aid);
++        let Some(cur) = self.current() else {
++            return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
++        };
++        self.replica.set_audio_track(&cur.episode_id, aid);
++        ControlOutcome::applied("audio_updated", "audio track updated")
++    }
++
+     // ── playback callbacks (mpv event thread; keep fast + local) ─────────
+     /// A queued file opened — mark it now-playing, note reachable media, restore
+-    /// its saved resume position.
++    /// its saved resume position and per-episode track choices.
+     pub fn on_file_loaded(&self) {
+         let Some(cur) = self.current() else {
+             return;
+@@ -585,6 +605,13 @@ impl Runner {
+         }
+         self.replica
+             .update_round_entry_state(&cur.episode_id, "playing", &cur.playlist);
++        let prefs = self.replica.playback_preferences(&cur.episode_id);
++        if let Some(sid) = prefs.subtitle_track.as_deref() {
++            self.player.set_sub(sid);
++        }
++        if let Some(aid) = prefs.audio_track.as_deref() {
++            self.player.set_audio(aid);
++        }
+         if let Some(pos) = self.replica.resume_pos(&cur.episode_id) {
+             if pos > 1.0 {
+                 self.player.seek_absolute(pos);
+@@ -988,6 +1015,8 @@ mod tests {
+         clears: AtomicUsize,
+         time: Mutex<Option<f64>>,
+         seeked: Mutex<Option<f64>>,
++        sub: Mutex<Option<String>>,
++        audio: Mutex<Option<String>>,
+         playlist_pos: Mutex<Option<usize>>,
+         on_wait: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+     }
+@@ -1014,6 +1043,12 @@ mod tests {
+         fn seek_absolute(&self, seconds: f64) {
+             *self.seeked.lock().unwrap() = Some(seconds);
+         }
++        fn set_sub(&self, sid: &str) {
++            *self.sub.lock().unwrap() = Some(sid.to_string());
++        }
++        fn set_audio(&self, aid: &str) {
++            *self.audio.lock().unwrap() = Some(aid.to_string());
++        }
+         fn set_playlist_pos(&self, idx: usize) {
+             *self.playlist_pos.lock().unwrap() = Some(idx);
+         }
+@@ -1576,6 +1611,57 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn track_controls_persist_for_current_episode() {
++        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
++        let p = Arc::new(FakePlayer::default());
++        let run = runner(
++            r.clone(),
++            p.clone(),
++            &["nelson"],
++            StopFlag::new(),
++            Callbacks::default(),
++        );
++        set_round(&run);
++        run.set_pos(0);
++        let cur = run.current().unwrap();
++
++        assert_eq!(
++            run.set_current_subtitle_track("no").status(),
++            "subtitle_updated"
++        );
++        assert_eq!(run.set_current_audio_track("2").status(), "audio_updated");
++        assert_eq!(*p.sub.lock().unwrap(), Some("no".into()));
++        assert_eq!(*p.audio.lock().unwrap(), Some("2".into()));
++
++        let prefs = r.playback_preferences(&cur.episode_id);
++        assert_eq!(prefs.subtitle_track.as_deref(), Some("no"));
++        assert_eq!(prefs.audio_track.as_deref(), Some("2"));
++    }
++
++    #[test]
++    fn on_file_loaded_applies_episode_track_preferences() {
++        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
++        let p = Arc::new(FakePlayer::default());
++        let run = runner(
++            r.clone(),
++            p.clone(),
++            &["nelson"],
++            StopFlag::new(),
++            Callbacks::default(),
++        );
++        set_round(&run);
++        run.set_pos(0);
++        let cur = run.current().unwrap();
++        r.set_subtitle_track(&cur.episode_id, "3");
++        r.set_audio_track(&cur.episode_id, "1");
++
++        run.on_file_loaded();
++
++        assert_eq!(*p.sub.lock().unwrap(), Some("3".into()));
++        assert_eq!(*p.audio.lock().unwrap(), Some("1".into()));
++    }
++
+     // ── round-end detection (playlist-pos -> -1) ───────────────────────
+     #[test]
+     fn startup_idle_minus_one_is_not_a_round_end() {
+diff --git a/desktop-rs/desktop/src/compositor.rs b/desktop-rs/desktop/src/compositor.rs
+index f189645..7016e1f 100644
+--- a/desktop-rs/desktop/src/compositor.rs
++++ b/desktop-rs/desktop/src/compositor.rs
+@@ -48,7 +48,27 @@ const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
+ const WM_WINDOW_MINIMIZE: u32 = WM_APP + 2;
+ const WM_WINDOW_MAXIMIZE: u32 = WM_APP + 3;
+ const WM_WINDOW_CLOSE: u32 = WM_APP + 4;
+-const WM_TOGGLE_PIP: u32 = WM_APP + 5;
++const WM_TOGGLE_STAY_ON_TOP: u32 = WM_APP + 5;
++
++// Custom-chrome geometry, defined ONCE in logical (96-DPI) pixels and scaled by
++// the window DPI everywhere it is used, so the Win32 hit-test regions line up
++// with what the overlay renders at any DPI. The overlay CSS mirrors these:
++// `.titlebar { height: 32px }` and `.titlebar-actions { width: 138px }`. See
++// `docs/feature-contracts/desktop-shell.md`.
++const TITLEBAR_LOGICAL_H: i32 = 32;
++const WINDOW_BUTTONS_LOGICAL_W: i32 = 138;
++const RESIZE_BORDER_LOGICAL: i32 = 6;
++
++/// Scale a logical (96-DPI) length to physical pixels for `dpi`.
++fn scale_for_dpi(logical: i32, dpi: i32) -> i32 {
++    (logical * dpi.max(96)) / 96
++}
++
++/// Custom titlebar height in physical pixels for this window's DPI. The single
++/// source the swapchain offset, overlay bounds, and caption hit-test all use.
++fn titlebar_height_px(hwnd: HWND) -> i32 {
++    scale_for_dpi(TITLEBAR_LOGICAL_H, unsafe { GetDpiForWindow(hwnd) } as i32)
++}
+ 
+ type StatusUpdateCb = Box<dyn Fn(serde_json::Value) + Send + Sync>;
+ 
+@@ -78,65 +98,53 @@ fn rect_height(rect: RECT) -> i32 {
+     rect.bottom - rect.top
+ }
+ 
+-fn default_pip_rect(work: RECT) -> RECT {
+-    let margin = 24;
+-    let work_w = rect_width(work).max(1);
+-    let work_h = rect_height(work).max(1);
+-    let max_w = (work_w - margin * 2).max(1);
+-    let max_h = (work_h - margin * 2).max(1);
+-
+-    let mut pip_w = ((work_w as f64) * 0.375) as i32;
+-    pip_w = pip_w.clamp(640, 960).min(max_w);
+-    let mut pip_h = (pip_w * 9) / 16;
+-
+-    if pip_h > max_h {
+-        pip_h = max_h;
+-        pip_w = (pip_h * 16) / 9;
+-    }
+-
+-    let right = work.right - margin.min(work_w / 2);
+-    let bottom = work.bottom - margin.min(work_h / 2);
+-    RECT {
+-        left: right - pip_w,
+-        top: bottom - pip_h,
+-        right,
+-        bottom,
+-    }
+-}
+-
+-fn clamp_pip_rect_to_work_area(rect: RECT, work: RECT) -> RECT {
+-    let work_w = rect_width(work).max(1);
+-    let work_h = rect_height(work).max(1);
+-    let width = rect_width(rect).clamp(1, work_w);
+-    let height = rect_height(rect).clamp(1, work_h);
+-
+-    let mut left = rect.left;
+-    let mut top = rect.top;
+-
+-    if left < work.left {
+-        left = work.left;
+-    }
+-    if top < work.top {
+-        top = work.top;
+-    }
+-    if left + width > work.right {
+-        left = work.right - width;
+-    }
+-    if top + height > work.bottom {
+-        top = work.bottom - height;
++/// Map a client-relative point to a non-client hit-test code for the custom
++/// chrome. Pure (no HWND) so it is unit-tested across DPIs. `cx`/`cy` are
++/// relative to the window's top-left; `width`/`height` are the window size.
++/// All geometry derives from the shared logical constants, scaled by `dpi`, so
++/// the draggable caption and the window-button zone match the rendered overlay
++/// at every scale factor.
++fn nc_hit(cx: i32, cy: i32, width: i32, height: i32, dpi: i32, is_max: bool) -> u32 {
++    let titlebar = scale_for_dpi(TITLEBAR_LOGICAL_H, dpi);
++    let buttons = scale_for_dpi(WINDOW_BUTTONS_LOGICAL_W, dpi);
++    let border = scale_for_dpi(RESIZE_BORDER_LOGICAL, dpi).max(1);
++
++    if !is_max {
++        let is_top = cy < border;
++        let is_bottom = cy >= height - border;
++        let is_left = cx < border;
++        let is_right = cx >= width - border;
++        if is_top && is_left {
++            return HTTOPLEFT;
++        }
++        if is_top && is_right {
++            return HTTOPRIGHT;
++        }
++        if is_bottom && is_left {
++            return HTBOTTOMLEFT;
++        }
++        if is_bottom && is_right {
++            return HTBOTTOMRIGHT;
++        }
++        if is_top {
++            return HTTOP;
++        }
++        if is_bottom {
++            return HTBOTTOM;
++        }
++        if is_left {
++            return HTLEFT;
++        }
++        if is_right {
++            return HTRIGHT;
++        }
+     }
+ 
+-    RECT {
+-        left,
+-        top,
+-        right: left + width,
+-        bottom: top + height,
++    // Within the titlebar height and left of the window-button cluster: drag.
++    if cy >= 0 && cy < titlebar && cx < width - buttons {
++        return HTCAPTION;
+     }
+-}
+-
+-fn pip_window_style(saved_style: isize) -> isize {
+-    let style = saved_style as u32;
+-    ((style & !WS_MAXIMIZE.0 & !WS_POPUP.0) | WS_OVERLAPPEDWINDOW.0) as isize
++    HTCLIENT
+ }
+ 
+ #[cfg(test)]
+@@ -165,50 +173,38 @@ mod tests {
+         assert!(motion.observe(point(321, 181)));
+     }
+ 
++    // The whole point of the DPI fix: the caption drag region must cover the
++    // full *rendered* titlebar height (logical 32 × dpi/96), not a flat 32px.
+     #[test]
+-    fn default_pip_rect_is_larger_than_old_tiny_size() {
+-        let work = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+-        let rect = default_pip_rect(work);
+-
+-        assert_eq!(rect_width(rect), 720);
+-        assert_eq!(rect_height(rect), 405);
+-        assert_eq!(rect.right, 1896);
+-        assert_eq!(rect.bottom, 1056);
+-    }
+-
+-    #[test]
+-    fn default_pip_rect_stays_inside_small_work_area() {
+-        let work = RECT { left: 0, top: 0, right: 800, bottom: 500 };
+-        let rect = default_pip_rect(work);
+-
+-        assert!(rect_width(rect) <= 752);
+-        assert!(rect_height(rect) <= 452);
+-        assert!(rect.left >= work.left);
+-        assert!(rect.top >= work.top);
+-        assert!(rect.right <= work.right);
+-        assert!(rect.bottom <= work.bottom);
++    fn caption_drag_spans_full_titlebar_height_at_every_dpi() {
++        for dpi in [96, 120, 144, 192] {
++            let tb = scale_for_dpi(TITLEBAR_LOGICAL_H, dpi);
++            // Bottom row of the visible titlebar, left of the buttons: drags.
++            assert_eq!(nc_hit(200, tb - 1, 1000, 800, dpi, false), HTCAPTION, "dpi={dpi}");
++            // One pixel below the titlebar is client, not caption.
++            assert_eq!(nc_hit(200, tb + 1, 1000, 800, dpi, false), HTCLIENT, "dpi={dpi}");
++        }
+     }
+ 
++    // The window-button cluster must stay clickable (HTCLIENT, forwarded to the
++    // overlay), and the pixel just left of it must drag, at every DPI.
+     #[test]
+-    fn clamp_pip_rect_preserves_size_and_moves_inside_work_area() {
+-        let work = RECT { left: 100, top: 100, right: 900, bottom: 700 };
+-        let rect = RECT { left: 850, top: 650, right: 1250, bottom: 875 };
+-        let clamped = clamp_pip_rect_to_work_area(rect, work);
+-
+-        assert_eq!(rect_width(clamped), 400);
+-        assert_eq!(rect_height(clamped), 225);
+-        assert_eq!(clamped.right, work.right);
+-        assert_eq!(clamped.bottom, work.bottom);
++    fn button_cluster_stays_client_and_caption_starts_left_of_it() {
++        for dpi in [96, 120, 144, 192] {
++            let tb = scale_for_dpi(TITLEBAR_LOGICAL_H, dpi);
++            let buttons = scale_for_dpi(WINDOW_BUTTONS_LOGICAL_W, dpi);
++            assert_eq!(nc_hit(1000 - buttons + 5, tb / 2, 1000, 800, dpi, false), HTCLIENT, "dpi={dpi}");
++            assert_eq!(nc_hit(1000 - buttons - 5, tb / 2, 1000, 800, dpi, false), HTCAPTION, "dpi={dpi}");
++        }
+     }
+ 
+     #[test]
+-    fn pip_window_style_uses_normal_windows_chrome() {
+-        let style = pip_window_style((WS_POPUP.0 | WS_MAXIMIZE.0 | WS_VISIBLE.0) as isize) as u32;
+-
+-        assert_eq!(style & WS_OVERLAPPEDWINDOW.0, WS_OVERLAPPEDWINDOW.0);
+-        assert_eq!(style & WS_POPUP.0, 0);
+-        assert_eq!(style & WS_MAXIMIZE.0, 0);
+-        assert_ne!(style & WS_VISIBLE.0, 0);
++    fn resize_borders_exist_only_when_not_maximized() {
++        assert_eq!(nc_hit(0, 0, 1000, 800, 96, false), HTTOPLEFT);
++        assert_eq!(nc_hit(500, 799, 1000, 800, 96, false), HTBOTTOM);
++        assert_eq!(nc_hit(999, 400, 1000, 800, 96, false), HTRIGHT);
++        // Maximized: no resize band — the corner falls through to caption.
++        assert_eq!(nc_hit(0, 0, 1000, 800, 96, true), HTCAPTION);
+     }
+ }
+ 
+@@ -238,11 +234,11 @@ struct State {
+     _webview: ICoreWebView2,
+     // Borderless-fullscreen toggle: saved on entry, restored on exit.
+     is_fullscreen: bool,
+-    is_pip: bool,
++    // Stay-on-top: a pure topmost Z-order flag. Chrome/layout are unchanged.
++    is_on_top: bool,
+     saved_style: isize,
+     saved_exstyle: isize,
+     saved_rect: RECT,
+-    last_pip_rect: Option<RECT>,
+ }
+ 
+ thread_local! {
+@@ -273,7 +269,7 @@ impl Compositor {
+         unsafe { GetClientRect(hwnd, &mut rc)? };
+         let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
+ 
+-        let video_top = (32 * unsafe { GetDpiForWindow(hwnd) } as i32) / 96;
++        let video_top = titlebar_height_px(hwnd);
+         let video_h = (ch - video_top).max(1);
+ 
+         // D3D11 device + composition swapchain (the video layer).
+@@ -410,11 +406,10 @@ impl Compositor {
+                 base,
+                 _webview: webview,
+                 is_fullscreen: false,
+-                is_pip: false,
++                is_on_top: false,
+                 saved_style: 0,
+                 saved_exstyle: 0,
+                 saved_rect: RECT::default(),
+-                last_pip_rect: None,
+             });
+         });
+ 
+@@ -478,13 +473,14 @@ impl Compositor {
+         })
+     }
+ 
+-    /// A `Send + Sync` closure that posts a pip-toggle message to the UI thread.
+-    pub fn pip_callback(&self) -> Box<dyn Fn() + Send + Sync> {
++    /// A `Send + Sync` closure that posts a stay-on-top-toggle message to the UI
++    /// thread (the topmost Z-order change must happen on the owning thread).
++    pub fn stay_on_top_callback(&self) -> Box<dyn Fn() + Send + Sync> {
+         let raw = self.hwnd.0 as usize;
+         Box::new(move || unsafe {
+             let _ = PostMessageW(
+                 Some(HWND(raw as *mut _)),
+-                WM_TOGGLE_PIP,
++                WM_TOGGLE_STAY_ON_TOP,
+                 WPARAM(0),
+                 LPARAM(0),
+             );
+@@ -562,16 +558,39 @@ fn render(s: &State) {
+     }
+ }
+ 
++/// Rebuild everything that depends on the client size: swapchain backbuffer,
++/// video-visual vertical offset (below the custom titlebar unless fullscreen),
++/// overlay bounds, and the shared GL/D3D texture mpv renders into. The single
++/// place layout is recomputed — called on `WM_SIZE` and after the fullscreen
++/// toggle. Forces a present so the resized frame shows even while paused.
++fn relayout(hwnd: HWND, st: &mut State, cw: i32, ch: i32) {
++    if cw <= 0 || ch <= 0 {
++        return;
++    }
++    unsafe {
++        let video_top = if st.is_fullscreen { 0 } else { titlebar_height_px(hwnd) };
++        let video_h = (ch - video_top).max(1);
++        let _ = st.swapchain.ResizeBuffers(
++            0,
++            cw as u32,
++            video_h as u32,
++            DXGI_FORMAT_UNKNOWN,
++            DXGI_SWAP_CHAIN_FLAG(0),
++        );
++        let _ = st._bottom.SetOffsetY2(video_top as f32);
++        let _ = st.base.SetBounds(RECT { left: 0, top: 0, right: cw, bottom: ch });
++        let _ = st.gl.resize(&st.device, cw, video_h);
++        // The webview's visual-hosting output needs a Commit to publish the new
++        // bounds in the DComp tree.
++        let _ = st.dcomp.Commit();
++        render(st);
++    }
++}
++
+ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+     unsafe {
+         match msg {
+             WM_NCCALCSIZE => {
+-                let is_pip = STATE.with(|s| {
+-                    s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
+-                });
+-                if is_pip {
+-                    return DefWindowProcW(hwnd, msg, w, l);
+-                }
+                 if w.0 != 0 {
+                     let is_fs = STATE.with(|s| {
+                         s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
+@@ -592,78 +611,30 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                 LRESULT(0)
+             }
+             WM_NCHITTEST => {
+-                let (is_fs, is_pip) = STATE.with(|s| {
+-                    s.borrow().as_ref().map(|st| (st.is_fullscreen, st.is_pip)).unwrap_or((false, false))
++                let is_fs = STATE.with(|s| {
++                    s.borrow().as_ref().map(|st| st.is_fullscreen).unwrap_or(false)
+                 });
+-                if is_pip {
+-                    return DefWindowProcW(hwnd, msg, w, l);
+-                }
+                 if is_fs {
+                     return LRESULT(HTCLIENT as isize);
+                 }
+ 
+                 let x = (l.0 & 0xFFFF) as i16 as i32;
+                 let y = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
+-                
++
+                 let mut rect = RECT::default();
+                 let _ = GetWindowRect(hwnd, &mut rect);
+-                
++
++                let dpi = GetDpiForWindow(hwnd) as i32;
+                 let is_max = IsZoomed(hwnd).as_bool();
+-                
+-                if !is_max {
+-                    let border_width = 6;
+-                    let is_top = y < rect.top + border_width;
+-                    let is_bottom = y >= rect.bottom - border_width;
+-                    let is_left = x < rect.left + border_width;
+-                    let is_right = x >= rect.right - border_width;
+-                    
+-                    if is_top && is_left {
+-                        return LRESULT(HTTOPLEFT as isize);
+-                    }
+-                    if is_top && is_right {
+-                        return LRESULT(HTTOPRIGHT as isize);
+-                    }
+-                    if is_bottom && is_left {
+-                        return LRESULT(HTBOTTOMLEFT as isize);
+-                    }
+-                    if is_bottom && is_right {
+-                        return LRESULT(HTBOTTOMRIGHT as isize);
+-                    }
+-                    if is_top {
+-                        return LRESULT(HTTOP as isize);
+-                    }
+-                    if is_bottom {
+-                        return LRESULT(HTBOTTOM as isize);
+-                    }
+-                    if is_left {
+-                        return LRESULT(HTLEFT as isize);
+-                    }
+-                    if is_right {
+-                        return LRESULT(HTRIGHT as isize);
+-                    }
+-                }
+-                
+-                if is_max {
+-                    let client_y = y - rect.top;
+-                    if client_y >= 0 && client_y < 32 {
+-                        let client_x = x - rect.left;
+-                        let width = rect.right - rect.left;
+-                        if client_x < width - 140 {
+-                            return LRESULT(HTCAPTION as isize);
+-                        }
+-                    }
+-                    return LRESULT(HTCLIENT as isize);
+-                }
+-                
+-                let client_y = y - rect.top;
+-                if client_y >= 0 && client_y < 32 {
+-                    let client_x = x - rect.left;
+-                    let width = rect.right - rect.left;
+-                    if client_x < width - 140 {
+-                        return LRESULT(HTCAPTION as isize);
+-                    }
+-                }
+-                LRESULT(HTCLIENT as isize)
++                let code = nc_hit(
++                    x - rect.left,
++                    y - rect.top,
++                    rect_width(rect),
++                    rect_height(rect),
++                    dpi,
++                    is_max,
++                );
++                LRESULT(code as isize)
+             }
+             WM_TIMER => {
+                 STATE.with(|s| {
+@@ -722,13 +693,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                 LRESULT(0)
+             }
+             WM_NCMOUSEMOVE => {
+-                let is_pip = STATE.with(|s| {
+-                    s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
+-                });
+-                if is_pip {
+-                    return DefWindowProcW(hwnd, msg, w, l);
+-                }
+-
++                // The custom titlebar is a non-client (caption) area, so pointer
++                // moves over it arrive here, not as WM_MOUSEMOVE. Forward them as
++                // overlay MOVE events so titlebar buttons still show hover.
+                 let lp = l.0 as u32;
+                 let mut point = POINT { x: (lp & 0xFFFF) as i16 as i32, y: (lp >> 16) as i16 as i32 };
+                 let _ = ScreenToClient(hwnd, &mut point);
+@@ -756,16 +723,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                 DefWindowProcW(hwnd, msg, w, l)
+             }
+             0x02A2 => { // WM_NCMOUSELEAVE
+-                let is_pip = STATE.with(|s| {
+-                    s.borrow().as_ref().map(|st| st.is_pip).unwrap_or(false)
+-                });
+-                if is_pip {
+-                    return DefWindowProcW(hwnd, msg, w, l);
+-                }
+-
+-                if !is_cursor_in_window(hwnd) {
+-                    STATE.with(|s| {
+-                        if let Some(st) = s.borrow().as_ref() {
++                let cursor_in_window = is_cursor_in_window(hwnd);
++                STATE.with(|s| {
++                    if let Some(st) = s.borrow().as_ref() {
++                        // Only clear overlay hover when the pointer truly left the
++                        // window; moving between client area and caption must not.
++                        if !cursor_in_window {
+                             let _ = st.controller.SendMouseInput(
+                                 COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+                                 COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
+@@ -773,8 +736,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                                 POINT { x: 0, y: 0 },
+                             );
+                         }
+-                    });
+-                }
++                    }
++                });
+                 DefWindowProcW(hwnd, msg, w, l)
+             }
+             WM_SETCURSOR => {
+@@ -823,9 +786,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                 LRESULT(0)
+             }
+             WM_MOUSELEAVE => {
+-                if !is_cursor_in_window(hwnd) {
+-                    STATE.with(|s| {
+-                        if let Some(st) = s.borrow().as_ref() {
++                let cursor_in_window = is_cursor_in_window(hwnd);
++                STATE.with(|s| {
++                    if let Some(st) = s.borrow().as_ref() {
++                        if !cursor_in_window {
+                             let _ = st.controller.SendMouseInput(
+                                 COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+                                 COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
+@@ -833,8 +797,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                                 POINT { x: 0, y: 0 },
+                             );
+                         }
+-                    });
+-                }
++                    }
++                });
+                 LRESULT(0)
+             }
+             WM_SETFOCUS => {
+@@ -871,35 +835,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                 let lp = l.0 as u32;
+                 let cw = (lp & 0xFFFF) as i32;
+                 let ch = (lp >> 16) as i32;
+-                if cw > 0 && ch > 0 {
+-                    STATE.with(|s| {
+-                        if let Some(st) = s.borrow_mut().as_mut() {
+-                            let dpi = GetDpiForWindow(hwnd) as i32;
+-                            let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
+-                            let video_h = (ch - video_top).max(1);
+-
+-                            let _ = st.swapchain.ResizeBuffers(
+-                                0,
+-                                cw as u32,
+-                                video_h as u32,
+-                                DXGI_FORMAT_UNKNOWN,
+-                                DXGI_SWAP_CHAIN_FLAG(0),
+-                            );
+-                            let _ = st._bottom.SetOffsetY2(video_top as f32);
+-                            let _ = st.base.SetBounds(RECT {
+-                                left: 0,
+-                                top: 0,
+-                                right: cw,
+-                                bottom: ch,
+-                            });
+-                            let _ = st.gl.resize(&st.device, cw, video_h);
+-                            // The webview's visual-hosting output needs a Commit
+-                            // to publish the new bounds in the DComp tree.
+-                            let _ = st.dcomp.Commit();
+-                            render(st);
+-                        }
+-                    });
+-                }
++                STATE.with(|s| {
++                    if let Some(st) = s.borrow_mut().as_mut() {
++                        relayout(hwnd, st, cw, ch);
++                    }
++                });
+                 LRESULT(0)
+             }
+             m if m == WM_TOGGLE_FULLSCREEN => {
+@@ -983,166 +923,46 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                     None => {}
+                 }
+ 
+-                // Force layout recalculation after entering or exiting fullscreen to ensure
+-                // the video swapchain, visual offset, and overlay bounds are updated correctly.
++                // Rebuild layout after entering/exiting fullscreen so the video
++                // swapchain, visual offset, and overlay bounds match the new size.
+                 let mut rc = RECT::default();
+                 if GetClientRect(hwnd, &mut rc).is_ok() {
+-                    let cw = rc.right - rc.left;
+-                    let ch = rc.bottom - rc.top;
+-                    if cw > 0 && ch > 0 {
+-                        STATE.with(|s| {
+-                            if let Some(st) = s.borrow_mut().as_mut() {
+-                                let dpi = GetDpiForWindow(hwnd) as i32;
+-                                let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
+-                                let video_h = (ch - video_top).max(1);
+-                                let _ = st.swapchain.ResizeBuffers(
+-                                    0,
+-                                    cw as u32,
+-                                    video_h as u32,
+-                                    DXGI_FORMAT_UNKNOWN,
+-                                    DXGI_SWAP_CHAIN_FLAG(0),
+-                                );
+-                                let _ = st._bottom.SetOffsetY2(video_top as f32);
+-                                let _ = st.base.SetBounds(RECT {
+-                                    left: 0,
+-                                    top: 0,
+-                                    right: cw,
+-                                    bottom: ch,
+-                                });
+-                                let _ = st.gl.resize(&st.device, cw, video_h);
+-                                let _ = st.dcomp.Commit();
+-                                render(st);
+-                            }
+-                        });
+-                    }
++                    let (cw, ch) = (rc.right - rc.left, rc.bottom - rc.top);
++                    STATE.with(|s| {
++                        if let Some(st) = s.borrow_mut().as_mut() {
++                            relayout(hwnd, st, cw, ch);
++                        }
++                    });
+                 }
+                 LRESULT(0)
+             }
+-            m if m == WM_TOGGLE_PIP => {
+-                enum Action {
+-                    Enter { new_style: isize, rect: RECT },
+-                    Exit { restore_style: isize, restore_exstyle: isize, restore_rect: RECT },
+-                }
+-                let action = STATE.with(|s| -> Option<Action> {
+-                    let mut b = s.borrow_mut();
+-                    let st = b.as_mut()?;
+-                    if !st.is_pip {
+-                        let mut rc = RECT::default();
+-                        let _ = GetWindowRect(hwnd, &mut rc);
+-                        let saved_style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+-                        let saved_exstyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+-                        st.saved_rect = rc;
+-                        st.saved_style = saved_style;
+-                        st.saved_exstyle = saved_exstyle;
+-                        st.is_pip = true;
+-                        if let Some(cb) = &st.status_callback {
+-                            cb(serde_json::json!({ "window_pip": true }));
+-                        }
+-                        let new_style = pip_window_style(saved_style);
+-                        
+-                        let mon: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+-                        let mut mi = MONITORINFO {
+-                            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+-                            ..Default::default()
+-                        };
+-                        let _ = GetMonitorInfoW(mon, &mut mi);
+-                        
+-                        let target_rect = st
+-                            .last_pip_rect
+-                            .map(|rect| clamp_pip_rect_to_work_area(rect, mi.rcWork))
+-                            .unwrap_or_else(|| default_pip_rect(mi.rcWork));
+-
+-                        Some(Action::Enter { new_style, rect: target_rect })
+-                    } else {
+-                        let mut pip_rect = RECT::default();
+-                        if GetWindowRect(hwnd, &mut pip_rect).is_ok() {
+-                            st.last_pip_rect = Some(pip_rect);
+-                        }
+-                        let action = Action::Exit {
+-                            restore_style: st.saved_style,
+-                            restore_exstyle: st.saved_exstyle,
+-                            restore_rect: st.saved_rect,
+-                        };
+-                        st.is_pip = false;
++            m if m == WM_TOGGLE_STAY_ON_TOP => {
++                // Pure topmost Z-order toggle: no style swap, no move/resize, no
++                // relayout. Chrome and layout are identical to windowed mode —
++                // only the window's stacking changes. This replaces the old
++                // mini-player/PiP mode, which swapped in a native frame just to
++                // float the window.
++                let on_top = STATE.with(|s| {
++                    s.borrow_mut().as_mut().map(|st| {
++                        st.is_on_top = !st.is_on_top;
+                         if let Some(cb) = &st.status_callback {
+-                            cb(serde_json::json!({ "window_pip": false }));
++                            cb(serde_json::json!({ "window_on_top": st.is_on_top }));
+                         }
+-                        Some(action)
+-                    }
++                        st.is_on_top
++                    })
+                 });
+-                match action {
+-                    Some(Action::Enter { new_style, rect: mr }) => {
+-                        SetWindowLongPtrW(hwnd, GWL_STYLE, new_style);
+-                        let _ = SetWindowPos(
+-                            hwnd,
+-                            Some(HWND_TOPMOST),
+-                            mr.left,
+-                            mr.top,
+-                            mr.right - mr.left,
+-                            mr.bottom - mr.top,
+-                            SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+-                        );
+-                        let _ = SetForegroundWindow(hwnd);
+-                    }
+-                    Some(Action::Exit { restore_style, restore_exstyle, restore_rect: r }) => {
+-                        SetWindowLongPtrW(hwnd, GWL_STYLE, restore_style);
+-                        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, restore_exstyle);
+-                        if (restore_style as u32 & WS_MAXIMIZE.0) != 0 {
+-                            let _ = SetWindowPos(
+-                                hwnd,
+-                                Some(HWND_NOTOPMOST),
+-                                0, 0, 0, 0,
+-                                SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED,
+-                            );
+-                            let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+-                        } else {
+-                            let _ = SetWindowPos(
+-                                hwnd,
+-                                Some(HWND_NOTOPMOST),
+-                                r.left,
+-                                r.top,
+-                                r.right - r.left,
+-                                r.bottom - r.top,
+-                                SWP_FRAMECHANGED | SWP_SHOWWINDOW,
+-                            );
+-                        }
+-                        let _ = SetForegroundWindow(hwnd);
+-                    }
+-                    None => {}
+-                }
+-
+-                // Force layout recalculation after entering or exiting pip to ensure
+-                // the video swapchain, visual offset, and overlay bounds are updated correctly.
+-                let mut rc = RECT::default();
+-                if GetClientRect(hwnd, &mut rc).is_ok() {
+-                    let cw = rc.right - rc.left;
+-                    let ch = rc.bottom - rc.top;
+-                    if cw > 0 && ch > 0 {
+-                        STATE.with(|s| {
+-                            if let Some(st) = s.borrow_mut().as_mut() {
+-                                let dpi = GetDpiForWindow(hwnd) as i32;
+-                                let video_top = if st.is_fullscreen || st.is_pip { 0 } else { (32 * dpi) / 96 };
+-                                let video_h = (ch - video_top).max(1);
+-                                let _ = st.swapchain.ResizeBuffers(
+-                                    0,
+-                                    cw as u32,
+-                                    video_h as u32,
+-                                    DXGI_FORMAT_UNKNOWN,
+-                                    DXGI_SWAP_CHAIN_FLAG(0),
+-                                );
+-                                let _ = st._bottom.SetOffsetY2(video_top as f32);
+-                                let _ = st.base.SetBounds(RECT {
+-                                    left: 0,
+-                                    top: 0,
+-                                    right: cw,
+-                                    bottom: ch,
+-                                });
+-                                let _ = st.gl.resize(&st.device, cw, video_h);
+-                                let _ = st.dcomp.Commit();
+-                                render(st);
+-                            }
+-                        });
+-                    }
++                if let Some(on_top) = on_top {
++                    let insert_after = if on_top { HWND_TOPMOST } else { HWND_NOTOPMOST };
++                    let _ = SetWindowPos(
++                        hwnd,
++                        Some(insert_after),
++                        0,
++                        0,
++                        0,
++                        0,
++                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
++                    );
++                    log::info!("window on_top={on_top}");
+                 }
+                 LRESULT(0)
+             }
+@@ -1217,9 +1037,12 @@ fn save_window_placement(hwnd: HWND) {
+             let mut maximized = wp.showCmd == SW_SHOWMAXIMIZED.0 as u32;
+             let mut rect = wp.rcNormalPosition;
+             
++            // Fullscreen swaps the window rect, so persist the pre-fullscreen
++            // rect instead of the borderless one. Stay-on-top never changes the
++            // rect, so the live placement is already correct there.
+             let saved_transient = STATE.with(|s| {
+                 s.borrow().as_ref().map(|st| {
+-                    (st.is_fullscreen || st.is_pip, st.saved_rect, st.saved_style)
++                    (st.is_fullscreen, st.saved_rect, st.saved_style)
+                 })
+             });
+             if let Some((true, saved_rect, saved_style)) = saved_transient {
+diff --git a/desktop-rs/desktop/src/main.rs b/desktop-rs/desktop/src/main.rs
+index 91baf81..9b1192e 100644
+--- a/desktop-rs/desktop/src/main.rs
++++ b/desktop-rs/desktop/src/main.rs
+@@ -323,7 +323,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+     server.set_runner(runner.clone());
+     server.set_syncer(syncer.clone());
+     server.set_on_fullscreen(compositor.fullscreen_callback());
+-    server.set_on_pip(compositor.pip_callback());
++    server.set_on_stay_on_top(compositor.stay_on_top_callback());
+     server.set_on_window_action(compositor.window_action_callback());
+ 
+     let s_clone = server.clone();
+diff --git a/desktop-rs/desktop/src/player.rs b/desktop-rs/desktop/src/player.rs
+index 5804244..567857a 100644
+--- a/desktop-rs/desktop/src/player.rs
++++ b/desktop-rs/desktop/src/player.rs
+@@ -338,6 +338,12 @@ impl PlayerOps for Player {
+         self.handle
+             .command(&["seek", &seconds.to_string(), "absolute"]);
+     }
++    fn set_sub(&self, sid: &str) {
++        Player::set_sub(self, sid);
++    }
++    fn set_audio(&self, aid: &str) {
++        Player::set_audio(self, aid);
++    }
+     fn set_playlist_pos(&self, idx: usize) {
+         self.handle.set_property("playlist-pos", &idx.to_string());
+     }
+diff --git a/desktop-rs/desktop/src/webserver.rs b/desktop-rs/desktop/src/webserver.rs
+index 2d20c71..90f51a2 100644
+--- a/desktop-rs/desktop/src/webserver.rs
++++ b/desktop-rs/desktop/src/webserver.rs
+@@ -2,7 +2,7 @@
+ //! bundle and a same-origin control surface: the overlay subscribes to
+ //! `/status/stream`, can read a one-shot `/status` snapshot, reads `/shows`,
+ //! `/stats`, `/history`, and POSTs `/pause` `/skip` `/prev` `/defer` `/seek`
+-//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/pip` `/window/*`
++//! `/volume` `/sub` `/audio` `/sync-now` `/fullscreen` `/stay-on-top` `/window/*`
+ //! `/library/*`.
+ 
+ use std::io::Read;
+@@ -207,18 +207,18 @@ impl StatusPatch {
+         StatusPatch { fields }
+     }
+ 
+-    pub fn window_state(maximized: bool, fullscreen: bool, pip: bool) -> StatusPatch {
++    pub fn window_state(maximized: bool, fullscreen: bool, on_top: bool) -> StatusPatch {
+         let mut fields = serde_json::Map::new();
+         fields.insert("window_maximized".into(), json!(maximized));
+         fields.insert("window_fullscreen".into(), json!(fullscreen));
+-        fields.insert("window_pip".into(), json!(pip));
++        fields.insert("window_on_top".into(), json!(on_top));
+         StatusPatch { fields }
+     }
+ }
+ 
+ pub type WindowActionCb = Box<dyn Fn(WindowAction) + Send + Sync>;
+ type FullscreenCb = Box<dyn Fn() + Send + Sync>;
+-type PipCb = Box<dyn Fn() + Send + Sync>;
++type StayOnTopCb = Box<dyn Fn() + Send + Sync>;
+ 
+ pub struct ControlServer {
+     dist_dir: Option<PathBuf>,
+@@ -231,7 +231,7 @@ pub struct ControlServer {
+     runner: Mutex<Option<Arc<Runner>>>,
+     syncer: Mutex<Option<Arc<Syncer>>>,
+     on_fullscreen: Mutex<Option<FullscreenCb>>,
+-    on_pip: Mutex<Option<PipCb>>,
++    on_stay_on_top: Mutex<Option<StayOnTopCb>>,
+     on_window_action: Mutex<Option<WindowActionCb>>,
+ }
+ 
+@@ -252,7 +252,7 @@ impl ControlServer {
+         status.insert("round_blocked".into(), json!(false));
+         status.insert("window_maximized".into(), json!(false));
+         status.insert("window_fullscreen".into(), json!(false));
+-        status.insert("window_pip".into(), json!(false));
++        status.insert("window_on_top".into(), json!(false));
+         Arc::new(ControlServer {
+             dist_dir,
+             playlists,
+@@ -264,7 +264,7 @@ impl ControlServer {
+             runner: Mutex::new(None),
+             syncer: Mutex::new(None),
+             on_fullscreen: Mutex::new(None),
+-            on_pip: Mutex::new(None),
++            on_stay_on_top: Mutex::new(None),
+             on_window_action: Mutex::new(None),
+         })
+     }
+@@ -283,8 +283,8 @@ impl ControlServer {
+     pub fn set_on_fullscreen(&self, f: FullscreenCb) {
+         *self.on_fullscreen.lock().unwrap() = Some(f);
+     }
+-    pub fn set_on_pip(&self, f: PipCb) {
+-        *self.on_pip.lock().unwrap() = Some(f);
++    pub fn set_on_stay_on_top(&self, f: StayOnTopCb) {
++        *self.on_stay_on_top.lock().unwrap() = Some(f);
+     }
+     pub fn set_on_window_action(&self, f: WindowActionCb) {
+         *self.on_window_action.lock().unwrap() = Some(f);
+@@ -537,11 +537,11 @@ impl ControlServer {
+                 }
+                 respond_control_ok(request, "fullscreen_toggled", "fullscreen toggled");
+             }
+-            "/pip" => {
+-                if let Some(cb) = self.on_pip.lock().unwrap().as_ref() {
++            "/stay-on-top" => {
++                if let Some(cb) = self.on_stay_on_top.lock().unwrap().as_ref() {
+                     cb();
+                 }
+-                respond_control_ok(request, "pip_toggled", "mini player toggled");
++                respond_control_ok(request, "stay_on_top_toggled", "stay on top toggled");
+             }
+             "/window/minimize" => {
+                 if let Some(cb) = self.on_window_action.lock().unwrap().as_ref() {
+@@ -614,8 +614,12 @@ impl ControlServer {
+                 } else {
+                     "no".to_string()
+                 };
+-                self.with_player(|p| p.set_sub(&sid));
+-                respond_control_ok(request, "subtitle_updated", "subtitle track updated");
++                if let Some(runner) = self.runner.lock().unwrap().clone() {
++                    respond_control_outcome(request, runner.set_current_subtitle_track(&sid));
++                } else {
++                    self.with_player(|p| p.set_sub(&sid));
++                    respond_control_ok(request, "subtitle_updated", "subtitle track updated");
++                }
+             }
+             "/audio" => {
+                 let b = read_body(&mut request);
+@@ -625,9 +629,15 @@ impl ControlServer {
+                     b.get("aid").and_then(Value::as_i64).map(|n| n.to_string())
+                 };
+                 if let Some(aid) = aid {
+-                    self.with_player(|p| p.set_audio(&aid));
++                    if let Some(runner) = self.runner.lock().unwrap().clone() {
++                        respond_control_outcome(request, runner.set_current_audio_track(&aid));
++                    } else {
++                        self.with_player(|p| p.set_audio(&aid));
++                        respond_control_ok(request, "audio_updated", "audio track updated");
++                    }
++                } else {
++                    respond_control_ok(request, "audio_updated", "audio track updated");
+                 }
+-                respond_control_ok(request, "audio_updated", "audio track updated");
+             }
+             "/library/add" => self.library_add(request),
+             "/library/remove" => {
+@@ -1519,7 +1529,7 @@ mod tests {
+         assert_eq!(value["round_blocked"], false);
+         assert_eq!(value["window_maximized"], false);
+         assert_eq!(value["window_fullscreen"], false);
+-        assert_eq!(value["window_pip"], false);
++        assert_eq!(value["window_on_top"], false);
+         assert!(value["alerts"].is_array());
+     }
+ 
+diff --git a/desktop-rs/frontend/src/App.css b/desktop-rs/frontend/src/App.css
+index e4ee3d0..abdd9dd 100644
+--- a/desktop-rs/frontend/src/App.css
++++ b/desktop-rs/frontend/src/App.css
+@@ -866,9 +866,6 @@ ul.recent li {
+ .layout.over-video {
+   background: color-mix(in srgb, var(--bg-deep) 68%, transparent);
+ }
+-.window-pip .layout.over-video {
+-  background: transparent;
+-}
+ 
+ /* Flat now-playing / up-next queue. Play order; current marked, earlier
+    done (dimmed), later are what's next. */
+@@ -1477,8 +1474,81 @@ button.gb.toggle-view-btn {
+   flex-shrink: 0;
+ }
+ 
+-/* Mini player mode uses the real Windows titlebar, so hide only the custom
+-   in-client titlebar to avoid double chrome. */
+-.window-pip .titlebar {
+-  display: none;
++/* Compact control layout for narrow windows (width-driven, not a window mode). */
++.bottom-controls.mini-controls {
++  padding: 8px 12px 10px;
++  gap: 8px;
++}
++
++.mini-scrub-container {
++  gap: 0;
++  min-width: 0;
++}
++
++.mini-scrub-container .scrub-bar {
++  min-width: 0;
++}
++
++.mini-controls-row {
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  gap: 6px;
++  width: 100%;
++  min-width: 0;
++  overflow: hidden;
++  white-space: nowrap;
++}
++
++.mini-controls .control-btn {
++  width: 32px;
++  height: 32px;
++  flex: 0 0 32px;
++}
++
++.mini-controls .control-btn.play-pause-btn {
++  width: 38px;
++  height: 38px;
++  flex-basis: 38px;
++}
++
++@media (max-width: 380px) {
++  .bottom-controls.mini-controls {
++    padding: 7px 10px 9px;
++  }
++
++  .mini-controls-row {
++    gap: 5px;
++  }
++
++  .mini-controls .cc-btn {
++    display: none;
++  }
++}
++
++@media (max-width: 330px) {
++  .bottom-controls.mini-controls {
++    padding-left: 8px;
++    padding-right: 8px;
++  }
++
++  .mini-controls-row {
++    gap: 4px;
++  }
++
++  .mini-controls .control-btn {
++    width: 30px;
++    height: 30px;
++    flex-basis: 30px;
++  }
++
++  .mini-controls .control-btn.play-pause-btn {
++    width: 36px;
++    height: 36px;
++    flex-basis: 36px;
++  }
++
++  .mini-controls .volume-btn {
++    display: none;
++  }
+ }
+diff --git a/desktop-rs/frontend/src/App.tsx b/desktop-rs/frontend/src/App.tsx
+index 5ca7b3c..060c5e5 100644
+--- a/desktop-rs/frontend/src/App.tsx
++++ b/desktop-rs/frontend/src/App.tsx
+@@ -12,7 +12,7 @@ import {
+   markShowUnwatched,
+   defer,
+   toggleFullscreen,
+-  togglePip,
++  toggleStayOnTop,
+   minimizeWindow,
+   maximizeWindow,
+   closeWindow,
+@@ -51,7 +51,6 @@ const VOLUME_MIN = 0;
+ const VOLUME_MAX = 130;
+ const VOLUME_STEP = 5;
+ const CONTROLS_IDLE_MS = 2000;
+-const MINI_CONTROLS_MAX_VISIBLE_MS = 2500;
+ 
+ function clampVolume(volume: number): number {
+   if (!Number.isFinite(volume)) return VOLUME_MIN;
+@@ -210,7 +209,6 @@ function App() {
+   // handler can re-arm it without re-binding.
+   const volOsdTimer = useRef<number | undefined>(undefined);
+   const controlsIdleTimer = useRef<number | undefined>(undefined);
+-  const miniControlsVisibleCapTimer = useRef<number | undefined>(undefined);
+   const wheelVolumeRemainder = useRef(0);
+   const controlsIdleRef = useRef(controlsIdle);
+ 
+@@ -319,19 +317,9 @@ function App() {
+   // Last physical mouse position to prevent synthetic mousemove events from waking up controls.
+   const lastMousePos = useRef<{ x: number; y: number } | null>(null);
+ 
+-  const hideControlsNow = useCallback(() => {
+-    window.clearTimeout(controlsIdleTimer.current);
+-    window.clearTimeout(miniControlsVisibleCapTimer.current);
+-    controlsIdleTimer.current = undefined;
+-    miniControlsVisibleCapTimer.current = undefined;
+-    lastMousePos.current = null;
+-    setControlsHovered(false);
+-    setControlsIdle(true);
+-  }, []);
+-
+   // Keyboard controls. Bound on window so they work whenever the overlay has
+   // focus (the WebView2 overlay holds focus over the video). space=pause/play,
+-  // n=next show, p=previous show, d=defer, f=fullscreen, i=mini player, h=hide all chrome,
++  // n=next show, p=previous show, d=defer, f=fullscreen, i=stay on top, h=hide all chrome,
+   // c=toggle closed captions, ←/→ (or j/l)=seek -/+10s, ↑/↓=volume, v/Tab=dashboard,
+   // Esc=hide dashboard.
+   useEffect(() => {
+@@ -359,7 +347,7 @@ function App() {
+           void runControl(toggleFullscreen);
+           break;
+         case 'i':
+-          void runControl(togglePip);
++          void runControl(toggleStayOnTop);
+           break;
+ 
+         case 'c': {
+@@ -413,35 +401,36 @@ function App() {
+       window.removeEventListener('keydown', onKey);
+       window.clearTimeout(volOsdTimer.current);
+       window.clearTimeout(controlsIdleTimer.current);
+-      window.clearTimeout(miniControlsVisibleCapTimer.current);
+     };
+   }, [adjustVolume, runControl]);
+ 
+ 
+ 
+-  // Auto-hide the control bar (and cursor) after a short mouse idle during active
+-  // playback. Any movement brings it back and re-arms the timer. Mini-player
+-  // mode deliberately ignores hover as a keep-open signal because WebView/native
+-  // hit testing can miss the matching leave event.
++  // The single owner of control-bar (and cursor) visibility. During playback the
++  // bar hides after a short pointer idle; movement reveals it and re-arms the
++  // timer. It is pinned open while the dashboard is open, while scrubbing, or
++  // while the pointer hovers the controls; the pointer leaving the window hides
++  // it. See docs/feature-contracts/desktop-shell.md.
+   useEffect(() => {
+     const playing = status.phase === 'playing';
+-    const miniPlayer = Boolean(status.window_pip);
+-    const keepOpen = showSettings || controlsPointerDown || (!miniPlayer && controlsHovered);
++    const keepOpen = showSettings || controlsPointerDown || controlsHovered;
+     window.clearTimeout(controlsIdleTimer.current);
+     if (!playing || keepOpen) {
+       lastMousePos.current = null;
+       setControlsIdle(false);
+       return;
+     }
+-    // Default controls to hidden when entering the playback view
++    // Default to hidden on entering playback; movement brings the bar back.
+     setControlsIdle(true);
+     lastMousePos.current = null;
+-    
++
+     const onActivity = (e?: MouseEvent) => {
+       if (e) {
+         const previous = lastMousePos.current;
+         const current = { x: e.screenX, y: e.screenY };
+         lastMousePos.current = current;
++        // Ignore synthetic same-position moves (keyboard/media can emit them),
++        // so idle-hidden controls stay hidden while the mouse is physically still.
+         if (!previous || (current.x === previous.x && current.y === previous.y)) {
+           return;
+         }
+@@ -449,13 +438,19 @@ function App() {
+       setControlsIdle(false);
+       armControlsIdle();
+     };
++    const onLeaveWindow = () => {
++      lastMousePos.current = null;
++      setControlsIdle(true);
++    };
+     window.addEventListener('mousemove', onActivity);
++    document.addEventListener('mouseleave', onLeaveWindow);
+     armControlsIdle();
+     return () => {
+       window.clearTimeout(controlsIdleTimer.current);
+       window.removeEventListener('mousemove', onActivity);
++      document.removeEventListener('mouseleave', onLeaveWindow);
+     };
+-  }, [status.phase, status.window_pip, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
++  }, [status.phase, showSettings, controlsHovered, controlsPointerDown, armControlsIdle]);
+ 
+   useEffect(() => {
+     const clearPointerDown = () => setControlsPointerDown(false);
+@@ -471,51 +466,6 @@ function App() {
+     };
+   }, []);
+ 
+-  useEffect(() => {
+-    if (!status.window_pip) return;
+-    const onPointerLeavesDocument = (event: MouseEvent | PointerEvent) => {
+-      if (controlsPointerDown) return;
+-      const related = event.relatedTarget;
+-      if (related instanceof Node && document.contains(related)) {
+-        return;
+-      }
+-      hideControlsNow();
+-    };
+-    document.addEventListener('mouseleave', onPointerLeavesDocument);
+-    window.addEventListener('mouseout', onPointerLeavesDocument);
+-    window.addEventListener('pointerout', onPointerLeavesDocument);
+-    return () => {
+-      document.removeEventListener('mouseleave', onPointerLeavesDocument);
+-      window.removeEventListener('mouseout', onPointerLeavesDocument);
+-      window.removeEventListener('pointerout', onPointerLeavesDocument);
+-    };
+-  }, [status.window_pip, controlsPointerDown, hideControlsNow]);
+-
+-  useEffect(() => {
+-    window.clearTimeout(miniControlsVisibleCapTimer.current);
+-    if (
+-      status.phase !== 'playing' ||
+-      !status.window_pip ||
+-      controlsIdle ||
+-      showSettings ||
+-      controlsPointerDown
+-    ) {
+-      return;
+-    }
+-    miniControlsVisibleCapTimer.current = window.setTimeout(
+-      hideControlsNow,
+-      MINI_CONTROLS_MAX_VISIBLE_MS,
+-    );
+-    return () => window.clearTimeout(miniControlsVisibleCapTimer.current);
+-  }, [
+-    status.phase,
+-    status.window_pip,
+-    controlsIdle,
+-    showSettings,
+-    controlsPointerDown,
+-    hideControlsNow,
+-  ]);
+-
+   useEffect(() => {
+     // Re-fetch shows whenever the playlist gains a round or advance — a
+     // finished show drops out of the active list after advance. Keyed on
+@@ -812,8 +762,8 @@ function App() {
+   );
+ 
+   return (
+-    <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}${status.window_maximized ? ' window-maximized' : ''}${status.window_fullscreen ? ' window-fullscreen' : ''}${status.window_pip ? ' window-pip' : ''}`}>
+-      {!status.window_fullscreen && !status.window_pip && (
++    <div className={`overlay-root${controlsIdle ? ' cursor-hidden' : ''}${status.window_maximized ? ' window-maximized' : ''}${status.window_fullscreen ? ' window-fullscreen' : ''}`}>
++      {!status.window_fullscreen && (
+         <div className="titlebar">
+           <div className="titlebar-logo">
+             <img src="/favicon.ico" className="titlebar-logo-img" alt="" />
+@@ -844,7 +794,7 @@ function App() {
+           pointerEvents: 'auto',
+           zIndex: -1,
+         }}
+-        onDoubleClick={() => void runControl(status.window_pip ? togglePip : toggleFullscreen)}
++        onDoubleClick={() => void runControl(toggleFullscreen)}
+         onWheel={handleVolumeWheel}
+       />
+       <VolumeOsd volume={volOsd} />
+@@ -877,7 +827,7 @@ function App() {
+       ) : (
+         <div
+           style={{ flex: 1 }}
+-          onDoubleClick={() => void runControl(status.window_pip ? togglePip : toggleFullscreen)}
++          onDoubleClick={() => void runControl(toggleFullscreen)}
+           onWheel={handleVolumeWheel}
+         />
+       )}
+@@ -906,7 +856,7 @@ function App() {
+         onSkip={() => runControl(skip)}
+         onDefer={() => runControl(defer)}
+         onSyncNow={() => runControl(syncNow, {success: true})}
+-        onTogglePip={() => runControl(togglePip)}
++        onToggleStayOnTop={() => runControl(toggleStayOnTop)}
+         onToggleFullscreen={() => runControl(toggleFullscreen)}
+       />
+     </div>
+@@ -1037,10 +987,11 @@ const FullscreenIcon = () => (
+   </svg>
+ );
+ 
+-const PipIcon = () => (
++// Stay-on-top (pin) toggle icon — a thumbtack.
++const PinIcon = () => (
+   <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+-    <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+-    <rect x="12" y="12" width="7" height="5" />
++    <path d="M9 3h6M10 3v6l-3 3v2h10v-2l-3-3V3" />
++    <path d="M12 14v7" />
+   </svg>
+ );
+ 
+@@ -1120,7 +1071,7 @@ function BottomControlBar({
+   onSkip,
+   onDefer,
+   onSyncNow,
+-  onTogglePip,
++  onToggleStayOnTop,
+   onToggleFullscreen,
+ }: {
+   status: Status;
+@@ -1143,7 +1094,7 @@ function BottomControlBar({
+   onSkip: () => void;
+   onDefer: () => void;
+   onSyncNow: () => void;
+-  onTogglePip: () => void;
++  onToggleStayOnTop: () => void;
+   onToggleFullscreen: () => void;
+ }) {
+   const pb = status.playback;
+@@ -1184,6 +1135,125 @@ function BottomControlBar({
+ 
+   const isMuted = pb ? volume === 0 : false;
+   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
++  const onTop = Boolean(status.window_on_top);
++  // The compact control layout follows window *width*, not any window mode — a
++  // small window gets it whether or not it is pinned on top.
++  const [compactViewport, setCompactViewport] = useState(() => window.innerWidth <= 900);
++
++  useEffect(() => {
++    const onResize = () => setCompactViewport(window.innerWidth <= 900);
++    window.addEventListener('resize', onResize);
++    onResize();
++    return () => window.removeEventListener('resize', onResize);
++  }, []);
++
++  const renderScrub = (compact: boolean) => (
++    <div className={`scrub-container${compact ? ' mini-scrub-container' : ''}`}>
++      {!compact && <span className="time-display">{pb ? fmtTime(pb.time_pos) : '--:--'}</span>}
++      <div
++        className={`scrub-bar${!pb ? ' disabled' : ''}`}
++        onClick={(e) => {
++          if (!pb) return;
++          const r = e.currentTarget.getBoundingClientRect();
++          void seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
++        }}
++      >
++        <div className="scrub-fill" style={{ width: `${pct}%` }} />
++        <div className="scrub-handle" style={{ left: `${pct}%` }} />
++      </div>
++      {!compact && <span className="time-display">{pb ? fmtTime(pb.duration) : '--:--'}</span>}
++    </div>
++  );
++
++  if (compactViewport) {
++    return (
++      <div
++        className={`bottom-controls mini-controls${controlsIdle ? ' hidden' : ''}`}
++        onMouseEnter={() => onHoverChange(true)}
++        onMouseLeave={() => onHoverChange(false)}
++        onPointerDown={() => onPointerActiveChange(true)}
++        onPointerUp={() => onPointerActiveChange(false)}
++        onPointerCancel={() => onPointerActiveChange(false)}
++        onWheel={onVolumeWheel}
++      >
++        {renderScrub(true)}
++
++        <div className="mini-controls-row">
++          <button
++            className="control-btn"
++            onClick={onPrevious}
++            disabled={!playing}
++            title="Previous Show (p)"
++          >
++            <PrevIcon />
++          </button>
++
++          <button
++            className="control-btn"
++            onClick={() => onSeekRelative(-10)}
++            disabled={!pb}
++            title="Rewind 10s (j / ←)"
++          >
++            <RewindIcon />
++          </button>
++
++          <button
++            className="control-btn play-pause-btn"
++            onClick={() => onRequestPause(!displayPaused)}
++            disabled={!playing}
++            title="Play / Pause (Space)"
++          >
++            {displayPaused ? <PlayIcon /> : <PauseIcon />}
++          </button>
++
++          <button
++            className="control-btn"
++            onClick={() => onSeekRelative(10)}
++            disabled={!pb}
++            title="Forward 10s (l / →)"
++          >
++            <ForwardIcon />
++          </button>
++
++          <button
++            className="control-btn"
++            onClick={onSkip}
++            disabled={!playing}
++            title="Skip Show (n)"
++          >
++            <NextIcon />
++          </button>
++
++          {pb && pb.sub_tracks.length > 0 && (
++            <button
++              className={`control-btn cc-btn${ccActive ? ' active' : ''}`}
++              onClick={handleToggleCc}
++              title="Toggle Captions (c)"
++            >
++              <CcIcon />
++            </button>
++          )}
++
++          <button
++            className="control-btn volume-btn"
++            onClick={handleToggleMute}
++            disabled={!pb}
++            title="Mute / Unmute (Up/Down Arrows or mouse wheel to adjust)"
++          >
++            {isMuted ? <VolumeMuteIcon /> : <VolumeIcon />}
++          </button>
++
++          <button
++            className={`control-btn stay-on-top-btn${onTop ? ' active' : ''}`}
++            onClick={onToggleStayOnTop}
++            title={onTop ? 'Stop Staying on Top (i)' : 'Stay on Top (i)'}
++          >
++            <PinIcon />
++          </button>
++        </div>
++      </div>
++    );
++  }
+ 
+   return (
+     <div
+@@ -1196,21 +1266,7 @@ function BottomControlBar({
+       onWheel={onVolumeWheel}
+     >
+       {/* 1. Scrub Container */}
+-      <div className="scrub-container">
+-        <span className="time-display">{pb ? fmtTime(pb.time_pos) : '--:--'}</span>
+-        <div
+-          className={`scrub-bar${!pb ? ' disabled' : ''}`}
+-          onClick={(e) => {
+-            if (!pb) return;
+-            const r = e.currentTarget.getBoundingClientRect();
+-            void seekPercent(Math.max(0, Math.min(100, ((e.clientX - r.left) / r.width) * 100)));
+-          }}
+-        >
+-          <div className="scrub-fill" style={{ width: `${pct}%` }} />
+-          <div className="scrub-handle" style={{ left: `${pct}%` }} />
+-        </div>
+-        <span className="time-display">{pb ? fmtTime(pb.duration) : '--:--'}</span>
+-      </div>
++      {renderScrub(false)}
+ 
+       {/* 2. Controls Row */}
+       <div className="controls-row">
+@@ -1385,11 +1441,11 @@ function BottomControlBar({
+           </button>
+ 
+           <button
+-            className={`control-btn pip-btn${status.window_pip ? ' active' : ''}`}
+-            onClick={onTogglePip}
+-            title={status.window_pip ? 'Exit Mini Player (i)' : 'Mini Player / Always on Top (i)'}
++            className={`control-btn stay-on-top-btn${onTop ? ' active' : ''}`}
++            onClick={onToggleStayOnTop}
++            title={onTop ? 'Stop Staying on Top (i)' : 'Stay on Top (i)'}
+           >
+-            <PipIcon />
++            <PinIcon />
+           </button>
+ 
+           <button
+diff --git a/desktop-rs/frontend/src/api.ts b/desktop-rs/frontend/src/api.ts
+index 25d6dfa..e61bca4 100644
+--- a/desktop-rs/frontend/src/api.ts
++++ b/desktop-rs/frontend/src/api.ts
+@@ -123,7 +123,7 @@ export type Status = {
+   update?: UpdateInfo;
+   window_maximized?: boolean;
+   window_fullscreen?: boolean;
+-  window_pip?: boolean;
++  window_on_top?: boolean;
+ };
+ 
+ export type Show = {
+@@ -260,9 +260,10 @@ export async function toggleFullscreen(): Promise<ControlResult> {
+   return postControl('/fullscreen');
+ }
+ 
+-// Toggle the window between normal and mini-player always-on-top mode.
+-export async function togglePip(): Promise<ControlResult> {
+-  return postControl('/pip');
++// Toggle whether the window floats above others (topmost Z-order). Chrome and
++// layout are unchanged — it is purely a stacking toggle.
++export async function toggleStayOnTop(): Promise<ControlResult> {
++  return postControl('/stay-on-top');
+ }
+ 
+ export async function seekPercent(percent: number): Promise<ControlResult> {
+diff --git a/docs/feature-contracts/desktop-shell.md b/docs/feature-contracts/desktop-shell.md
+new file mode 100644
+index 0000000..a4c602d
+--- /dev/null
++++ b/docs/feature-contracts/desktop-shell.md
+@@ -0,0 +1,106 @@
++# Desktop Shell Contract
++
++The desktop is one DirectComposition window: libmpv renders video into a
++composition visual, and a **windowless** (composition-hosted) WebView2 overlay —
++the React UI — is layered on top. Because the overlay has no HWND of its own, the
++Win32 host forwards pointer input into it and owns hit-testing, cursor, and
++window state. This contract fixes the behavior at that seam so the window *feels*
++like a native video player.
++
++The shell state lives in `desktop-rs/desktop/src/compositor.rs`; the overlay
++behavior lives in `desktop-rs/frontend/src/App.tsx`. Field changes are mirrored
++in [`desktop-status.md`](desktop-status.md).
++
++## Window modes
++
++Three orthogonal flags, surfaced in status:
++
++- `window_maximized` — standard maximize/restore.
++- `window_fullscreen` — borderless fullscreen on the current monitor. Hides the
++  custom titlebar; the video fills the client area.
++- `window_on_top` — the window floats above others (topmost Z-order). **Nothing
++  else changes**: same custom chrome, same titlebar, same hit-testing, same
++  single control bar, same size and position. It is a Z-order toggle, not a
++  separate window style.
++
++There is no "mini player" / picture-in-picture mode. It was removed: it swapped
++in a native window frame and a parallel control surface purely to approximate
++"always on top," which `window_on_top` now does directly. Per the migration
++policy, the old path (`window_pip`, `mini_pointer_inside`, `/pip`, the
++`mini-controls` PiP coupling, the native-frame swap) is deleted, not kept behind
++a flag.
++
++## Chrome geometry — one source of truth, DPI-correct
++
++The custom titlebar's dimensions are defined **once**, in logical (96-DPI)
++pixels, and both sides scale them by the window DPI so the draggable/clickable
++regions line up exactly with what the overlay renders:
++
++| Constant | Logical px | Win32 (`compositor.rs`) | CSS (`App.css`) |
++| --- | --- | --- | --- |
++| Titlebar height | 32 | `titlebar_height_px` (`× dpi/96`) | `.titlebar { height: 32px }` |
++| Window-button cluster width | 138 | `nc_hit` buttons zone (`× dpi/96`) | `.titlebar-actions { width: 138px }` |
++| Resize border | 6 | `nc_hit` edge band (`× dpi/96`) | n/a (synthesized by hit-test) |
++
++The previous bug was a flat `32`/`140` in the hit-test compared against physical
++pixels while the overlay rendered DPI-scaled: above 100% DPI the bottom strip of
++the visible titlebar stopped dragging and the button zone drifted. The invariant
++now is: **any pixel the user sees as titlebar drags; any pixel they see as a
++window button clicks; at every DPI.**
++
++## Hit-testing (`nc_hit`)
++
++A pure function of `(client_x, client_y, width, height, dpi, is_maximized)`
++returns the `HT*` code, so it is unit-tested at 96/120/144 DPI:
++
++- **Not maximized:** the outer resize-border band → `HTTOP*`/`HTBOTTOM*`/
++  `HTLEFT`/`HTRIGHT` (and corners). Within the titlebar height, left of the
++  button cluster → `HTCAPTION` (drag). Everything else → `HTCLIENT`.
++- **Maximized:** no resize band. Titlebar-minus-buttons → `HTCAPTION`; rest →
++  `HTCLIENT`.
++- **Fullscreen:** entire window → `HTCLIENT`.
++
++`window_on_top` does not change hit-testing — it uses the windowed/maximized
++rules unchanged.
++
++## Input forwarding
++
++- Client-area mouse messages are forwarded to the overlay via `SendMouseInput`
++  (the `COREWEBVIEW2_MOUSE_EVENT_KIND` ids equal the `WM_*` ids).
++- Non-client moves over the titlebar are forwarded as `MOVE` so overlay buttons
++  still show hover.
++- `LEAVE` is forwarded only when the pointer actually leaves the window
++  (`is_cursor_in_window` is false), so moving between the client area and the
++  caption does not flicker hover state.
++- A same-position `WM_MOUSEMOVE` (synthesized by keyboard/media input) does not
++  reveal the idle-hidden cursor; only real displacement does (`CursorMotion`).
++
++## Controls visibility — single owner
++
++The overlay owns exactly one visible/hidden state and one idle timer. No native
++pointer-inside signal, no second "max visible" cap timer. During `phase ==
++"playing"` the control bar is hidden after `CONTROLS_IDLE_MS` of no real pointer
++movement. It is kept open while any of these hold:
++
++- the settings/dashboard panel is open,
++- the pointer is down on the controls (scrubbing),
++- the pointer is hovering the controls.
++
++Real pointer movement reveals the bar and re-arms the idle timer; the pointer
++leaving the window hides it. The control bar adapts to **window width**
++(`compactViewport`), not to any window mode — a small window gets the compact
++layout whether or not it is on top.
++
++## Render policy
++
++The render pump runs on a ~60fps timer: each tick renders the current mpv frame
++into the shared texture, presents the video swapchain, and commits the
++DirectComposition device (the WebView overlay's visual-hosting output only
++appears after a device commit).
++
++**Deferred (not yet implemented):** presenting video only on a new mpv frame
++(`mpv_render_context_update`'s `FRAME` flag) to stop re-presenting an unchanged
++frame while paused/idle. An attempt at this regressed first paint to a blank
++window — in visual-hosting the overlay's appearance is coupled to the per-tick
++present/commit in a way that needs live verification before the present can be
++gated. Until that is proven on real hardware, the pump presents every tick.
+diff --git a/docs/feature-contracts/desktop-status.md b/docs/feature-contracts/desktop-status.md
+index edba217..06bcd2d 100644
+--- a/docs/feature-contracts/desktop-status.md
++++ b/docs/feature-contracts/desktop-status.md
+@@ -16,8 +16,10 @@ This contract is intentionally frontend-facing. Any field used by
+ - `round`: array of current round entries. Empty when no round is active.
+ - `round_pos`: zero-based index into `round`. Valid when `phase == "playing"` and `round` is non-empty.
+ - `round_id`: monotonically increasing desktop-local round identity, or `null` when no round is active.
+-- `window_maximized`, `window_fullscreen`, `window_pip`: current shell state.
+-  `window_pip` means the native mini-player/always-on-top mode is active.
++- `window_maximized`, `window_fullscreen`, `window_on_top`: current shell state.
++  `window_on_top` means the window floats above others (topmost Z-order); chrome
++  and layout are otherwise identical to windowed mode. See
++  [`desktop-shell.md`](desktop-shell.md) for the full shell contract.
+ 
+ ## Round Entry
+ 
+diff --git a/scripts/test-install-release.ps1 b/scripts/test-install-release.ps1
+index a6fae3c..2090d7f 100644
+--- a/scripts/test-install-release.ps1
++++ b/scripts/test-install-release.ps1
+@@ -134,10 +134,10 @@ if ($null -eq $status.round_pos) {
+ Invoke-Control "pause?state=true" | Out-Null
+ 
+ if (-not $SkipSmoke) {
+-  Invoke-Control "pip" | Out-Null
+-  Wait-StatusField "window_pip" $true "mini player to turn on"
+-  Invoke-Control "pip" | Out-Null
+-  Wait-StatusField "window_pip" $false "mini player to turn off"
++  Invoke-Control "stay-on-top" | Out-Null
++  Wait-StatusField "window_on_top" $true "stay on top to turn on"
++  Invoke-Control "stay-on-top" | Out-Null
++  Wait-StatusField "window_on_top" $false "stay on top to turn off"
+ 
+   $beforeMaximize = [bool](Get-DesktopStatus).window_maximized
+   Invoke-Control "window/maximize" | Out-Null

@@ -1,0 +1,3159 @@
+diff --git a/.github/workflows/build-desktop.yaml b/.github/workflows/build-desktop.yaml
+index 22dc72a..676ed95 100644
+--- a/.github/workflows/build-desktop.yaml
++++ b/.github/workflows/build-desktop.yaml
+@@ -120,10 +120,10 @@ jobs:
+           7z x /tmp/libmpv.7z -odesktop-rs/desktop/third_party/libmpv -y
+           test -f desktop-rs/desktop/third_party/libmpv/libmpv-2.dll
+ 
+-      - name: cargo test (shows-core)
++      - name: cargo test (workspace)
+         if: steps.changes.outputs.skip != 'true'
+         working-directory: desktop-rs
+-        run: cargo test -p shows-core --release
++        run: cargo test --workspace --release --locked
+ 
+       - name: cargo build --release
+         if: steps.changes.outputs.skip != 'true'
+@@ -137,9 +137,14 @@ jobs:
+         env:
+           SHOWS_BUILD_SHA: ${{ github.sha }}
+           SHOWS_UPDATE_CHANNEL: stable
+-        run: cargo build --release -p shows-desktop
++        run: cargo build --release -p shows-desktop -p shows-remote --locked
+ 
+-      # Stage the bundle: shows-desktop.exe + libmpv-2.dll
++      - name: Verify terminal channel installation
++        if: steps.changes.outputs.skip != 'true'
++        shell: pwsh
++        run: ./scripts/test-remote-distribution.ps1
++
++      # Stage the bundle: desktop, terminal remote, and libmpv runtime.
+       - name: Stage release bundle
+         if: steps.changes.outputs.skip != 'true'
+         shell: pwsh
+@@ -147,8 +152,10 @@ jobs:
+           $out = "desktop-rs/dist/shows-desktop"
+           New-Item -ItemType Directory -Force -Path $out | Out-Null
+           Copy-Item desktop-rs/target/release/shows-desktop.exe "$out/" -Force
++          Copy-Item desktop-rs/target/release/shows-remote.exe "$out/" -Force
+           Copy-Item desktop-rs/desktop/third_party/libmpv/libmpv-2.dll "$out/" -Force
+           if (-not (Test-Path "$out/shows-desktop.exe")) { throw "build failed: shows-desktop.exe missing" }
++          if (-not (Test-Path "$out/shows-remote.exe"))  { throw "build failed: shows-remote.exe missing" }
+           if (-not (Test-Path "$out/libmpv-2.dll"))     { throw "bundle missing libmpv-2.dll" }
+ 
+       - name: Zip bundle
+diff --git a/.github/workflows/test.yaml b/.github/workflows/test.yaml
+index f6e7cc2..3136d0e 100644
+--- a/.github/workflows/test.yaml
++++ b/.github/workflows/test.yaml
+@@ -29,6 +29,6 @@ jobs:
+       # / apiclient / oauth / sync / runner / model) runs fine on Linux. This
+       # is the cheap per-PR sanity check; the Windows-only shell goes through
+       # `build-desktop.yaml`.
+-      - name: cargo test (shows-core)
++      - name: Test engine, control protocol and terminal remote
+         working-directory: desktop-rs
+-        run: cargo test -p shows-core --locked
++        run: cargo test -p shows-core -p shows-control -p shows-remote --locked
+diff --git a/AGENTS.md b/AGENTS.md
+index 619daef..2cc7dec 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -34,6 +34,8 @@ desktop-rs/           Cargo workspace
+       runner.rs       round-robin runner and local media cache orchestration
+       model.rs        persisted row types
+       update.rs       GitHub Releases update check
++  control/            shows-control; typed loopback/SSH control protocol and client
++  remote/             shows-remote; terminal remote and SSH agent, no database or player
+   desktop/            shows-desktop; Windows shell and the only unsafe code
+     src/
+       main.rs         process wiring and shared/local database configuration
+@@ -74,6 +76,11 @@ The localhost control server exposes `GET /status/stream` as the React overlay's
+ 
+ Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`.
+ 
++The control listener is loopback-only at `127.0.0.1:45831` (`SHOWS_CONTROL_PORT`
++overrides the port). `shows-remote` controls an already running desktop over
++existing Windows OpenSSH, using the installed target agent and the same SSE
++status feed. See `docs/feature-contracts/remote-control.md`.
++
+ ## New computer setup
+ 
+ Map the NAS share as `S:` by hostname:
+diff --git a/desktop-rs/Cargo.lock b/desktop-rs/Cargo.lock
+index e22a7d5..c17e42c 100644
+--- a/desktop-rs/Cargo.lock
++++ b/desktop-rs/Cargo.lock
+@@ -17,6 +17,12 @@ dependencies = [
+  "memchr",
+ ]
+ 
++[[package]]
++name = "allocator-api2"
++version = "0.2.21"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
++
+ [[package]]
+ name = "android_system_properties"
+ version = "0.1.5"
+@@ -82,6 +88,15 @@ version = "1.0.102"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+ 
++[[package]]
++name = "approx"
++version = "0.5.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cab112f0a86d568ea0e627cc1d6be74a1e9cd55214684db5561995f6dad897c6"
++dependencies = [
++ "num-traits",
++]
++
+ [[package]]
+ name = "ascii"
+ version = "1.1.0"
+@@ -102,9 +117,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+ 
+ [[package]]
+ name = "bitflags"
+-version = "2.11.1"
++version = "2.13.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
++checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
+ 
+ [[package]]
+ name = "block-buffer"
+@@ -139,12 +154,27 @@ version = "3.20.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
+ 
++[[package]]
++name = "by_address"
++version = "1.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "64fa3c856b712db6612c019f14756e64e4bcea13337a6b33b696333a9eaa2d06"
++
+ [[package]]
+ name = "bytes"
+ version = "1.11.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+ 
++[[package]]
++name = "castaway"
++version = "0.2.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
++dependencies = [
++ "rustversion",
++]
++
+ [[package]]
+ name = "cc"
+ version = "1.2.63"
+@@ -180,18 +210,81 @@ version = "1.5.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6e4de3bc4ea267985becf712dc6d9eed8b04c953b3fcfb339ebc87acd9804901"
+ 
++[[package]]
++name = "clap"
++version = "4.6.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "aa8876b300ab35ba921adea3dfd70157a46249b33f95c9084ae5709785478946"
++dependencies = [
++ "clap_builder",
++ "clap_derive",
++]
++
++[[package]]
++name = "clap_builder"
++version = "4.6.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ec0797fb7aeb1406c84efac526901f7ec3ead2124f946b494e72879d4b54704d"
++dependencies = [
++ "anstream",
++ "anstyle",
++ "clap_lex",
++ "strsim",
++]
++
++[[package]]
++name = "clap_derive"
++version = "4.6.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f9c751b79415d4e559e3d1fcf128e09e720eb673a06d26cf6f392d37d75b66e0"
++dependencies = [
++ "heck",
++ "proc-macro2",
++ "quote",
++ "syn 3.0.9",
++]
++
++[[package]]
++name = "clap_lex"
++version = "1.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
++
+ [[package]]
+ name = "colorchoice"
+ version = "1.0.5"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
+ 
++[[package]]
++name = "compact_str"
++version = "0.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9dfdd1c2274d9aa354115b09dc9a901d6c5576818cdf70d14cae2bdb47df00ab"
++dependencies = [
++ "castaway",
++ "cfg-if",
++ "itoa",
++ "rustversion",
++ "ryu",
++ "static_assertions",
++]
++
+ [[package]]
+ name = "const-oid"
+ version = "0.10.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
+ 
++[[package]]
++name = "convert_case"
++version = "0.10.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
++dependencies = [
++ "unicode-segmentation",
++]
++
+ [[package]]
+ name = "core-foundation-sys"
+ version = "0.8.7"
+@@ -225,6 +318,33 @@ dependencies = [
+  "cfg-if",
+ ]
+ 
++[[package]]
++name = "crossterm"
++version = "0.29.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d8b9f2e4c67f833b660cdb0a3523065869fb35570177239812ed4c905aeff87b"
++dependencies = [
++ "bitflags",
++ "crossterm_winapi",
++ "derive_more",
++ "document-features",
++ "mio",
++ "parking_lot",
++ "rustix",
++ "signal-hook",
++ "signal-hook-mio",
++ "winapi",
++]
++
++[[package]]
++name = "crossterm_winapi"
++version = "0.9.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
++dependencies = [
++ "winapi",
++]
++
+ [[package]]
+ name = "crypto-common"
+ version = "0.1.7"
+@@ -244,6 +364,68 @@ dependencies = [
+  "hybrid-array",
+ ]
+ 
++[[package]]
++name = "darling"
++version = "0.24.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
++dependencies = [
++ "darling_core",
++ "darling_macro",
++]
++
++[[package]]
++name = "darling_core"
++version = "0.24.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6837e2cf7485aaae18f86181d2f0e9a7ed297a025e220aeabf63fdebd3a2ddff"
++dependencies = [
++ "ident_case",
++ "proc-macro2",
++ "quote",
++ "strsim",
++ "syn 3.0.9",
++]
++
++[[package]]
++name = "darling_macro"
++version = "0.24.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
++dependencies = [
++ "darling_core",
++ "quote",
++ "syn 3.0.9",
++]
++
++[[package]]
++name = "deranged"
++version = "0.5.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
++
++[[package]]
++name = "derive_more"
++version = "2.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
++dependencies = [
++ "derive_more-impl",
++]
++
++[[package]]
++name = "derive_more-impl"
++version = "2.1.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
++dependencies = [
++ "convert_case",
++ "proc-macro2",
++ "quote",
++ "rustc_version",
++ "syn 2.0.117",
++]
++
+ [[package]]
+ name = "digest"
+ version = "0.10.7"
+@@ -286,12 +468,27 @@ dependencies = [
+  "libloading 0.8.9",
+ ]
+ 
++[[package]]
++name = "document-features"
++version = "0.2.12"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
++dependencies = [
++ "litrs",
++]
++
+ [[package]]
+ name = "downcast-rs"
+ version = "1.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
+ 
++[[package]]
++name = "either"
++version = "1.19.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
++
+ [[package]]
+ name = "embed-resource"
+ version = "2.5.2"
+@@ -472,6 +669,11 @@ name = "hashbrown"
+ version = "0.17.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
++dependencies = [
++ "allocator-api2",
++ "equivalent",
++ "foldhash 0.2.0",
++]
+ 
+ [[package]]
+ name = "hashlink"
+@@ -549,6 +751,12 @@ version = "2.3.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3d3067d79b975e8844ca9eb072e16b31c3c1c36928edf9c6789548c524d0d954"
+ 
++[[package]]
++name = "ident_case"
++version = "1.0.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
++
+ [[package]]
+ name = "indexmap"
+ version = "2.14.0"
+@@ -561,12 +769,43 @@ dependencies = [
+  "serde_core",
+ ]
+ 
++[[package]]
++name = "indoc"
++version = "2.0.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a37b2691796cffeb8a8cd305ac66e65841559f147f4e63231d0eafa4db5384d1"
++dependencies = [
++ "rustversion",
++]
++
++[[package]]
++name = "instability"
++version = "0.3.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4c3b5acc1e2fd9375041a388da33d1eb8aed5f7a8c0dd3543e3ea2805adfbe20"
++dependencies = [
++ "darling",
++ "indoc",
++ "proc-macro2",
++ "quote",
++ "syn 3.0.9",
++]
++
+ [[package]]
+ name = "is_terminal_polyfill"
+ version = "1.70.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+ 
++[[package]]
++name = "itertools"
++version = "0.14.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
++dependencies = [
++ "either",
++]
++
+ [[package]]
+ name = "itoa"
+ version = "1.0.18"
+@@ -594,7 +833,7 @@ checksum = "782d32378dddf207193ac91cefb848ad41abb58195c95168e1291227a0832b47"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+ 
+ [[package]]
+@@ -609,6 +848,17 @@ dependencies = [
+  "wasm-bindgen",
+ ]
+ 
++[[package]]
++name = "kasuari"
++version = "0.4.13"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "72f14c90e40a6133f4805b83542a7ed7364f56070b447f56e7f4e90297122209"
++dependencies = [
++ "hashbrown 0.17.1",
++ "portable-atomic",
++ "thiserror",
++]
++
+ [[package]]
+ name = "leb128fmt"
+ version = "0.1.0"
+@@ -641,6 +891,12 @@ dependencies = [
+  "windows-link",
+ ]
+ 
++[[package]]
++name = "libm"
++version = "0.2.16"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
++
+ [[package]]
+ name = "libsqlite3-sys"
+ version = "0.38.0"
+@@ -652,18 +908,51 @@ dependencies = [
+  "vcpkg",
+ ]
+ 
++[[package]]
++name = "line-clipping"
++version = "0.3.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e752191d037c44ad111a8caa762921926658402f01cc1253f7bef2020ece4f5e"
++dependencies = [
++ "bitflags",
++]
++
+ [[package]]
+ name = "linux-raw-sys"
+ version = "0.12.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+ 
++[[package]]
++name = "litrs"
++version = "1.0.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
++
++[[package]]
++name = "lock_api"
++version = "0.4.14"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
++dependencies = [
++ "scopeguard",
++]
++
+ [[package]]
+ name = "log"
+ version = "0.4.30"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
+ 
++[[package]]
++name = "lru"
++version = "0.18.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ef9ac18847474e638e3702b76c65d4eb93428471a74778ef0f1be711717f89b5"
++dependencies = [
++ "hashbrown 0.17.1",
++]
++
+ [[package]]
+ name = "memchr"
+ version = "2.8.1"
+@@ -680,6 +969,24 @@ dependencies = [
+  "simd-adler32",
+ ]
+ 
++[[package]]
++name = "mio"
++version = "1.2.4"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
++dependencies = [
++ "libc",
++ "log",
++ "wasi",
++ "windows-sys 0.61.2",
++]
++
++[[package]]
++name = "num-conv"
++version = "0.2.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
++
+ [[package]]
+ name = "num-traits"
+ version = "0.2.19"
+@@ -689,6 +996,15 @@ dependencies = [
+  "autocfg",
+ ]
+ 
++[[package]]
++name = "num_threads"
++version = "0.1.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cabcc654086861f9e1bc5115258de62ef92c79b20f4615a1b0cc57c4e82027d4"
++dependencies = [
++ "libc",
++]
++
+ [[package]]
+ name = "objc2"
+ version = "0.6.4"
+@@ -750,6 +1066,62 @@ version = "1.70.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+ 
++[[package]]
++name = "palette"
++version = "0.7.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ddeed8580d347d2abf3dcf06a5f0b3dc020258338526b277847cd4248a70fc64"
++dependencies = [
++ "approx",
++ "libm",
++ "palette_derive",
++ "palette_math",
++]
++
++[[package]]
++name = "palette_derive"
++version = "0.7.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "88537020289b719d81be994ccf1bbf4990f477e2f69ee52fe3e45f43a02e56be"
++dependencies = [
++ "by_address",
++ "proc-macro2",
++ "quote",
++ "syn 2.0.117",
++]
++
++[[package]]
++name = "palette_math"
++version = "0.7.7"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6e6eb142958d64335fb0e345c5b9ead2ecd6fc438c307e9d7d3c4fd428dbaf12"
++dependencies = [
++ "libm",
++]
++
++[[package]]
++name = "parking_lot"
++version = "0.12.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
++dependencies = [
++ "lock_api",
++ "parking_lot_core",
++]
++
++[[package]]
++name = "parking_lot_core"
++version = "0.9.12"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
++dependencies = [
++ "cfg-if",
++ "libc",
++ "redox_syscall",
++ "smallvec",
++ "windows-link",
++]
++
+ [[package]]
+ name = "percent-encoding"
+ version = "2.3.2"
+@@ -789,6 +1161,12 @@ dependencies = [
+  "portable-atomic",
+ ]
+ 
++[[package]]
++name = "powerfmt"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4a6394b9e965e73d0a289ee54f589087e2c676aedf60885baf52c76b771e4958"
++
+ [[package]]
+ name = "prettyplease"
+ version = "0.2.37"
+@@ -796,7 +1174,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
+ dependencies = [
+  "proc-macro2",
+- "syn",
++ "syn 2.0.117",
+ ]
+ 
+ [[package]]
+@@ -832,12 +1210,87 @@ version = "6.0.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+ 
++[[package]]
++name = "ratatui"
++version = "0.30.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3274ba0a2c5e1bcad2a2005d20f4dc59dad26b2eb0940fb094500dba4099d57d"
++dependencies = [
++ "instability",
++ "ratatui-core",
++ "ratatui-crossterm",
++ "ratatui-widgets",
++ "serde",
++]
++
++[[package]]
++name = "ratatui-core"
++version = "0.1.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cbb175c433c8e28a809d1f5773a2ae96e68c0ce40db865cbab1020bf33ae479c"
++dependencies = [
++ "bitflags",
++ "compact_str",
++ "hashbrown 0.17.1",
++ "itertools",
++ "kasuari",
++ "lru",
++ "palette",
++ "serde",
++ "strum",
++ "thiserror",
++ "unicode-segmentation",
++ "unicode-truncate",
++ "unicode-width",
++]
++
++[[package]]
++name = "ratatui-crossterm"
++version = "0.1.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "567584a3b0e6a8203c23de40b4861497266725eb5363dbfd18a1edd603cca9f0"
++dependencies = [
++ "cfg-if",
++ "crossterm",
++ "instability",
++ "ratatui-core",
++]
++
++[[package]]
++name = "ratatui-widgets"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "66e3d19bcc9130ca376277d93b60767ff121ace3be06f5f95f81dd68956407d1"
++dependencies = [
++ "bitflags",
++ "hashbrown 0.17.1",
++ "indoc",
++ "instability",
++ "itertools",
++ "line-clipping",
++ "ratatui-core",
++ "serde",
++ "strum",
++ "time",
++ "unicode-segmentation",
++ "unicode-width",
++]
++
+ [[package]]
+ name = "raw-window-handle"
+ version = "0.6.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
+ 
++[[package]]
++name = "redox_syscall"
++version = "0.5.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
++dependencies = [
++ "bitflags",
++]
++
+ [[package]]
+ name = "regex"
+ version = "1.12.3"
+@@ -953,7 +1406,7 @@ dependencies = [
+  "proc-macro2",
+  "quote",
+  "rust-embed-utils",
+- "syn",
++ "syn 2.0.117",
+  "walkdir",
+ ]
+ 
+@@ -1030,6 +1483,12 @@ version = "1.0.22"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
+ 
++[[package]]
++name = "ryu"
++version = "1.0.23"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
++
+ [[package]]
+ name = "same-file"
+ version = "1.0.6"
+@@ -1045,6 +1504,12 @@ version = "1.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e1cf6437eb19a8f4a6cc0f7dca544973b0b78843adbfeb3683d1a94a0024a294"
+ 
++[[package]]
++name = "scopeguard"
++version = "1.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
++
+ [[package]]
+ name = "semver"
+ version = "1.0.28"
+@@ -1078,7 +1543,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+ 
+ [[package]]
+@@ -1131,6 +1596,16 @@ version = "2.0.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+ 
++[[package]]
++name = "shows-control"
++version = "0.1.0"
++dependencies = [
++ "serde",
++ "serde_json",
++ "tiny_http",
++ "ureq",
++]
++
+ [[package]]
+ name = "shows-core"
+ version = "0.1.0"
+@@ -1159,6 +1634,7 @@ dependencies = [
+  "rfd",
+  "rust-embed",
+  "serde_json",
++ "shows-control",
+  "shows-core",
+  "tiny_http",
+  "webview2-com",
+@@ -1166,6 +1642,50 @@ dependencies = [
+  "windows-core",
+ ]
+ 
++[[package]]
++name = "shows-remote"
++version = "0.1.0"
++dependencies = [
++ "clap",
++ "crossterm",
++ "ratatui",
++ "serde_json",
++ "shows-control",
++ "tempfile",
++ "tiny_http",
++]
++
++[[package]]
++name = "signal-hook"
++version = "0.3.18"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
++dependencies = [
++ "libc",
++ "signal-hook-registry",
++]
++
++[[package]]
++name = "signal-hook-mio"
++version = "0.2.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
++dependencies = [
++ "libc",
++ "mio",
++ "signal-hook",
++]
++
++[[package]]
++name = "signal-hook-registry"
++version = "1.4.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
++dependencies = [
++ "errno",
++ "libc",
++]
++
+ [[package]]
+ name = "simd-adler32"
+ version = "0.3.9"
+@@ -1196,6 +1716,39 @@ dependencies = [
+  "wasm-bindgen",
+ ]
+ 
++[[package]]
++name = "static_assertions"
++version = "1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
++
++[[package]]
++name = "strsim"
++version = "0.11.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
++
++[[package]]
++name = "strum"
++version = "0.28.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
++dependencies = [
++ "strum_macros",
++]
++
++[[package]]
++name = "strum_macros"
++version = "0.28.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
++dependencies = [
++ "heck",
++ "proc-macro2",
++ "quote",
++ "syn 2.0.117",
++]
++
+ [[package]]
+ name = "subtle"
+ version = "2.6.1"
+@@ -1213,6 +1766,17 @@ dependencies = [
+  "unicode-ident",
+ ]
+ 
++[[package]]
++name = "syn"
++version = "3.0.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "unicode-ident",
++]
++
+ [[package]]
+ name = "tempfile"
+ version = "3.27.0"
+@@ -1243,9 +1807,30 @@ checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+ 
++[[package]]
++name = "time"
++version = "0.3.55"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
++dependencies = [
++ "deranged",
++ "libc",
++ "num-conv",
++ "num_threads",
++ "powerfmt",
++ "serde_core",
++ "time-core",
++]
++
++[[package]]
++name = "time-core"
++version = "0.1.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
++
+ [[package]]
+ name = "tiny_http"
+ version = "0.12.0"
+@@ -1311,6 +1896,29 @@ version = "1.0.24"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+ 
++[[package]]
++name = "unicode-segmentation"
++version = "1.13.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
++
++[[package]]
++name = "unicode-truncate"
++version = "2.0.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "16b380a1238663e5f8a691f9039c73e1cdae598a30e9855f541d29b08b53e9a5"
++dependencies = [
++ "itertools",
++ "unicode-segmentation",
++ "unicode-width",
++]
++
++[[package]]
++name = "unicode-width"
++version = "0.2.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
++
+ [[package]]
+ name = "unicode-xid"
+ version = "0.2.6"
+@@ -1483,7 +2091,7 @@ dependencies = [
+  "bumpalo",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "wasm-bindgen-shared",
+ ]
+ 
+@@ -1629,7 +2237,7 @@ checksum = "67a921c1b6914c367b2b823cd4cde6f96beec77d30a939c8199bb377cf9b9b54"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+ 
+ [[package]]
+@@ -1643,6 +2251,22 @@ dependencies = [
+  "windows-core",
+ ]
+ 
++[[package]]
++name = "winapi"
++version = "0.3.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
++dependencies = [
++ "winapi-i686-pc-windows-gnu",
++ "winapi-x86_64-pc-windows-gnu",
++]
++
++[[package]]
++name = "winapi-i686-pc-windows-gnu"
++version = "0.4.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
++
+ [[package]]
+ name = "winapi-util"
+ version = "0.1.11"
+@@ -1652,6 +2276,12 @@ dependencies = [
+  "windows-sys 0.61.2",
+ ]
+ 
++[[package]]
++name = "winapi-x86_64-pc-windows-gnu"
++version = "0.4.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
++
+ [[package]]
+ name = "windows"
+ version = "0.62.2"
+@@ -1705,7 +2335,7 @@ checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+ 
+ [[package]]
+@@ -1716,7 +2346,7 @@ checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+ ]
+ 
+ [[package]]
+@@ -1965,7 +2595,7 @@ dependencies = [
+  "heck",
+  "indexmap",
+  "prettyplease",
+- "syn",
++ "syn 2.0.117",
+  "wasm-metadata",
+  "wit-bindgen-core",
+  "wit-component",
+@@ -1981,7 +2611,7 @@ dependencies = [
+  "prettyplease",
+  "proc-macro2",
+  "quote",
+- "syn",
++ "syn 2.0.117",
+  "wit-bindgen-core",
+  "wit-bindgen-rust",
+ ]
+diff --git a/desktop-rs/Cargo.toml b/desktop-rs/Cargo.toml
+index 9f45cbe..3aff5f2 100644
+--- a/desktop-rs/Cargo.toml
++++ b/desktop-rs/Cargo.toml
+@@ -1,3 +1,3 @@
+ ﻿[workspace]
+ resolver = "2"
+-members = ["core", "desktop"]
++members = ["core", "control", "desktop", "remote"]
+diff --git a/desktop-rs/control/Cargo.toml b/desktop-rs/control/Cargo.toml
+new file mode 100644
+index 0000000..5ede73d
+--- /dev/null
++++ b/desktop-rs/control/Cargo.toml
+@@ -0,0 +1,12 @@
++[package]
++name = "shows-control"
++version = "0.1.0"
++edition = "2024"
++
++[dependencies]
++serde = { version = "1.0.228", features = ["derive"] }
++serde_json = "1.0.150"
++ureq = { version = "3.3.0", default-features = false }
++
++[dev-dependencies]
++tiny_http = "0.12.0"
+diff --git a/desktop-rs/control/src/lib.rs b/desktop-rs/control/src/lib.rs
+new file mode 100644
+index 0000000..95c4a3e
+--- /dev/null
++++ b/desktop-rs/control/src/lib.rs
+@@ -0,0 +1,289 @@
++//! The loopback control contract shared by the desktop and terminal companion.
++#![forbid(unsafe_code)]
++
++use std::io::{BufRead, BufReader, Read};
++use std::time::Duration;
++
++use serde::{Deserialize, Serialize};
++use serde_json::{Value, json};
++
++pub const CONTROL_ADDR: &str = "127.0.0.1:45831";
++pub const PROTOCOL_VERSION: u32 = 1;
++pub const MAX_FRAME: u64 = 1024 * 1024;
++
++pub fn control_addr() -> Result<String, String> {
++    match std::env::var("SHOWS_CONTROL_PORT") {
++        Ok(port) => {
++            let port: u16 = port
++                .parse()
++                .map_err(|_| "SHOWS_CONTROL_PORT must be a port from 1 to 65535")?;
++            if port == 0 {
++                return Err("SHOWS_CONTROL_PORT cannot be zero".into());
++            }
++            Ok(format!("127.0.0.1:{port}"))
++        }
++        Err(std::env::VarError::NotPresent) => Ok(CONTROL_ADDR.into()),
++        Err(_) => Err("SHOWS_CONTROL_PORT is not valid Unicode".into()),
++    }
++}
++
++pub fn playback_ready(status: &Value) -> bool {
++    let Some(pos) = status["round_pos"].as_u64() else {
++        return false;
++    };
++    status["phase"] == "playing"
++        && status["playback"]["time_pos"].is_number()
++        && status["round"][pos as usize]["episode_id"].is_string()
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
++pub enum Command {
++    Status {},
++    Queue {},
++    Watch {},
++    Play {},
++    Pause {},
++    Skip {},
++    Previous {},
++    Defer {},
++    Seek { seconds: f64 },
++    Volume { level: f64 },
++    PlayShow { show_id: String },
++}
++
++impl Command {
++    pub fn validate(&self) -> Result<(), String> {
++        match self {
++            Self::Seek { seconds } if !seconds.is_finite() || seconds.abs() > 86400.0 => {
++                Err("seek must be a finite number between -86400 and 86400 seconds".into())
++            }
++            Self::Volume { level } if !level.is_finite() || !(0.0..=130.0).contains(level) => {
++                Err("volume must be between 0 and 130".into())
++            }
++            Self::PlayShow { show_id } if show_id.is_empty() || show_id.len() > 256 => {
++                Err("show_id must contain 1 to 256 bytes".into())
++            }
++            _ => Ok(()),
++        }
++    }
++}
++
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct Request {
++    pub id: u64,
++    pub command: Command,
++}
++
++#[derive(Debug, Serialize, Deserialize)]
++#[serde(tag = "kind", rename_all = "snake_case")]
++pub enum Frame {
++    Reply {
++        id: u64,
++        result: Result<Value, String>,
++    },
++    Status {
++        status: Value,
++    },
++    Disconnected {
++        message: String,
++    },
++    Heartbeat,
++}
++
++/// A bounded line reader for both SSH messages and SSE fields.
++pub fn read_line(reader: &mut impl BufRead) -> Result<Option<String>, String> {
++    let mut line = String::new();
++    let n = reader
++        .take(MAX_FRAME + 1)
++        .read_line(&mut line)
++        .map_err(|e| e.to_string())?;
++    if n as u64 > MAX_FRAME {
++        return Err("control message exceeds 1 MiB".into());
++    }
++    if n == 0 { Ok(None) } else { Ok(Some(line)) }
++}
++
++#[derive(Clone)]
++pub struct Client {
++    base: String,
++    agent: ureq::Agent,
++}
++
++impl Client {
++    pub fn connect() -> Result<Self, String> {
++        Self::connect_to(&control_addr()?)
++    }
++
++    pub fn connect_to(address: &str) -> Result<Self, String> {
++        let address: std::net::SocketAddr = address
++            .parse()
++            .map_err(|_| "control address must be a loopback socket address")?;
++        if !address.ip().is_loopback() {
++            return Err("control HTTP connections must stay on loopback".into());
++        }
++        let client = Self {
++            base: format!("http://{address}"),
++            agent: ureq::Agent::config_builder()
++                .proxy(None)
++                .max_redirects(0)
++                .http_status_as_error(false)
++                .timeout_global(Some(Duration::from_secs(8)))
++                .build()
++                .into(),
++        };
++        let info = client.get("/remote/info").map_err(|e| {
++            format!("Shows is not available on this PC. Open the current Shows release first. {e}")
++        })?;
++        if info["application"] != "shows-desktop" || info["protocol"] != PROTOCOL_VERSION {
++            return Err("This listener is not a compatible Shows desktop. Update Shows and shows-remote together.".into());
++        }
++        Ok(client)
++    }
++
++    fn decode(&self, mut response: ureq::http::Response<ureq::Body>) -> Result<Value, String> {
++        let code = response.status();
++        let body = response
++            .body_mut()
++            .with_config()
++            .limit(MAX_FRAME)
++            .read_to_string()
++            .map_err(|e| e.to_string())?;
++        let value: Value =
++            serde_json::from_str(&body).map_err(|e| format!("invalid Shows response: {e}"))?;
++        if !code.is_success() || value.get("ok") == Some(&json!(false)) {
++            return Err(value["message"]
++                .as_str()
++                .unwrap_or("Shows rejected the request")
++                .to_string());
++        }
++        Ok(value)
++    }
++
++    fn get(&self, path: &str) -> Result<Value, String> {
++        let response = self
++            .agent
++            .get(format!("{}{path}", self.base))
++            .call()
++            .map_err(|e| e.to_string())?;
++        self.decode(response)
++    }
++
++    pub fn execute(&self, command: &Command) -> Result<Value, String> {
++        command.validate()?;
++        match command {
++            Command::Status {} => self.get("/status"),
++            Command::Queue {} => Ok(self.get("/status")?["round"].clone()),
++            Command::Watch {} => Err("watch requires a status stream".into()),
++            _ => {
++                let response = self
++                    .agent
++                    .post(format!("{}/remote/control", self.base))
++                    .header("Content-Type", "application/json")
++                    .send(serde_json::to_vec(command).map_err(|e| e.to_string())?)
++                    .map_err(|e| {
++                        format!("Control outcome is unknown; check status before retrying. {e}")
++                    })?;
++                self.decode(response)
++            }
++        }
++    }
++
++    pub fn watch(
++        &self,
++        mut on_frame: impl FnMut(Frame) -> Result<(), String>,
++    ) -> Result<(), String> {
++        // A body timeout would cap the entire SSE lifetime. The controller
++        // instead watches activity, including the desktop's 30-second comments.
++        let agent: ureq::Agent = ureq::Agent::config_builder()
++            .proxy(None)
++            .max_redirects(0)
++            .timeout_connect(Some(Duration::from_secs(8)))
++            .timeout_recv_response(Some(Duration::from_secs(8)))
++            .build()
++            .into();
++        let response = agent
++            .get(format!("{}/status/stream", self.base))
++            .call()
++            .map_err(|e| e.to_string())?;
++        let mut reader = BufReader::new(response.into_body().into_reader());
++        let mut event = String::new();
++        let mut data = String::new();
++        let mut last_heartbeat = std::time::Instant::now();
++        while let Some(line) = read_line(&mut reader)? {
++            let line = line.trim_end_matches(['\r', '\n']);
++            if line.is_empty() {
++                if event == "status" && !data.is_empty() {
++                    on_frame(Frame::Status {
++                        status: serde_json::from_str(&data)
++                            .map_err(|e| format!("invalid status event: {e}"))?,
++                    })?;
++                }
++                event.clear();
++                data.clear();
++            } else if line.starts_with(':') && last_heartbeat.elapsed() >= Duration::from_secs(10) {
++                on_frame(Frame::Heartbeat)?;
++                last_heartbeat = std::time::Instant::now();
++            } else if let Some(value) = line.strip_prefix("event:") {
++                event = value.trim().to_string();
++            } else if let Some(value) = line.strip_prefix("data:") {
++                if !data.is_empty() {
++                    data.push('\n');
++                }
++                data.push_str(value.strip_prefix(' ').unwrap_or(value));
++                if data.len() as u64 > MAX_FRAME {
++                    return Err("status event exceeds 1 MiB".into());
++                }
++            }
++        }
++        Err("Shows closed its status stream; reconnect to the running instance".into())
++    }
++}
++
++/// Resolve a user-entered show against the target's current round only.
++pub fn resolve_show(status: &Value, query: &str) -> Result<String, String> {
++    if query.trim().is_empty() {
++        return Err("show name cannot be empty".into());
++    }
++    let round = status["round"]
++        .as_array()
++        .ok_or("The target has no active round")?;
++    let exact: Vec<_> = round
++        .iter()
++        .filter(|entry| {
++            entry["show_id"].as_str() == Some(query)
++                || entry["show_name"]
++                    .as_str()
++                    .is_some_and(|n| n.eq_ignore_ascii_case(query))
++        })
++        .collect();
++    let matches = if exact.is_empty() {
++        let query = query.to_lowercase();
++        round
++            .iter()
++            .filter(|entry| {
++                entry["show_name"]
++                    .as_str()
++                    .is_some_and(|n| n.to_lowercase().contains(&query))
++            })
++            .collect()
++    } else {
++        exact
++    };
++    match matches.as_slice() {
++        [entry] => entry["show_id"]
++            .as_str()
++            .map(String::from)
++            .ok_or("Show has no ID".into()),
++        [] => Err(format!(
++            "No show matching {query:?} in the target's current round. Use queue to list it."
++        )),
++        _ => Err(format!(
++            "{query:?} matches several shows; use the full name or show ID."
++        )),
++    }
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/desktop-rs/control/src/tests.rs b/desktop-rs/control/src/tests.rs
+new file mode 100644
+index 0000000..a3b5aee
+--- /dev/null
++++ b/desktop-rs/control/src/tests.rs
+@@ -0,0 +1,169 @@
++use super::*;
++use std::io::Cursor;
++use tiny_http::{Header, Response, Server};
++
++fn fixture(replies: Vec<(&'static str, u16, Value)>) -> (String, std::thread::JoinHandle<()>) {
++    let server = Server::http("127.0.0.1:0").unwrap();
++    let address = server.server_addr().to_string();
++    let thread = std::thread::spawn(move || {
++        for (path, code, value) in replies {
++            let mut request = server
++                .recv_timeout(Duration::from_secs(3))
++                .unwrap()
++                .expect("request");
++            assert_eq!(request.url(), path);
++            if path == "/remote/control" {
++                assert_eq!(request.method(), &tiny_http::Method::Post);
++                let mut body = String::new();
++                request.as_reader().read_to_string(&mut body).unwrap();
++                let command: Command = serde_json::from_str(&body).unwrap();
++                assert!(matches!(command, Command::Play {} | Command::Pause {}));
++            }
++            request
++                .respond(Response::from_string(value.to_string()).with_status_code(code))
++                .unwrap();
++        }
++        assert!(
++            server
++                .recv_timeout(Duration::from_millis(100))
++                .unwrap()
++                .is_none(),
++            "request was replayed"
++        );
++    });
++    (address, thread)
++}
++
++fn identity() -> Value {
++    json!({"application":"shows-desktop","protocol":PROTOCOL_VERSION})
++}
++
++#[test]
++fn paused_core_is_controllable_but_an_unloaded_episode_is_not() {
++    let mut status = json!({"phase":"playing","round_pos":0,"round":[{"episode_id":"e1"}],
++        "playback":{"time_pos":20,"paused":true,"core_idle":true}});
++    assert!(playback_ready(&status));
++    status["playback"]["time_pos"] = Value::Null;
++    assert!(!playback_ready(&status));
++}
++
++#[test]
++fn rejects_network_http_and_wrong_protocol_before_sending_controls() {
++    assert!(
++        Client::connect_to("192.0.2.1:45831")
++            .err()
++            .unwrap()
++            .contains("loopback")
++    );
++    for value in [
++        json!({"application":"other","protocol":1}),
++        json!({"application":"shows-desktop","protocol":99}),
++    ] {
++        let (address, worker) = fixture(vec![("/remote/info", 200, value)]);
++        assert!(Client::connect_to(&address).is_err());
++        worker.join().unwrap();
++    }
++}
++
++#[test]
++fn controls_report_target_rejection_and_never_replay_posts_or_redirects() {
++    for (code, result) in [
++        (503, json!({"ok":false,"message":"no episode loaded"})),
++        (200, json!({"ok":false,"message":"show not in round"})),
++        (307, json!({"message":"redirect refused"})),
++    ] {
++        let (address, worker) = fixture(vec![
++            ("/remote/info", 200, identity()),
++            ("/remote/control", code, result.clone()),
++        ]);
++        let client = Client::connect_to(&address).unwrap();
++        assert!(
++            client
++                .execute(&Command::Play {})
++                .unwrap_err()
++                .contains(result["message"].as_str().unwrap())
++        );
++        worker.join().unwrap();
++    }
++}
++
++#[test]
++fn invalid_numeric_controls_are_rejected_before_network_io() {
++    let (address, worker) = fixture(vec![("/remote/info", 200, identity())]);
++    let client = Client::connect_to(&address).unwrap();
++    for command in [
++        Command::Volume { level: 131.0 },
++        Command::Volume { level: f64::NAN },
++        Command::Seek {
++            seconds: f64::INFINITY,
++        },
++    ] {
++        assert!(client.execute(&command).is_err());
++    }
++    worker.join().unwrap();
++    assert!(serde_json::from_value::<Command>(json!({"action":"skip","extra":true})).is_err());
++}
++
++#[test]
++fn show_selection_is_unique_and_uses_only_the_target_round() {
++    let status = json!({"round":[{"show_id":"1","show_name":"The Simpsons"},
++        {"show_id":"2","show_name":"The Daily Show"}]});
++    assert_eq!(resolve_show(&status, "simpsons").unwrap(), "1");
++    assert_eq!(resolve_show(&status, "2").unwrap(), "2");
++    assert!(
++        resolve_show(&status, "the")
++            .unwrap_err()
++            .contains("several")
++    );
++    assert!(resolve_show(&status, "missing").is_err());
++    assert!(resolve_show(&status, "").is_err());
++}
++
++#[test]
++fn frames_are_bounded_and_malformed_requests_are_rejected() {
++    assert!(read_line(&mut Cursor::new(vec![b'x'; MAX_FRAME as usize + 1])).is_err());
++    assert_eq!(
++        read_line(&mut Cursor::new(b"line\n")).unwrap(),
++        Some("line\n".into())
++    );
++    assert!(read_line(&mut Cursor::new(b"")).unwrap().is_none());
++    assert!(
++        serde_json::from_str::<Request>(r#"{"id":1,"command":{"action":"close_window"}}"#).is_err()
++    );
++}
++
++#[test]
++fn live_stream_parses_multiline_unicode_status_and_reports_closure() {
++    let server = Server::http("127.0.0.1:0").unwrap();
++    let address = server.server_addr().to_string();
++    let worker = std::thread::spawn(move || {
++        let req = server
++            .recv_timeout(Duration::from_secs(3))
++            .unwrap()
++            .unwrap();
++        req.respond(Response::from_string(identity().to_string()))
++            .unwrap();
++        let req = server
++            .recv_timeout(Duration::from_secs(3))
++            .unwrap()
++            .unwrap();
++        assert_eq!(req.url(), "/status/stream");
++        let body = ": keepalive\n\nevent: status\ndata: {\"phase\":\"playing\",\ndata: \"message\":\"Télévision\"}\n\n";
++        req.respond(
++            Response::from_string(body)
++                .with_header(Header::from_bytes("Content-Type", "text/event-stream").unwrap()),
++        )
++        .unwrap();
++    });
++    let client = Client::connect_to(&address).unwrap();
++    let mut received = Vec::new();
++    let error = client
++        .watch(|frame| {
++            received.push(frame);
++            Ok(())
++        })
++        .unwrap_err();
++    assert!(matches!(&received[0], Frame::Status { status } if status["message"] == "Télévision"));
++    assert!(error.contains("closed"));
++    worker.join().unwrap();
++}
+diff --git a/desktop-rs/desktop/Cargo.toml b/desktop-rs/desktop/Cargo.toml
+index 1526e70..1a41850 100644
+--- a/desktop-rs/desktop/Cargo.toml
++++ b/desktop-rs/desktop/Cargo.toml
+@@ -11,6 +11,7 @@ log = "0.4.30"
+ serde_json = "1.0.150"
+ rust-embed = "8.5.0"
+ shows-core = { version = "0.1.0", path = "../core" }
++shows-control = { version = "0.1.0", path = "../control" }
+ tiny_http = "0.12.0"
+ rfd = "0.17"
+ webview2-com = "0.39.1"
+diff --git a/desktop-rs/desktop/src/mpv.rs b/desktop-rs/desktop/src/mpv.rs
+index efb01dd..8ea0abb 100644
+--- a/desktop-rs/desktop/src/mpv.rs
++++ b/desktop-rs/desktop/src/mpv.rs
+@@ -189,6 +189,22 @@ impl Handle {
+         }
+     }
+ 
++    pub fn set_property_checked(&self, name: &str, value: &str) -> Result<(), String> {
++        let name = CString::new(name).map_err(|e| e.to_string())?;
++        let value = CString::new(value).map_err(|e| e.to_string())?;
++        let result = unsafe { (self.api.set_property_string)(self.ctx, name.as_ptr(), value.as_ptr()) };
++        if result < 0 { Err(format!("mpv rejected property update ({result})")) } else { Ok(()) }
++    }
++
++    pub fn command_checked(&self, args: &[&str]) -> Result<(), String> {
++        let strings: Vec<CString> = args.iter().map(|s| CString::new(*s)).collect::<Result<_, _>>()
++            .map_err(|e| e.to_string())?;
++        let mut pointers: Vec<*const c_char> = strings.iter().map(|s| s.as_ptr()).collect();
++        pointers.push(std::ptr::null());
++        let result = unsafe { (self.api.command)(self.ctx, pointers.as_ptr()) };
++        if result < 0 { Err(format!("mpv rejected command ({result})")) } else { Ok(()) }
++    }
++
+     /// Run an mpv command given as a NULL-terminated argument list.
+     pub fn command(&self, args: &[&str]) {
+         let cstrs: Vec<CString> = args.iter().filter_map(|a| CString::new(*a).ok()).collect();
+diff --git a/desktop-rs/desktop/src/player.rs b/desktop-rs/desktop/src/player.rs
+index 567857a..3fad4a7 100644
+--- a/desktop-rs/desktop/src/player.rs
++++ b/desktop-rs/desktop/src/player.rs
+@@ -199,6 +199,23 @@ impl Player {
+     pub fn set_pause(&self, paused: bool) {
+         self.handle.set_property("pause", if paused { "yes" } else { "no" });
+     }
++    pub fn set_pause_confirmed(&self, paused: bool) -> Result<(), String> {
++        let value = if paused { "yes" } else { "no" };
++        self.handle.set_property_checked("pause", value)?;
++        if self.handle.get_property("pause").as_deref() != Some(value) {
++            return Err("mpv did not confirm the requested pause state".into());
++        }
++        Ok(())
++    }
++    pub fn seek_confirmed(&self, seconds: f64) -> Result<(), String> {
++        self.handle.command_checked(&["seek", &seconds.to_string(), "relative"])
++    }
++    pub fn set_volume_confirmed(&self, level: f64) -> Result<(), String> {
++        self.handle.set_property_checked("volume", &level.to_string())?;
++        let observed = self.prop_f64("volume").ok_or("mpv did not report its volume")?;
++        if (observed - level).abs() > 0.1 { return Err("mpv did not confirm the requested volume".into()); }
++        Ok(())
++    }
+     pub fn seek_relative(&self, seconds: f64) {
+         self.handle
+             .command(&["seek", &seconds.to_string(), "relative"]);
+diff --git a/desktop-rs/desktop/src/webserver.rs b/desktop-rs/desktop/src/webserver.rs
+index 223ba4e..fd1bec0 100644
+--- a/desktop-rs/desktop/src/webserver.rs
++++ b/desktop-rs/desktop/src/webserver.rs
+@@ -323,7 +323,8 @@ impl ControlServer {
+     }
+ 
+     pub fn start(self: &Arc<Self>) -> u16 {
+-        let server = Server::http("127.0.0.1:0").expect("bind control server");
++        let address = shows_control::control_addr().expect("invalid Shows control port");
++        let server = Server::http(&address).expect("bind Shows loopback control server");
+         let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
+         let this = self.clone();
+         std::thread::Builder::new()
+@@ -353,6 +354,13 @@ impl ControlServer {
+                 respond(request, 200, self.index_html(), "text/html; charset=utf-8")
+             }
+             (Method::Get, "/status") => respond_json(request, 200, &self.status_json()),
++            (Method::Get, "/remote/info") => respond_json(request, 200, &json!({
++                "application": "shows-desktop",
++                "protocol": shows_control::PROTOCOL_VERSION,
++                "build": option_env!("SHOWS_BUILD_SHA").unwrap_or("source"),
++                "computer": std::env::var("COMPUTERNAME").unwrap_or_default(),
++                "pid": std::process::id(),
++            })),
+             (Method::Get, "/status/stream") => self.status_stream(request),
+             (Method::Get, "/shows") => {
+                 let v = json!(self.replica.overlay_shows(&self.playlists));
+@@ -390,6 +398,7 @@ impl ControlServer {
+ 
+     fn handle_post(self: &Arc<Self>, mut request: Request, path: &str, _url: &str) {
+         match path {
++            "/remote/control" => self.remote_control(request),
+             "/pause" => {
+                 let mut did_explicit = false;
+                 if let Some(query) = request.url().split('?').nth(1) {
+@@ -689,6 +698,60 @@ impl ControlServer {
+         }
+     }
+ 
++    fn remote_control(&self, mut request: Request) {
++        use shows_control::Command;
++        if request.headers().iter().any(|h| h.field.equiv("Origin")) ||
++            !request.headers().iter().any(|h| h.field.equiv("Content-Type") && h.value.as_str() == "application/json") {
++            return respond_json(request, 403, &json!({"ok": false, "message": "remote controls require a native JSON client"}));
++        }
++        let mut body = Vec::new();
++        if request.as_reader().take(shows_control::MAX_FRAME + 1).read_to_end(&mut body).is_err() || body.len() as u64 > shows_control::MAX_FRAME {
++            return respond_json(request, 413, &json!({"ok": false, "message": "control body unreadable or larger than 1 MiB"}));
++        }
++        let command: Command = match serde_json::from_slice(&body) {
++            Ok(command) => command,
++            Err(e) => return respond_json(request, 400, &json!({"ok": false, "message": e.to_string()})),
++        };
++        if let Err(message) = command.validate() {
++            return respond_json(request, 400, &json!({"ok": false, "message": message}));
++        }
++        let status = self.status_json();
++        if !shows_control::playback_ready(&status) {
++            return respond_json(request, 503, &json!({"ok": false, "message": "Shows has no playable episode loaded; check status"}));
++        }
++        log::info!("remote control: {command:?}");
++        match command {
++            Command::Skip {} => self.respond_runner_outcome(request, |r| r.skip()),
++            Command::Previous {} => self.respond_runner_outcome(request, |r| r.previous()),
++            Command::Defer {} => self.respond_runner_outcome(request, |r| r.defer()),
++            Command::PlayShow { show_id } => self.respond_runner_outcome(request, |r| r.play_show(&show_id)),
++            Command::Play {} | Command::Pause {} | Command::Seek { .. } | Command::Volume { .. } => {
++                let result = {
++                    let player = self.player.lock().unwrap();
++                    match player.as_ref() {
++                        Some(p) => match command {
++                            Command::Play {} => p.set_pause_confirmed(false),
++                            Command::Pause {} => p.set_pause_confirmed(true),
++                            Command::Seek { seconds } => p.seek_confirmed(seconds),
++                            Command::Volume { level } => p.set_volume_confirmed(level),
++                            _ => unreachable!(),
++                        },
++                        None => Err("player is unavailable".into()),
++                    }
++                };
++                match result {
++                    Ok(()) => {
++                        if let Command::Volume { level } = command { self.replica.set_volume(level); }
++                        self.notify();
++                        respond_control_ok(request, "control_applied", "control applied by the target player");
++                    }
++                    Err(message) => respond_json(request, 503, &json!({"ok": false, "message": message})),
++                }
++            }
++            _ => respond_json(request, 400, &json!({"ok": false, "message": "use the status and stream endpoints for reads"})),
++        }
++    }
++
+     fn library_add(self: &Arc<Self>, mut request: Request) {
+         let b = read_body(&mut request);
+         let name = b
+@@ -1429,6 +1492,45 @@ mod tests {
+     use super::*;
+     use std::io::Read;
+ 
++    #[test]
++    fn native_remote_reports_unavailable_player_without_mutating_shared_state() {
++        let control = ControlServer::new(None, Arc::new(Replica::new(":memory:")), vec!["nelson".into()]);
++        let revision = control.replica.revision();
++        let listener = Server::http("127.0.0.1:0").unwrap();
++        let address = listener.server_addr().to_string();
++        let copy = control.clone();
++        let worker = std::thread::spawn(move || {
++            for _ in 0..2 {
++                copy.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
++            }
++        });
++        let client = shows_control::Client::connect_to(&address).unwrap();
++        assert!(client.execute(&shows_control::Command::Play {}).unwrap_err().contains("no playable episode"));
++        worker.join().unwrap();
++        assert_eq!(control.replica.revision(), revision);
++    }
++
++    #[test]
++    fn remote_rejects_browser_requests_before_applying_controls() {
++        use std::io::Write;
++        for headers in ["Content-Type: text/plain\r\n", "Content-Type: application/json\r\nOrigin: https://example.com\r\n"] {
++            let control = ControlServer::new(None, Arc::new(Replica::new(":memory:")), vec![]);
++            let listener = Server::http("127.0.0.1:0").unwrap();
++            let address = listener.server_addr().to_string();
++            let worker = std::thread::spawn(move || {
++                control.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
++            });
++            let mut socket = std::net::TcpStream::connect(address).unwrap();
++            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
++            let body = r#"{"action":"skip"}"#;
++            write!(socket, "POST /remote/control HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
++            let mut response = String::new();
++            socket.read_to_string(&mut response).unwrap();
++            assert!(response.starts_with("HTTP/1.1 403"));
++            worker.join().unwrap();
++        }
++    }
++
+     #[test]
+     fn sse_frame_names_status_event_with_json_payload() {
+         let frame = sse_frame(7, "status", &json!({"phase": "playing", "round_pos": 2}));
+diff --git a/desktop-rs/remote/Cargo.toml b/desktop-rs/remote/Cargo.toml
+new file mode 100644
+index 0000000..9b3bdc1
+--- /dev/null
++++ b/desktop-rs/remote/Cargo.toml
+@@ -0,0 +1,15 @@
++[package]
++name = "shows-remote"
++version = "0.1.0"
++edition = "2024"
++
++[dependencies]
++clap = { version = "4.6", features = ["derive", "string"] }
++crossterm = "0.29.0"
++ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
++serde_json = "1.0.150"
++shows-control = { version = "0.1.0", path = "../control" }
++
++[dev-dependencies]
++tiny_http = "0.12.0"
++tempfile = "3.27.0"
+diff --git a/desktop-rs/remote/src/agent.rs b/desktop-rs/remote/src/agent.rs
+new file mode 100644
+index 0000000..dbca429
+--- /dev/null
++++ b/desktop-rs/remote/src/agent.rs
+@@ -0,0 +1,50 @@
++use std::io::{BufReader, Write};
++use std::sync::{Arc, Mutex};
++
++use serde_json::json;
++use shows_control::{Client, Command, Frame, Request, read_line};
++
++fn emit(output: &Mutex<std::io::Stdout>, frame: Frame) -> Result<(), String> {
++    let mut output = output.lock().unwrap();
++    serde_json::to_writer(&mut *output, &frame).map_err(|e| e.to_string())?;
++    output
++        .write_all(b"\n")
++        .and_then(|_| output.flush())
++        .map_err(|e| e.to_string())
++}
++
++pub fn run() -> Result<(), String> {
++    let client = Client::connect()?;
++    let output = Arc::new(Mutex::new(std::io::stdout()));
++    let mut input = BufReader::new(std::io::stdin());
++    let mut watching = false;
++    while let Some(line) = read_line(&mut input)? {
++        let request: Request =
++            serde_json::from_str(&line).map_err(|e| format!("invalid request: {e}"))?;
++        let result = if request.command == (Command::Watch {}) {
++            if watching {
++                Err("already watching".into())
++            } else {
++                watching = true;
++                let (client, output) = (client.clone(), output.clone());
++                std::thread::spawn(move || {
++                    let result = client.watch(|frame| emit(&output, frame));
++                    if let Err(message) = result {
++                        let _ = emit(&output, Frame::Disconnected { message });
++                    }
++                });
++                Ok(json!({"message": "subscribed to the target's live status"}))
++            }
++        } else {
++            client.execute(&request.command)
++        };
++        emit(
++            &output,
++            Frame::Reply {
++                id: request.id,
++                result,
++            },
++        )?;
++    }
++    Ok(())
++}
+diff --git a/desktop-rs/remote/src/lib.rs b/desktop-rs/remote/src/lib.rs
+new file mode 100644
+index 0000000..bf098c3
+--- /dev/null
++++ b/desktop-rs/remote/src/lib.rs
+@@ -0,0 +1,3 @@
++#![forbid(unsafe_code)]
++
++pub mod transport;
+diff --git a/desktop-rs/remote/src/main.rs b/desktop-rs/remote/src/main.rs
+new file mode 100644
+index 0000000..5998d81
+--- /dev/null
++++ b/desktop-rs/remote/src/main.rs
+@@ -0,0 +1,189 @@
++#![forbid(unsafe_code)]
++
++mod agent;
++mod ui;
++
++use clap::{Parser, Subcommand, ValueEnum};
++use serde_json::Value;
++use shows_control::{Command, resolve_show};
++use shows_remote::transport;
++use std::io::IsTerminal;
++use transport::Session;
++
++#[derive(Clone, Copy, ValueEnum)]
++enum Channel {
++    Stable,
++    Dev,
++}
++
++#[derive(Parser)]
++#[command(
++    version = version(),
++    about = "Control a running Shows desktop over your existing SSH connection.",
++    after_help = "Examples:\n  shows-remote upstairspc\n  shows-remote upstairspc play\n  shows-remote upstairspc play \"The Simpsons\"\n  shows-remote upstairspc status --json\n\nNo command opens the interactive remote. The target must already have Shows open."
++)]
++struct Args {
++    #[arg(default_value = "upstairspc")]
++    target: String,
++    #[arg(long, value_enum, default_value = "stable", global = true)]
++    channel: Channel,
++    #[arg(
++        long,
++        global = true,
++        help = "Print the result as JSON (requires a command)"
++    )]
++    json: bool,
++    #[arg(long, hide = true)]
++    agent: bool,
++    #[arg(long, help = "Control Shows on this PC without SSH")]
++    local: bool,
++    #[command(subcommand)]
++    command: Option<Action>,
++}
++
++fn version() -> String {
++    format!(
++        "{} ({})",
++        env!("CARGO_PKG_VERSION"),
++        option_env!("SHOWS_BUILD_SHA").unwrap_or("source")
++    )
++}
++
++#[derive(Subcommand)]
++enum Action {
++    /// Show the target's current playback state.
++    Status,
++    /// List the target's current round and show IDs.
++    Queue,
++    /// Resume playback, or navigate to a show in the current round.
++    Play { show: Option<String> },
++    /// Pause playback (safe to repeat).
++    Pause,
++    /// Mark the current episode watched and move forward.
++    Skip,
++    /// Navigate back without marking watched.
++    Previous,
++    /// Move this episode to the back of its show's queue without marking watched.
++    Defer,
++    /// Seek by a relative number of seconds.
++    Seek {
++        #[arg(allow_hyphen_values = true)]
++        seconds: f64,
++    },
++    /// Set volume from 0 to 130.
++    Volume { level: f64 },
++}
++
++fn run() -> Result<(), String> {
++    let args = Args::parse();
++    if args.agent {
++        return agent::run();
++    }
++    if args.command.is_none()
++        && (args.json || !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal())
++    {
++        return Err("The interactive remote needs a terminal. Use a command such as status --json for scripts.".into());
++    }
++    let channel = match args.channel {
++        Channel::Stable => "stable",
++        Channel::Dev => "dev",
++    };
++    let mut session = Session::connect(&args.target, channel, args.local)?;
++    let Some(action) = args.command else {
++        return ui::run(session, &args.target, channel, args.local);
++    };
++    let command = match action {
++        Action::Status => Command::Status {},
++        Action::Queue => Command::Queue {},
++        Action::Play { show: Some(query) } => Command::PlayShow {
++            show_id: resolve_show(&session.call(Command::Status {})?, &query)?,
++        },
++        Action::Play { show: None } => Command::Play {},
++        Action::Pause => Command::Pause {},
++        Action::Skip => Command::Skip {},
++        Action::Previous => Command::Previous {},
++        Action::Defer => Command::Defer {},
++        Action::Seek { seconds } => Command::Seek { seconds },
++        Action::Volume { level } => Command::Volume { level },
++    };
++    command.validate()?;
++    let result = session.call(command.clone())?;
++    if args.json {
++        println!(
++            "{}",
++            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?
++        );
++    } else {
++        println!(
++            "{}",
++            if args.local {
++                "Local Shows"
++            } else {
++                &args.target
++            }
++        );
++        match command {
++            Command::Status {} => print_status(&result),
++            Command::Queue {} => {
++                if let Some(round) = result.as_array() {
++                    for (i, entry) in round.iter().enumerate() {
++                        println!(
++                            "{:>2}. {}  [{}]",
++                            i + 1,
++                            text(&entry["show_name"]),
++                            text(&entry["show_id"])
++                        );
++                    }
++                }
++            }
++            _ => println!("{}", text(&result["message"])),
++        }
++    }
++    Ok(())
++}
++
++pub fn text(value: &Value) -> &str {
++    value.as_str().unwrap_or("—")
++}
++
++pub fn current(status: &Value) -> &Value {
++    let pos = status["round_pos"].as_u64().unwrap_or(0) as usize;
++    &status["round"][pos]
++}
++
++pub fn clock(value: &Value) -> String {
++    let seconds = value
++        .as_f64()
++        .filter(|v| v.is_finite() && *v >= 0.0)
++        .unwrap_or(0.0) as u64;
++    format!("{}:{:02}", seconds / 60, seconds % 60)
++}
++
++fn print_status(status: &Value) {
++    let playback = &status["playback"];
++    println!("{} — {}", text(&status["phase"]), text(&status["message"]));
++    println!(
++        "{} | {} / {} | {} | volume {}",
++        text(&current(status)["show_name"]),
++        clock(&playback["time_pos"]),
++        clock(&playback["duration"]),
++        if playback["paused"] == true {
++            "paused"
++        } else {
++            "playing"
++        },
++        playback["volume"]
++    );
++    if let Some(alerts) = status["alerts"].as_array() {
++        for alert in alerts {
++            println!("{}", text(&alert["message"]));
++        }
++    }
++}
++
++fn main() {
++    if let Err(message) = run() {
++        eprintln!("shows-remote: {message}");
++        std::process::exit(1);
++    }
++}
+diff --git a/desktop-rs/remote/src/transport.rs b/desktop-rs/remote/src/transport.rs
+new file mode 100644
+index 0000000..1e6e14d
+--- /dev/null
++++ b/desktop-rs/remote/src/transport.rs
+@@ -0,0 +1,164 @@
++use std::io::{BufReader, Write};
++use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
++use std::sync::mpsc::{self, Receiver};
++use std::time::{Duration, Instant};
++
++use serde_json::Value;
++use shows_control::{Command, Frame, Request, read_line};
++
++pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
++
++pub fn valid_host(host: &str) -> bool {
++    !host.is_empty()
++        && host.len() <= 253
++        && host.as_bytes()[0].is_ascii_alphanumeric()
++        && host
++            .bytes()
++            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'.')
++}
++
++pub fn remote_command(channel: &str) -> String {
++    assert!(matches!(channel, "stable" | "dev"));
++    // The verified installer writes this one-line native entry point. Neither
++    // JSON commands nor show names enter the remote command line.
++    format!(r#""%LOCALAPPDATA%\shows\agents\{channel}.cmd""#)
++}
++
++pub struct Session {
++    child: Child,
++    input: ChildStdin,
++    pub events: Receiver<Frame>,
++    next_id: u64,
++}
++
++impl Session {
++    pub fn connect(host: &str, channel: &str, local: bool) -> Result<Self, String> {
++        if !valid_host(host) {
++            return Err("target must be a computer hostname or SSH host alias".into());
++        }
++        let mut command = if local {
++            let mut cmd = ProcessCommand::new(std::env::current_exe().map_err(|e| e.to_string())?);
++            cmd.arg("--agent");
++            cmd
++        } else {
++            let mut cmd = ProcessCommand::new("ssh.exe");
++            cmd.args([
++                "-T",
++                "-o",
++                "BatchMode=yes",
++                "-o",
++                "StrictHostKeyChecking=yes",
++                "-o",
++                "ConnectTimeout=8",
++                "-o",
++                "ServerAliveInterval=5",
++                "-o",
++                "ServerAliveCountMax=2",
++                host,
++                &remote_command(channel),
++            ]);
++            cmd
++        };
++        let mut child = command
++            .stdin(Stdio::piped())
++            .stdout(Stdio::piped())
++            .stderr(Stdio::piped())
++            .spawn()
++            .map_err(|e| {
++                format!(
++                    "could not start {}: {e}",
++                    if local {
++                        "local agent"
++                    } else {
++                        "Windows OpenSSH"
++                    }
++                )
++            })?;
++        let input = child.stdin.take().unwrap();
++        let output = child.stdout.take().unwrap();
++        let errors = child.stderr.take().unwrap();
++        let (tx, events) = mpsc::sync_channel(32);
++        let diagnostics = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
++        let capture = diagnostics.clone();
++        std::thread::spawn(move || {
++            let mut reader = BufReader::new(errors);
++            while let Ok(Some(line)) = read_line(&mut reader) {
++                let mut text = capture.lock().unwrap();
++                if text.len() < 8192 {
++                    text.push_str(&line);
++                }
++            }
++        });
++        std::thread::spawn(move || {
++            let mut reader = BufReader::new(output);
++            let result = loop {
++                match read_line(&mut reader) {
++                    Ok(Some(line)) => match serde_json::from_str(&line) {
++                        Ok(frame) => {
++                            if tx.send(frame).is_err() {
++                                return;
++                            }
++                        }
++                        Err(e) => break format!("invalid remote protocol message: {e}"),
++                    },
++                    Ok(None) => break "remote connection closed".to_string(),
++                    Err(e) => break e,
++                }
++            };
++            // stderr may finish just after stdout; give its reader a bounded chance.
++            std::thread::sleep(Duration::from_millis(50));
++            let details = diagnostics.lock().unwrap().trim().to_string();
++            let message = if details.is_empty() {
++                result
++            } else {
++                format!("{result}: {details}")
++            };
++            let _ = tx.send(Frame::Disconnected { message });
++        });
++        Ok(Self {
++            child,
++            input,
++            events,
++            next_id: 0,
++        })
++    }
++
++    pub fn send(&mut self, command: Command) -> Result<u64, String> {
++        command.validate()?;
++        self.next_id += 1;
++        let request = Request {
++            id: self.next_id,
++            command,
++        };
++        serde_json::to_writer(&mut self.input, &request).map_err(|e| e.to_string())?;
++        self.input
++            .write_all(b"\n")
++            .and_then(|_| self.input.flush())
++            .map_err(|e| e.to_string())?;
++        Ok(request.id)
++    }
++
++    pub fn call(&mut self, command: Command) -> Result<Value, String> {
++        let id = self.send(command)?;
++        let deadline = Instant::now() + REQUEST_TIMEOUT;
++        loop {
++            let event = self.events.recv_timeout(deadline.saturating_duration_since(Instant::now()))
++                .map_err(|_| "Remote response timed out. The outcome may be unknown; check status before retrying.".to_string())?;
++            match event {
++                Frame::Reply {
++                    id: reply_id,
++                    result,
++                } if id == reply_id => return result,
++                Frame::Disconnected { message } => return Err(message),
++                _ => (),
++            }
++        }
++    }
++}
++
++impl Drop for Session {
++    fn drop(&mut self) {
++        let _ = self.child.kill();
++        let _ = self.child.wait();
++    }
++}
+diff --git a/desktop-rs/remote/src/ui.rs b/desktop-rs/remote/src/ui.rs
+new file mode 100644
+index 0000000..854369d
+--- /dev/null
++++ b/desktop-rs/remote/src/ui.rs
+@@ -0,0 +1,355 @@
++use std::time::{Duration, Instant};
++
++use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
++use ratatui::{
++    Frame as TerminalFrame,
++    layout::{Constraint, Layout},
++    style::{Color, Modifier, Style},
++    widgets::{Block, Gauge, List, ListItem, ListState, Paragraph, Wrap},
++};
++use serde_json::Value;
++use shows_control::{Command, Frame};
++
++use crate::{
++    clock, current, text,
++    transport::{REQUEST_TIMEOUT, Session},
++};
++
++struct Model {
++    status: Value,
++    connected: bool,
++    selected: usize,
++    notice: String,
++    pending: Option<(u64, Instant)>,
++}
++
++impl Model {
++    fn connecting(id: u64) -> Self {
++        Self {
++            status: Value::Null,
++            connected: false,
++            selected: 0,
++            notice: "Connecting to the running Shows instance…".into(),
++            pending: Some((id, Instant::now())),
++        }
++    }
++
++    fn disconnect(&mut self, message: String) {
++        self.connected = false;
++        self.pending = None;
++        self.notice =
++            format!("Disconnected: {message}  Press r to reconnect; commands are never replayed.");
++    }
++
++    fn receive(&mut self, frame: Frame) {
++        match frame {
++            Frame::Status { status } => {
++                if self.status.is_null() {
++                    self.selected = status["round_pos"].as_u64().unwrap_or(0) as usize;
++                    self.notice = "Connected. Controls affect only the target PC.".into();
++                }
++                self.connected = true;
++                self.status = status;
++                self.selected = self.selected.min(self.round_len().saturating_sub(1));
++            }
++            Frame::Reply { id, result } if self.pending.is_some_and(|p| p.0 == id) => {
++                self.pending = None;
++                self.notice = match result {
++                    Ok(result) => result["message"]
++                        .as_str()
++                        .unwrap_or("Target accepted the request")
++                        .to_string(),
++                    Err(error) => format!("Request failed: {error}"),
++                };
++            }
++            Frame::Disconnected { message } => self.disconnect(message),
++            _ => (),
++        }
++    }
++
++    fn round_len(&self) -> usize {
++        self.status["round"].as_array().map_or(0, Vec::len)
++    }
++
++    fn ready(&self) -> bool {
++        self.connected && self.pending.is_none() && shows_control::playback_ready(&self.status)
++    }
++
++    fn control(&self, key: KeyCode) -> Option<Command> {
++        let playback = &self.status["playback"];
++        match key {
++            KeyCode::Char(' ') => Some(if playback["paused"] == true {
++                Command::Play {}
++            } else {
++                Command::Pause {}
++            }),
++            KeyCode::Char('s') => Some(Command::Play {}),
++            KeyCode::Char('p') => Some(Command::Pause {}),
++            KeyCode::Char('n') => Some(Command::Skip {}),
++            KeyCode::Char('b') => Some(Command::Previous {}),
++            KeyCode::Char('d') => Some(Command::Defer {}),
++            KeyCode::Left => Some(Command::Seek { seconds: -10.0 }),
++            KeyCode::Right => Some(Command::Seek { seconds: 10.0 }),
++            KeyCode::Char('+') | KeyCode::Char('=') => Some(Command::Volume {
++                level: (playback["volume"].as_f64()? + 5.0).clamp(0.0, 130.0),
++            }),
++            KeyCode::Char('-') => Some(Command::Volume {
++                level: (playback["volume"].as_f64()? - 5.0).clamp(0.0, 130.0),
++            }),
++            KeyCode::Enter => Some(Command::PlayShow {
++                show_id: self.status["round"][self.selected]["show_id"]
++                    .as_str()?
++                    .to_string(),
++            }),
++            _ => None,
++        }
++    }
++}
++
++fn draw(frame: &mut TerminalFrame, model: &Model, target: &str) {
++    let areas = Layout::vertical([
++        Constraint::Length(4),
++        Constraint::Length(3),
++        Constraint::Min(3),
++        Constraint::Length(4),
++        Constraint::Length(3),
++    ])
++    .split(frame.area());
++    let playback = &model.status["playback"];
++    let state = if !model.connected {
++        "DISCONNECTED"
++    } else if playback["paused"] == true {
++        "PAUSED"
++    } else {
++        text(&model.status["phase"])
++    };
++    let color = if model.connected {
++        Color::Cyan
++    } else {
++        Color::Yellow
++    };
++    let headline = format!(
++        "{}  |  {} / {}  |  volume {}\n{}",
++        text(&current(&model.status)["show_name"]),
++        clock(&playback["time_pos"]),
++        clock(&playback["duration"]),
++        playback["volume"]
++            .as_f64()
++            .map_or("—".into(), |v| format!("{v:.0}")),
++        text(&model.status["message"])
++    );
++    frame.render_widget(
++        Paragraph::new(headline)
++            .block(
++                Block::bordered()
++                    .title(format!(" Shows Remote → {target}  ·  {state} "))
++                    .border_style(Style::default().fg(color)),
++            )
++            .wrap(Wrap { trim: true }),
++        areas[0],
++    );
++    let percent = playback["percent_pos"]
++        .as_f64()
++        .filter(|v| v.is_finite())
++        .unwrap_or(0.0)
++        .clamp(0.0, 100.0);
++    frame.render_widget(
++        Gauge::default()
++            .block(Block::bordered().title(" Playback "))
++            .ratio(percent / 100.0)
++            .gauge_style(Style::default().fg(color)),
++        areas[1],
++    );
++    let pos = model.status["round_pos"].as_u64().unwrap_or(0) as usize;
++    let items: Vec<ListItem> = model.status["round"]
++        .as_array()
++        .map(|round| {
++            round
++                .iter()
++                .enumerate()
++                .map(|(i, entry)| {
++                    ListItem::new(format!(
++                        "{} {:>2}. {}",
++                        if i == pos { ">" } else { " " },
++                        i + 1,
++                        text(&entry["show_name"])
++                    ))
++                })
++                .collect()
++        })
++        .unwrap_or_default();
++    let list = List::new(items)
++        .block(Block::bordered().title(" Target's current round · ↑↓ select · Enter play "))
++        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
++    let mut selection = ListState::default().with_selected(if model.round_len() > 0 {
++        Some(model.selected)
++    } else {
++        None
++    });
++    frame.render_stateful_widget(list, areas[2], &mut selection);
++    let alerts = model.status["alerts"]
++        .as_array()
++        .map(|alerts| {
++            alerts
++                .iter()
++                .filter_map(|a| a["message"].as_str())
++                .collect::<Vec<_>>()
++                .join(" | ")
++        })
++        .unwrap_or_default();
++    let notice = format!(
++        "{}{}{}",
++        if model.pending.is_some() {
++            "Waiting for target… "
++        } else {
++            ""
++        },
++        model.notice,
++        if alerts.is_empty() {
++            String::new()
++        } else {
++            format!("\n{alerts}")
++        }
++    );
++    frame.render_widget(
++        Paragraph::new(notice)
++            .block(Block::bordered().title(" Connection / result "))
++            .wrap(Wrap { trim: true })
++            .style(Style::default().fg(color)),
++        areas[3],
++    );
++    frame.render_widget(Paragraph::new("Space play/pause · s play · p pause · n skip (marks watched) · b previous\nd defer · ←→ seek 10s · +/- volume · r reconnect · q quit")
++        .wrap(Wrap { trim: true }), areas[4]);
++}
++
++pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Result<(), String> {
++    let id = session.send(Command::Watch {})?;
++    let mut model = Model::connecting(id);
++    let mut connection = Some(session);
++    let mut started = Instant::now();
++    let mut last_activity = Instant::now();
++    let mut terminal = ratatui::try_init().map_err(|e| e.to_string())?;
++    let result = (|| {
++        loop {
++            let mut lost = false;
++            if let Some(session) = connection.as_ref() {
++                while let Ok(frame) = session.events.try_recv() {
++                    last_activity = Instant::now();
++                    lost |= matches!(&frame, Frame::Disconnected { .. });
++                    model.receive(frame);
++                }
++            }
++            if lost {
++                connection.take();
++            }
++            if model.connected && last_activity.elapsed() > Duration::from_secs(65) {
++                model.disconnect("No status or heartbeat from Shows for 65 seconds".into());
++                connection.take();
++            }
++            if model
++                .pending
++                .is_some_and(|p| p.1.elapsed() > REQUEST_TIMEOUT)
++                || (!model.connected && connection.is_some() && started.elapsed() > REQUEST_TIMEOUT)
++            {
++                model.disconnect("Response timed out. A sent command's outcome may be unknown; inspect status before retrying.".into());
++                connection.take();
++            }
++            terminal
++                .draw(|frame| draw(frame, &model, if local { "this PC" } else { target }))
++                .map_err(|e| e.to_string())?;
++            if !event::poll(Duration::from_millis(100)).map_err(|e| e.to_string())? {
++                continue;
++            }
++            let Event::Key(key) = event::read().map_err(|e| e.to_string())? else {
++                continue;
++            };
++            if key.kind != KeyEventKind::Press {
++                continue;
++            }
++            if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
++                || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
++            {
++                return Ok(());
++            }
++            match key.code {
++                KeyCode::Down => {
++                    model.selected = (model.selected + 1).min(model.round_len().saturating_sub(1))
++                }
++                KeyCode::Up => model.selected = model.selected.saturating_sub(1),
++                KeyCode::Char('r') if !model.connected => {
++                    connection.take();
++                    match Session::connect(target, channel, local)
++                        .and_then(|mut s| s.send(Command::Watch {}).map(|id| (s, id)))
++                    {
++                        Ok((session, id)) => {
++                            connection = Some(session);
++                            model = Model::connecting(id);
++                            started = Instant::now();
++                            last_activity = Instant::now();
++                        }
++                        Err(message) => model.disconnect(message),
++                    }
++                }
++                _ if model.ready() => {
++                    if let Some(command) = model.control(key.code) {
++                        match connection
++                            .as_mut()
++                            .ok_or("connection unavailable")
++                            .and_then(|s| {
++                                s.send(command)
++                                    .map_err(|_| "could not send control; reconnect")
++                            }) {
++                            Ok(id) => model.pending = Some((id, Instant::now())),
++                            Err(error) => model.disconnect(error.into()),
++                        }
++                    }
++                }
++                _ => (),
++            }
++        }
++    })();
++    ratatui::restore();
++    result
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use ratatui::{Terminal, backend::TestBackend};
++    use serde_json::json;
++
++    #[test]
++    fn disconnected_and_waiting_states_disable_controls_without_optimistic_playback() {
++        let mut model = Model::connecting(1);
++        assert!(!model.ready());
++        model.receive(Frame::Reply {
++            id: 1,
++            result: Ok(json!({})),
++        });
++        model.receive(Frame::Status {
++            status: json!({"phase":"playing", "round_pos":0, "round":[{"episode_id":"e1"}], "playback":{"paused":true,"time_pos":0,"core_idle":true}}),
++        });
++        assert!(model.ready());
++        assert_eq!(model.control(KeyCode::Char(' ')), Some(Command::Play {}));
++        model.pending = Some((2, Instant::now()));
++        assert!(!model.ready());
++        assert_eq!(model.status["playback"]["paused"], true);
++        model.disconnect("network lost".into());
++        assert!(!model.ready());
++    }
++
++    #[test]
++    fn terminal_renders_target_failures_and_survives_small_resizes() {
++        let mut model = Model::connecting(1);
++        model.disconnect("SSH refused".into());
++        for (width, height) in [(100, 24), (60, 15), (20, 5)] {
++            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
++            terminal.draw(|f| draw(f, &model, "upstairspc")).unwrap();
++            if width == 100 {
++                let rendered = format!("{:?}", terminal.backend().buffer());
++                assert!(rendered.contains("upstairspc"));
++                assert!(rendered.contains("SSH refused"));
++            }
++        }
++    }
++}
+diff --git a/desktop-rs/remote/tests/cli.rs b/desktop-rs/remote/tests/cli.rs
+new file mode 100644
+index 0000000..f1994c8
+--- /dev/null
++++ b/desktop-rs/remote/tests/cli.rs
+@@ -0,0 +1,180 @@
++use std::process::Command;
++use std::time::Duration;
++
++use serde_json::{Value, json};
++use tiny_http::{Response, Server};
++
++fn run(args: &[&str], replies: Vec<(&'static str, Value)>) -> std::process::Output {
++    let server = Server::http("127.0.0.1:0").unwrap();
++    let port = server.server_addr().to_ip().unwrap().port();
++    let worker = std::thread::spawn(move || {
++        for (path, value) in replies {
++            let request = server
++                .recv_timeout(Duration::from_secs(4))
++                .unwrap()
++                .expect("request");
++            assert_eq!(request.url(), path);
++            request
++                .respond(Response::from_string(value.to_string()))
++                .unwrap();
++        }
++    });
++    let result = Command::new(env!("CARGO_BIN_EXE_shows-remote"))
++        .env("SHOWS_CONTROL_PORT", port.to_string())
++        .arg("--local")
++        .arg("thispc")
++        .args(args)
++        .output()
++        .unwrap();
++    worker.join().unwrap();
++    result
++}
++
++fn identity() -> (&'static str, Value) {
++    (
++        "/remote/info",
++        json!({"application":"shows-desktop","protocol":1}),
++    )
++}
++
++#[test]
++fn local_agent_round_trip_prints_json_without_starting_a_player() {
++    let output = run(
++        &["status", "--json"],
++        vec![
++            identity(),
++            ("/status", json!({"phase":"playing","message":"Télévision"})),
++        ],
++    );
++    assert!(
++        output.status.success(),
++        "{}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
++    assert_eq!(status["message"], "Télévision");
++}
++
++#[test]
++fn rejected_control_exits_nonzero_and_surfaces_the_target_error() {
++    let output = run(
++        &["play"],
++        vec![
++            identity(),
++            (
++                "/remote/control",
++                json!({"ok":false,"message":"player unavailable"}),
++            ),
++        ],
++    );
++    assert!(!output.status.success());
++    assert!(String::from_utf8_lossy(&output.stderr).contains("player unavailable"));
++}
++
++#[test]
++fn ambiguous_show_selection_sends_no_play_request() {
++    let output = run(
++        &["play", "the"],
++        vec![
++            identity(),
++            (
++                "/status",
++                json!({"round":[
++        {"show_id":"a","show_name":"The Simpsons"}, {"show_id":"b","show_name":"The Daily Show"}]}),
++            ),
++        ],
++    );
++    assert!(!output.status.success());
++    assert!(String::from_utf8_lossy(&output.stderr).contains("several"));
++}
++
++#[test]
++fn scripts_get_a_clear_error_instead_of_entering_raw_terminal_mode() {
++    let output = Command::new(env!("CARGO_BIN_EXE_shows-remote"))
++        .output()
++        .unwrap();
++    assert!(!output.status.success());
++    assert!(String::from_utf8_lossy(&output.stderr).contains("needs a terminal"));
++}
++
++#[cfg(windows)]
++#[test]
++fn installed_windows_agent_inherits_protocol_pipes_through_the_remote_entry_point() {
++    use std::io::Write;
++    use std::os::windows::process::CommandExt;
++    use std::process::Stdio;
++    let fixture = tempfile::tempdir().unwrap();
++    let root = fixture.path().join("shows");
++    let version = root.join("versions").join("smoke");
++    std::fs::create_dir_all(&version).unwrap();
++    std::fs::copy(
++        env!("CARGO_BIN_EXE_shows-remote"),
++        version.join("shows-remote.exe"),
++    )
++    .unwrap();
++    std::fs::write(
++        root.join("launcher-state-stable.json"),
++        r#"{"current":"smoke"}"#,
++    )
++    .unwrap();
++    std::fs::create_dir(root.join("agents")).unwrap();
++    std::fs::write(
++        root.join("agents").join("stable.cmd"),
++        b"@\"%~dp0..\\versions\\smoke\\shows-remote.exe\" --agent\r\n",
++    )
++    .unwrap();
++    let server = Server::http("127.0.0.1:0").unwrap();
++    let port = server.server_addr().to_ip().unwrap().port();
++    let worker = std::thread::spawn(move || {
++        for value in [
++            identity().1,
++            json!({"phase":"playing","message":"Télévision"}),
++        ] {
++            server
++                .recv_timeout(Duration::from_secs(5))
++                .unwrap()
++                .expect("agent HTTP request")
++                .respond(Response::from_string(value.to_string()))
++                .unwrap();
++        }
++    });
++    let mut child = Command::new("cmd.exe")
++        .args(["/d", "/s", "/c"])
++        .raw_arg(format!(
++            "\"{}\"",
++            shows_remote::transport::remote_command("stable")
++        ))
++        .env("LOCALAPPDATA", fixture.path())
++        .env("SHOWS_CONTROL_PORT", port.to_string())
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::piped())
++        .spawn()
++        .unwrap();
++    child
++        .stdin
++        .take()
++        .unwrap()
++        .write_all(b"{\"id\":1,\"command\":{\"action\":\"status\"}}\n")
++        .unwrap();
++    let deadline = std::time::Instant::now() + Duration::from_secs(8);
++    while child.try_wait().unwrap().is_none() && std::time::Instant::now() < deadline {
++        std::thread::sleep(Duration::from_millis(20));
++    }
++    let timed_out = child.try_wait().unwrap().is_none();
++    if timed_out {
++        child.kill().unwrap();
++    }
++    let output = child.wait_with_output().unwrap();
++    assert!(
++        output.status.success() && !timed_out,
++        "timeout={timed_out}; stdout={}; stderr={}",
++        String::from_utf8_lossy(&output.stdout),
++        String::from_utf8_lossy(&output.stderr)
++    );
++    worker.join().unwrap();
++    let frame: shows_control::Frame = serde_json::from_slice(&output.stdout).unwrap();
++    assert!(
++        matches!(frame, shows_control::Frame::Reply { result: Ok(status), .. } if status["message"] == "Télévision")
++    );
++}
+diff --git a/docs/feature-contracts/desktop-distribution.md b/docs/feature-contracts/desktop-distribution.md
+index 3b01198..8c96506 100644
+--- a/docs/feature-contracts/desktop-distribution.md
++++ b/docs/feature-contracts/desktop-distribution.md
+@@ -8,7 +8,7 @@ without running an executable from the network share.
+ - **P1. Immutable versions.** A version is published once under
+   `shows-app/versions/<version>` and is never overwritten.
+ - **P2. Complete before visible.** The publisher stages the executable and
+-  libmpv runtime, records their SHA-256 hashes and lengths, then moves the whole
++  terminal companion and libmpv runtime, records their SHA-256 hashes and lengths, then moves the whole
+   bundle into `versions`. Only afterward does it replace the channel manifest.
+ - **P3. Explicit channels.** `stable` and `dev` have independent manifests.
+   Computers opt into one channel through their shortcut.
+@@ -33,3 +33,10 @@ without running an executable from the network share.
+   the previous version directory is not deleted during an update.
+ - **I6. Local execution.** The selected executable starts from its local version
+   directory so video startup does not depend on executing binaries over SMB.
++- **I7. Terminal companion.** Every new bundle includes `shows-remote.exe`.
++  `launch-shows.ps1 -App remote` attaches it to the caller's stdin/stdout/stderr,
++  forwards arguments and exit status, and never starts the desktop. The installer
++  copies the launcher locally and adds `%USERPROFILE%\bin` to user PATH
++  with a `shows-remote.cmd` entry point.
++  Version selection also writes a native `agents/<channel>.cmd` entry point
++  so SSH can start the installed agent with stdin/stdout preserved.
+diff --git a/docs/feature-contracts/desktop-status.md b/docs/feature-contracts/desktop-status.md
+index 5d4f0ea..d9f26cb 100644
+--- a/docs/feature-contracts/desktop-status.md
++++ b/docs/feature-contracts/desktop-status.md
+@@ -5,6 +5,10 @@ The desktop control server owns the frontend status contract exposed by
+ as `event: status` Server-Sent Events; the one-shot endpoint returns the same
+ shape.
+ 
++The listener is loopback-only at `127.0.0.1:45831` by default;
++`SHOWS_CONTROL_PORT` overrides the local port. The terminal companion consumes
++these same snapshots through SSH; see [remote-control.md](remote-control.md).
++
+ This contract is intentionally frontend-facing. Any field used by
+ `desktop-rs/frontend` belongs here before it becomes a stable UI dependency.
+ 
+diff --git a/docs/feature-contracts/remote-control.md b/docs/feature-contracts/remote-control.md
+new file mode 100644
+index 0000000..09ee08b
+--- /dev/null
++++ b/docs/feature-contracts/remote-control.md
+@@ -0,0 +1,64 @@
++# Terminal remote control
++
++`shows-remote` is a separate console executable shipped with the desktop. Its
++interactive UI and one-shot commands control an already running Shows instance.
++The companion never initializes libmpv, opens SQLite, starts a desktop, or owns a
++round. The target owns playback and all authoritative NAS transactions.
++
++## Transport and identity
++
++- **T1. HTTP stays local.** The desktop listens on `127.0.0.1:45831`.
++  `SHOWS_CONTROL_PORT` may select another nonzero port for isolated tests or a
++  configured installation; desktop and agent must agree. The native client
++  rejects non-loopback HTTP addresses and does not follow redirects.
++- **T2. Existing SSH access.** Windows OpenSSH uses batch authentication, strict
++  known-host verification, connect timeout and keepalives. Targets are computer
++  hostnames or SSH aliases, containing letters, digits, dots and hyphens, starting
++  with a letter or digit. Shows issues no credentials.
++- **T3. Commands are data.** The validated channel selects a fixed remote startup
++  native entry point. Commands travel as bounded JSON lines on SSH stdin, never
++  interpolated shell text. After verifying a version, the launcher writes
++  `agents/<channel>.cmd` beside `launcher-state-<channel>.json`, selecting that
++  version's executable. SSH starts it directly without a PowerShell pipeline
++  or NAS access, preserving protocol stdin/stdout and Unicode.
++- **T4. Identity precedes controls.** `GET /remote/info` must identify
++  `shows-desktop` and protocol 1. A missing, stopped, or different listener fails
++  explicitly. Every new connection checks identity.
++- **T5. Narrow native surface.** `POST /remote/control` accepts typed playback
++  commands, requires JSON, and rejects browser Origin headers. It exposes no
++  library import, filesystem browsing, or shell/window actions.
++
++## Playback and acknowledgement
++
++- **C1. Existing round semantics.** Skip, previous, defer and show navigation use
++  the overlay's runner. [round-and-advance.md](round-and-advance.md) invariants
++  I7, D1–D3, P1–P2 and M1–M3 remain unchanged. Name selection resolves uniquely
++  within the target's current round. Ambiguous or absent names issue no play.
++- **C2. Explicit play/pause.** They set a state, never toggle implicitly. The
++  target checks mpv's result and observed pause/volume values before success.
++  Seek reports mpv command acceptance; navigation reports the runner result.
++  Subsequent live status establishes which episode loaded. No loaded episode
++  means failure, never a successful no-op.
++- **C3. No automatic command replay.** Requests have a bounded response wait.
++  A lost acknowledgement means the outcome may be unknown; inspect status before
++  repeating a command, especially skip, defer, previous and relative seek.
++- **C4. Target-owned live state.** The interactive UI uses `/status/stream`, not
++  snapshot polling. Playback fields update only on target snapshots. Target
++  alerts, waits, request failures and disconnects remain visible.
++- **C5. Disconnect disables controls.** Initial replies and commands time out
++  after 12 seconds. SSH keepalives detect broken peers. No status or SSE heartbeat
++  activity for 65 seconds disconnects the UI; idle SSE comments arrive every 30
++  seconds. `r` explicitly reconnects with a fresh agent and replays no command.
++  Quitting tears down the owned SSH child and leaves TV playback running.
++
++## Distribution and evidence
++
++The executable belongs to the same immutable, hash-verified channel bundle as
++`shows-desktop.exe` and `libmpv-2.dll`; see
++[desktop-distribution.md](desktop-distribution.md). The existing installer adds
++a local launcher and `shows-remote` command to PATH.
++
++CI covers existing round/SQLite invariants, HTTP identity and rejection, bounded
++messages, SSE parsing, CLI-to-agent subprocesses, native desktop route failures,
++terminal render/state behavior and channel installation. Cross-computer checks
++use released executables and restore playback state after play/pause checks.
+diff --git a/docs/new-computer-setup.md b/docs/new-computer-setup.md
+index 656ae3c..f29acea 100644
+--- a/docs/new-computer-setup.md
++++ b/docs/new-computer-setup.md
+@@ -38,6 +38,10 @@ builds. The shortcut checks the channel manifest before every launch, verifies
+ the bundle hashes, installs it into a new versioned local directory, retains the
+ previous version for rollback, and starts the local executable.
+ 
++The installer also installs the `shows-remote` terminal command. After updating
++both PCs, `shows-remote upstairspc` controls the already running upstairs instance
++over SSH. See [Shows Remote](shows-remote.md).
++
+ ## Publish a build
+ 
+ Advance the stable channel to CI's latest release (or name one with
+diff --git a/docs/shows-remote.md b/docs/shows-remote.md
+new file mode 100644
+index 0000000..bf1a3b9
+--- /dev/null
++++ b/docs/shows-remote.md
+@@ -0,0 +1,55 @@
++# Shows Remote
++
++Control Shows on the other TV from a terminal. The target must already have
++Shows open; the remote never starts a local player.
++
++```powershell
++shows-remote upstairspc
++```
++
++Arrows select a show; Enter plays it. Space sets play/pause, `s` plays, `p` pauses,
++`n` skips **and marks watched**, `b` goes back, `d` defers without marking watched,
++left/right seek 10 seconds, and `+`/`-` change volume. `q` leaves Shows running;
++`r` reconnects after a disconnect.
++
++```powershell
++shows-remote upstairspc status
++shows-remote upstairspc queue
++shows-remote upstairspc play
++shows-remote upstairspc pause
++shows-remote upstairspc play "The Simpsons"
++shows-remote upstairspc seek -30
++shows-remote upstairspc volume 50
++shows-remote upstairspc status --json
++```
++
++The default target is `upstairspc`. `--local` controls this PC without SSH;
++`--channel dev` selects the target's installed dev channel. Failures exit nonzero
++and print to stderr. The interactive remote names the target, shows its alerts
++and disables controls while disconnected or waiting for a reply. A timed-out
++command may already have applied; inspect status before retrying.
++
++## Installation
++
++Publish the CI release using `scripts/publish-shows-channel.ps1 -Channel stable`
++and use the existing launcher to install it on both PCs. Run
++`scripts/install-shows-launcher.ps1` to install the terminal command. It adds
++`%USERPROFILE%\bin` to user PATH (already on PATH on the home PCs).
++SSH must already work with `ssh -o BatchMode=yes upstairspc hostname`, including
++known-host trust. Shows creates no SSH keys and exposes no HTTP listener on the
++LAN. The loopback port is 45831; leave `SHOWS_CONTROL_PORT` unset normally.
++
++Release target requests log to `%APPDATA%\shows\shows.log`. The remote stores no
++library, history, playback state or secrets.
++
++## Home-service checklist applicability
++
++- Tickets, source, CI and releases belong with Shows so both apps ship together.
++- Installation reuses the existing hash-verified Shows channel publisher.
++- SSH reuses existing PC access. No new hosted service, browser login, identity
++  issuer, secret store, DNS record, TLS listener or homepage URL is introduced.
++- No new durable business state needs backup; the NAS database stays authoritative.
++- The app is on demand. Connection state and exit status report unavailability;
++  an always-on down alert would flag a normally closed TV app as a fault.
++
++See the [remote-control contract](feature-contracts/remote-control.md).
+diff --git a/scripts/install-shows-launcher.ps1 b/scripts/install-shows-launcher.ps1
+index c67a8bc..8bd9f0c 100644
+--- a/scripts/install-shows-launcher.ps1
++++ b/scripts/install-shows-launcher.ps1
+@@ -9,12 +9,26 @@ $ErrorActionPreference = "Stop"
+ $launcher = Join-Path $NasRoot "launch-shows.ps1"
+ if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "Launcher not found: $launcher" }
+ 
++$installRoot = Join-Path $env:LOCALAPPDATA "shows"
++$bin = Join-Path $env:USERPROFILE "bin"
++New-Item -ItemType Directory -Force -Path $bin | Out-Null
++$localLauncher = Join-Path $installRoot "launch-shows.ps1"
++Copy-Item -LiteralPath $launcher -Destination $localLauncher -Force
++$remoteCommand = '@powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $localLauncher + '" -Channel ' + $Channel + ' -NasRoot "' + $NasRoot + '" -App remote %*'
++[IO.File]::WriteAllText((Join-Path $bin "shows-remote.cmd"), $remoteCommand + "`r`n", [Text.Encoding]::ASCII)
++$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
++if ($bin -notin ($userPath -split ';')) {
++  [Environment]::SetEnvironmentVariable("Path", ($bin + ';' + $userPath), "User")
++}
++if ($bin -notin ($env:Path -split ';')) { $env:Path = $bin + ';' + $env:Path }
++
+ $shell = New-Object -ComObject WScript.Shell
+ $shortcut = $shell.CreateShortcut($ShortcutPath)
+ $shortcut.TargetPath = (Get-Command powershell.exe).Source
+-$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$launcher`" -Channel $Channel -NasRoot `"$NasRoot`""
+-$shortcut.WorkingDirectory = $NasRoot
++$shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$localLauncher`" -Channel $Channel -NasRoot `"$NasRoot`""
++$shortcut.WorkingDirectory = $installRoot
+ $shortcut.IconLocation = "shell32.dll,137"
+ $shortcut.Save()
+ 
+ Write-Host "Installed $Channel Shows launcher at $ShortcutPath"
++Write-Host "Installed shows-remote terminal command at $bin"
+diff --git a/scripts/launch-shows.ps1 b/scripts/launch-shows.ps1
+index 27ed96a..e04be5d 100644
+--- a/scripts/launch-shows.ps1
++++ b/scripts/launch-shows.ps1
+@@ -1,10 +1,15 @@
++[CmdletBinding(PositionalBinding = $false)]
+ param(
+   [ValidateSet("stable", "dev")]
+   [string]$Channel = "stable",
+   [string]$NasRoot = "S:\shows-app",
+   [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "shows"),
+   [switch]$NoUpdate,
+-  [switch]$Wait
++  [switch]$Wait,
++  [ValidateSet("desktop", "remote")]
++  [string]$App = "desktop",
++  [Parameter(ValueFromRemainingArguments = $true)]
++  [string[]]$RemoteArgs
+ )
+ 
+ $ErrorActionPreference = "Stop"
+@@ -28,7 +33,7 @@ function Install-Version([object]$manifest) {
+   if ($manifest.channel -ne $Channel) { throw "Channel manifest is for $($manifest.channel), expected $Channel" }
+   if ($manifest.version -notmatch '^[A-Za-z0-9._-]+$') { throw "Unsafe version in manifest" }
+   $fileNames = @($manifest.files | ForEach-Object { $_.name })
+-  foreach ($required in @("shows-desktop.exe", "libmpv-2.dll")) {
++  foreach ($required in @("shows-desktop.exe", "shows-remote.exe", "libmpv-2.dll")) {
+     if ($required -notin $fileNames) { throw "Manifest is missing $required" }
+   }
+ 
+@@ -80,14 +85,31 @@ if (-not $NoUpdate) {
+     }
+   } catch {
+     if (-not $selectedVersion) { throw }
+-    Write-Warning "Update failed; starting installed version $selectedVersion. $($_.Exception.Message)"
++    $updateMessage = "Update failed; starting installed version $selectedVersion. $($_.Exception.Message)"
++    if ($App -eq "remote") { [Console]::Error.WriteLine($updateMessage) }
++    else { Write-Warning $updateMessage }
+   }
+ }
+ 
+ if (-not $selectedVersion) { throw "No installed shows version and updates are disabled or unavailable" }
++if ($selectedVersion -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid installed version' }
+ $selectedDir = Join-Path $versions $selectedVersion
+-$exe = Join-Path $selectedDir "shows-desktop.exe"
++$exe = Join-Path $selectedDir "shows-$App.exe"
+ if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Installed executable is missing: $exe" }
+ 
++$agents = Join-Path $InstallRoot 'agents'
++New-Item -ItemType Directory -Force -Path $agents | Out-Null
++$agentTemp = Join-Path $agents "$Channel.$([guid]::NewGuid().ToString('N')).tmp"
++$agentCommand = '@"%~dp0..\versions\' + $selectedVersion + '\shows-remote.exe" --agent' + "`r`n"
++[IO.File]::WriteAllText($agentTemp, $agentCommand, (New-Object Text.UTF8Encoding $false))
++Move-Item -Force -LiteralPath $agentTemp -Destination (Join-Path $agents "$Channel.cmd")
++
++if ($App -eq "remote") {
++  [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
++  $OutputEncoding = [Console]::OutputEncoding
++  & $exe @RemoteArgs
++  exit $LASTEXITCODE
++}
++
+ $process = Start-Process -FilePath $exe -WorkingDirectory $selectedDir -PassThru
+ if ($Wait) { $process.WaitForExit(); exit $process.ExitCode }
+diff --git a/scripts/publish-shows-channel.ps1 b/scripts/publish-shows-channel.ps1
+index f241ec7..b90c1f0 100644
+--- a/scripts/publish-shows-channel.ps1
++++ b/scripts/publish-shows-channel.ps1
+@@ -30,6 +30,7 @@ if ($Channel -eq "stable") {
+   if ($LASTEXITCODE -ne 0) { throw "Could not download release $Release" }
+   Expand-Archive -LiteralPath (Join-Path $download "shows-desktop-windows-amd64.zip") -DestinationPath (Join-Path $download "bundle")
+   $exe = Join-Path $download "bundle\shows-desktop.exe"
++  $remoteExe = Join-Path $download "bundle\shows-remote.exe"
+   $LibmpvPath = Join-Path $download "bundle\libmpv-2.dll"
+ } else {
+   if (-not $Version) {
+@@ -40,6 +41,7 @@ if ($Channel -eq "stable") {
+   $workspace = Join-Path $RepoRoot "desktop-rs"
+   $frontend = Join-Path $workspace "frontend"
+   $exe = Join-Path $workspace "target\release\shows-desktop.exe"
++  $remoteExe = Join-Path $workspace "target\release\shows-remote.exe"
+ }
+ if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid version: $Version" }
+ 
+@@ -52,7 +54,7 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
+   try {
+     $env:SHOWS_BUILD_SHA = $Version
+     $env:SHOWS_UPDATE_CHANNEL = $Channel
+-    cargo build --release -p shows-desktop
++    cargo build --release -p shows-desktop -p shows-remote
+     if ($LASTEXITCODE -ne 0) { throw "Desktop build failed" }
+   } finally {
+     Remove-Item Env:SHOWS_BUILD_SHA -ErrorAction SilentlyContinue
+@@ -61,7 +63,7 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
+   }
+ }
+ 
+-foreach ($required in @($exe, $LibmpvPath, $launcher, $installer)) {
++foreach ($required in @($exe, $remoteExe, $LibmpvPath, $launcher, $installer)) {
+   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing required file: $required" }
+ }
+ 
+@@ -77,10 +79,11 @@ New-Item -ItemType Directory -Path $stage | Out-Null
+ 
+ try {
+   Copy-Item -LiteralPath $exe -Destination (Join-Path $stage "shows-desktop.exe")
++  Copy-Item -LiteralPath $remoteExe -Destination (Join-Path $stage "shows-remote.exe")
+   Copy-Item -LiteralPath $LibmpvPath -Destination (Join-Path $stage "libmpv-2.dll")
+ 
+   $files = @()
+-  foreach ($name in @("shows-desktop.exe", "libmpv-2.dll")) {
++  foreach ($name in @("shows-desktop.exe", "shows-remote.exe", "libmpv-2.dll")) {
+     $path = Join-Path $stage $name
+     $files += [ordered]@{
+       name = $name
+diff --git a/scripts/test-remote-distribution.ps1 b/scripts/test-remote-distribution.ps1
+new file mode 100644
+index 0000000..2c75505
+--- /dev/null
++++ b/scripts/test-remote-distribution.ps1
+@@ -0,0 +1,41 @@
++param(
++  [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
++  [string]$RemoteExe = (Join-Path $PSScriptRoot '..\desktop-rs\target\release\shows-remote.exe')
++)
++
++$ErrorActionPreference = 'Stop'
++$tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
++$fixture = Join-Path $tempBase ('shows-remote-test-' + [guid]::NewGuid().ToString('N'))
++$release = Join-Path $fixture 'repo\desktop-rs\target\release'
++$nas = Join-Path $fixture 'nas'
++$install = Join-Path $fixture 'installed'
++New-Item -ItemType Directory -Path $release -Force | Out-Null
++try {
++  # The smoke test never starts the desktop or touches a real channel/database.
++  Copy-Item -LiteralPath $RemoteExe -Destination (Join-Path $release 'shows-remote.exe')
++  Copy-Item -LiteralPath $RemoteExe -Destination (Join-Path $release 'shows-desktop.exe')
++  $runtime = Join-Path $fixture 'libmpv-2.dll'
++  [IO.File]::WriteAllText($runtime, 'runtime fixture')
++  & (Join-Path $RepoRoot 'scripts\publish-shows-channel.ps1') -Channel dev -RepoRoot (Join-Path $fixture 'repo') -NasRoot $nas -LibmpvPath $runtime -Version smoke -SkipBuild
++  $manifest = Get-Content -Raw -LiteralPath (Join-Path $nas 'channels\dev.json') | ConvertFrom-Json
++  if (@($manifest.files).Count -ne 3) { throw 'The bundle must contain desktop, remote and runtime' }
++  $launcher = Join-Path $RepoRoot 'scripts\launch-shows.ps1'
++  $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $launcher -Channel dev -NasRoot $nas -InstallRoot $install -App remote --version 2>&1
++  if ($LASTEXITCODE -ne 0 -or "$output" -notmatch 'shows-remote 0\.1\.0') { throw "Terminal launcher did not forward --version: $output" }
++  $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $launcher -Channel dev -NasRoot $nas -InstallRoot $install -App remote --json 2>&1
++  if ($LASTEXITCODE -eq 0 -or "$output" -notmatch 'needs a terminal') { throw "Terminal launcher lost failure exit status or arguments: $output" }
++  $state = Get-Content -Raw -LiteralPath (Join-Path $install 'launcher-state-dev.json') | ConvertFrom-Json
++  if ($state.current -ne 'smoke') { throw 'Verified version was not selected' }
++  $agent = Get-Content -Raw -LiteralPath (Join-Path $install 'agents\dev.cmd')
++  if ($agent -notmatch 'versions\\smoke\\shows-remote.exe') { throw 'Native SSH entry point does not select the verified version' }
++  foreach ($file in $manifest.files) {
++    $installed = Join-Path $install ('versions\smoke\' + $file.name)
++    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash.ToLowerInvariant() -ne $file.sha256) { throw 'Installed hash differs from manifest' }
++  }
++  Write-Host 'Remote distribution smoke passed: complete manifest, verified install, argument forwarding and exit status'
++} finally {
++  $resolved = [IO.Path]::GetFullPath($fixture)
++  if (-not $resolved.StartsWith($tempBase, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $resolved) -notlike 'shows-remote-test-*') { throw 'Unsafe test cleanup path' }
++  Remove-Item -LiteralPath $resolved -Recurse -Force
++}
++$global:LASTEXITCODE = 0

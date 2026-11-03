@@ -1,0 +1,40 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 34d83f3..619daef 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -76,10 +76,10 @@ Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`.
+ 
+ ## New computer setup
+ 
+-Map the NAS share as `S:`:
++Map the NAS share as `S:` by hostname:
+ 
+ ```powershell
+-New-PSDrive -Name S -PSProvider FileSystem -Root "\\192.168.50.41\files" -Persist
++New-PSDrive -Name S -PSProvider FileSystem -Root "\\NelsonNAS\files" -Persist
+ ```
+ 
+ The library normally expects show roots under `S:\Group-Nelson`. See `docs/new-computer-setup.md` for launcher, channel publishing, database, and file-cache checks.
+diff --git a/docs/new-computer-setup.md b/docs/new-computer-setup.md
+index 94bd2da..656ae3c 100644
+--- a/docs/new-computer-setup.md
++++ b/docs/new-computer-setup.md
+@@ -2,12 +2,16 @@
+ 
+ ## NAS Mapping
+ 
+-Map the NAS file share as `S:`:
++Map the NAS file share as `S:` by hostname, never by IP:
+ 
+ ```powershell
+-New-PSDrive -Name S -PSProvider FileSystem -Root "\\192.168.50.41\files" -Persist
++New-PSDrive -Name S -PSProvider FileSystem -Root "\\NelsonNAS\files" -Persist
+ ```
+ 
++A mapping to a literal IP dies if the NAS's address ever moves: `net use`
++reports `S:` as `Unavailable`, and the app refuses to start because it cannot
++open `S:\shows.db`.
++
+ The library expects show roots under `S:\Group-Nelson` unless a show row points
+ elsewhere.
+ 

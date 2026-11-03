@@ -1,0 +1,241 @@
+[
+  {
+    "author": {
+      "date": "2026-11-03T16:58:13Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-11-03T16:58:13Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+    "message": "Add terminal Shows remote over existing SSH (SHOWS-1)",
+    "node_id": "C_kwDOS5KECdoAKGQ3ZjI0NmFiNTAxYjE4MGMyZTM4MGQ3MDNlMjAzNWY1ZmVkNmRjM2E",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/a06b1378e3f061aebdba0a76c8b3241e1247cd87",
+        "sha": "a06b1378e3f061aebdba0a76c8b3241e1247cd87",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/a06b1378e3f061aebdba0a76c8b3241e1247cd87"
+      }
+    ],
+    "sha": "d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+    "tree": {
+      "sha": "5587135b150edd2ba854013a44c16c3a45ba5c51",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/5587135b150edd2ba854013a44c16c3a45ba5c51"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-11-03T17:03:14Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-11-03T17:03:14Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+    "message": "Launch the installed agent with native protocol pipes",
+    "node_id": "C_kwDOS5KECdoAKDlkMzI2YjUzZDk2YjMxNDViMGUxZjFiYjhjZTNmYTcxNGYxZWM0NmU",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+        "sha": "d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/d7f246ab501b180c2e380d703e2035f5fed6dc3a"
+      }
+    ],
+    "sha": "9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+    "tree": {
+      "sha": "84839c0a30b656dfb843e55df27ce83fea45cf17",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/84839c0a30b656dfb843e55df27ce83fea45cf17"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-11-03T17:04:19Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-11-03T17:04:19Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/a591436def68343bf68e21267ac9fc94e959cc81",
+    "message": "Install the remote command on the existing home PC PATH",
+    "node_id": "C_kwDOS5KECdoAKGE1OTE0MzZkZWY2ODM0M2JmNjhlMjEyNjdhYzlmYzk0ZTk1OWNjODE",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+        "sha": "9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e"
+      }
+    ],
+    "sha": "a591436def68343bf68e21267ac9fc94e959cc81",
+    "tree": {
+      "sha": "a66511669114423bc56a45d279f3f7e673718f38",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/a66511669114423bc56a45d279f3f7e673718f38"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/a591436def68343bf68e21267ac9fc94e959cc81",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-11-03T17:06:19Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-11-03T17:06:19Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/cfb900e04aa4b943c1b8c9e4ae8736bb245ac8e5",
+    "message": "Keep remote JSON output separate from update diagnostics",
+    "node_id": "C_kwDOS5KECdoAKGNmYjkwMGUwNGFhNGI5NDNjMWI4YzllNGFlODczNmJiMjQ1YWM4ZTU",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/a591436def68343bf68e21267ac9fc94e959cc81",
+        "sha": "a591436def68343bf68e21267ac9fc94e959cc81",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/a591436def68343bf68e21267ac9fc94e959cc81"
+      }
+    ],
+    "sha": "cfb900e04aa4b943c1b8c9e4ae8736bb245ac8e5",
+    "tree": {
+      "sha": "dcc11b02acd4e0c0779afd884590625589a25e04",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/dcc11b02acd4e0c0779afd884590625589a25e04"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/cfb900e04aa4b943c1b8c9e4ae8736bb245ac8e5",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": "6dd88dc5d8ae75c36f39c648d02f662bc41e3e93",
+    "commit_url": "https://api.github.com/repos/nelsong6/shows/commits/6dd88dc5d8ae75c36f39c648d02f662bc41e3e93",
+    "created_at": "2026-11-03T17:12:05Z",
+    "event": "merged",
+    "id": 35045434790,
+    "node_id": "ME_lADOS5KECc8AAAABcMq8ec8AAAAIKN7lpg",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/35045434790"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": null,
+    "commit_url": null,
+    "created_at": "2026-11-03T17:12:05Z",
+    "event": "closed",
+    "id": 35045434955,
+    "intent": null,
+    "node_id": "CE_lADOS5KECc8AAAABcMq8ec8AAAAIKN7mSw",
+    "performed_via_github_app": null,
+    "state_reason": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/35045434955"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": null,
+    "commit_url": null,
+    "created_at": "2026-11-03T17:12:07Z",
+    "event": "head_ref_deleted",
+    "id": 35045438513,
+    "node_id": "HRDE_lADOS5KECc8AAAABcMq8ec8AAAAIKN70MQ",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/35045438513"
+  }
+]

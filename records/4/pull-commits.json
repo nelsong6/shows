@@ -1,0 +1,44 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/51658a3427b060b593f36c09b940b788ae3fcc3d/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-27T07:55:40Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-27T07:55:40Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "core: make comparable_path_key existence-independent (fix flaky Build Desktop)\n\nprune_unused_files records each round file's \"active\" key BEFORE the file is\nsynced, then recomputes the key while walking the cache AFTER it exists. The\nkey used path.canonicalize(), which only resolves once the file is on disk —\nand on Windows also expands 8.3 short names and junctions. So the before/after\nkeys diverged, the active file matched nothing in active_paths, and prune\ndeleted the file it had just synced. On the GitHub Windows runner the temp dir\ncarries an 8.3 short name, so runner::tests::prune_keeps_file_marked_active_\nbefore_it_exists failed there (but not on Linux), which is why Build Desktop\nhas been red on every commit while Test stayed green.\n\nFix: canonicalize only the longest EXISTING ancestor and re-append the\nremaining components lexically, so the key is identical whether or not the leaf\nexists yet. Add a deterministic, cross-platform regression test asserting the\nkey is stable across file creation (it fails on the old code on any OS).\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+      "tree": {
+        "sha": "6ad89756d47a60a675a529559e9e74bb0b720f49",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/6ad89756d47a60a675a529559e9e74bb0b720f49"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/51658a3427b060b593f36c09b940b788ae3fcc3d",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/51658a3427b060b593f36c09b940b788ae3fcc3d",
+    "node_id": "C_kwDOS5KECdoAKDUxNjU4YTM0MjdiMDYwYjU5M2YzNmMwOWI5NDBiNzg4YWUzZmNjM2Q",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/63ca823813ee2fea09b385319be420ceb13d5fce",
+        "sha": "63ca823813ee2fea09b385319be420ceb13d5fce",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/63ca823813ee2fea09b385319be420ceb13d5fce"
+      }
+    ],
+    "sha": "51658a3427b060b593f36c09b940b788ae3fcc3d",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/51658a3427b060b593f36c09b940b788ae3fcc3d"
+  }
+]

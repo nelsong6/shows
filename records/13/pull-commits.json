@@ -1,0 +1,44 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/e83df39547ea1821e373cf02c4f54595bcbbbb45/comments",
+    "commit": {
+      "author": {
+        "date": "2026-10-25T23:42:57Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-10-25T23:42:57Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Map the NAS by hostname in setup docs",
+      "tree": {
+        "sha": "8d26f7a88a31cbb98cedb1ea715bb90a308dfeb9",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/8d26f7a88a31cbb98cedb1ea715bb90a308dfeb9"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/e83df39547ea1821e373cf02c4f54595bcbbbb45",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/e83df39547ea1821e373cf02c4f54595bcbbbb45",
+    "node_id": "C_kwDOS5KECdoAKGU4M2RmMzk1NDdlYTE4MjFlMzczY2YwMmM0ZjU0NTk1YmNiYmJiNDU",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/a7d501bbe3234160ea4a8c74b9cca2ba448197eb",
+        "sha": "a7d501bbe3234160ea4a8c74b9cca2ba448197eb",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/a7d501bbe3234160ea4a8c74b9cca2ba448197eb"
+      }
+    ],
+    "sha": "e83df39547ea1821e373cf02c4f54595bcbbbb45",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/e83df39547ea1821e373cf02c4f54595bcbbbb45"
+  }
+]

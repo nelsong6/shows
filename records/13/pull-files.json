@@ -1,0 +1,26 @@
+[
+  {
+    "additions": 2,
+    "blob_url": "https://github.com/nelsong6/shows/blob/e83df39547ea1821e373cf02c4f54595bcbbbb45/AGENTS.md",
+    "changes": 4,
+    "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/AGENTS.md?ref=e83df39547ea1821e373cf02c4f54595bcbbbb45",
+    "deletions": 2,
+    "filename": "AGENTS.md",
+    "patch": "@@ -76,10 +76,10 @@ Debug runs log to stderr. Release builds append to `%APPDATA%\\shows\\shows.log`.\n \n ## New computer setup\n \n-Map the NAS share as `S:`:\n+Map the NAS share as `S:` by hostname:\n \n ```powershell\n-New-PSDrive -Name S -PSProvider FileSystem -Root \"\\\\192.168.50.41\\files\" -Persist\n+New-PSDrive -Name S -PSProvider FileSystem -Root \"\\\\NelsonNAS\\files\" -Persist\n ```\n \n The library normally expects show roots under `S:\\Group-Nelson`. See `docs/new-computer-setup.md` for launcher, channel publishing, database, and file-cache checks.",
+    "raw_url": "https://github.com/nelsong6/shows/raw/e83df39547ea1821e373cf02c4f54595bcbbbb45/AGENTS.md",
+    "sha": "619daef8a0d4286cdec18c3d0dcd5e40e4d1a9da",
+    "status": "modified"
+  },
+  {
+    "additions": 6,
+    "blob_url": "https://github.com/nelsong6/shows/blob/e83df39547ea1821e373cf02c4f54595bcbbbb45/docs%2Fnew-computer-setup.md",
+    "changes": 8,
+    "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/docs%2Fnew-computer-setup.md?ref=e83df39547ea1821e373cf02c4f54595bcbbbb45",
+    "deletions": 2,
+    "filename": "docs/new-computer-setup.md",
+    "patch": "@@ -2,12 +2,16 @@\n \n ## NAS Mapping\n \n-Map the NAS file share as `S:`:\n+Map the NAS file share as `S:` by hostname, never by IP:\n \n ```powershell\n-New-PSDrive -Name S -PSProvider FileSystem -Root \"\\\\192.168.50.41\\files\" -Persist\n+New-PSDrive -Name S -PSProvider FileSystem -Root \"\\\\NelsonNAS\\files\" -Persist\n ```\n \n+A mapping to a literal IP dies if the NAS's address ever moves: `net use`\n+reports `S:` as `Unavailable`, and the app refuses to start because it cannot\n+open `S:\\shows.db`.\n+\n The library expects show roots under `S:\\Group-Nelson` unless a show row points\n elsewhere.\n ",
+    "raw_url": "https://github.com/nelsong6/shows/raw/e83df39547ea1821e373cf02c4f54595bcbbbb45/docs%2Fnew-computer-setup.md",
+    "sha": "656ae3cbf8ef139e105dd050076f2b5da1c3dc59",
+    "status": "modified"
+  }
+]

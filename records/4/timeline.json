@@ -1,0 +1,164 @@
+[
+  {
+    "author": {
+      "date": "2026-06-27T07:55:40Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-27T07:55:40Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/51658a3427b060b593f36c09b940b788ae3fcc3d",
+    "message": "core: make comparable_path_key existence-independent (fix flaky Build Desktop)\n\nprune_unused_files records each round file's \"active\" key BEFORE the file is\nsynced, then recomputes the key while walking the cache AFTER it exists. The\nkey used path.canonicalize(), which only resolves once the file is on disk —\nand on Windows also expands 8.3 short names and junctions. So the before/after\nkeys diverged, the active file matched nothing in active_paths, and prune\ndeleted the file it had just synced. On the GitHub Windows runner the temp dir\ncarries an 8.3 short name, so runner::tests::prune_keeps_file_marked_active_\nbefore_it_exists failed there (but not on Linux), which is why Build Desktop\nhas been red on every commit while Test stayed green.\n\nFix: canonicalize only the longest EXISTING ancestor and re-append the\nremaining components lexically, so the key is identical whether or not the leaf\nexists yet. Add a deterministic, cross-platform regression test asserting the\nkey is stable across file creation (it fails on the old code on any OS).\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+    "node_id": "C_kwDOS5KECdoAKDUxNjU4YTM0MjdiMDYwYjU5M2YzNmMwOWI5NDBiNzg4YWUzZmNjM2Q",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/63ca823813ee2fea09b385319be420ceb13d5fce",
+        "sha": "63ca823813ee2fea09b385319be420ceb13d5fce",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/63ca823813ee2fea09b385319be420ceb13d5fce"
+      }
+    ],
+    "sha": "51658a3427b060b593f36c09b940b788ae3fcc3d",
+    "tree": {
+      "sha": "6ad89756d47a60a675a529559e9e74bb0b720f49",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/6ad89756d47a60a675a529559e9e74bb0b720f49"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/51658a3427b060b593f36c09b940b788ae3fcc3d",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": "0d9a983ba1ceddd52af87ec705aecd1e58074c92",
+    "commit_url": "https://api.github.com/repos/nelsong6/shows/commits/0d9a983ba1ceddd52af87ec705aecd1e58074c92",
+    "created_at": "2026-06-27T07:59:05Z",
+    "event": "merged",
+    "id": 27275246426,
+    "node_id": "ME_lADOS5KECc8AAAABG5A4Qs8AAAAGWbs7Wg",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/27275246426"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": null,
+    "commit_url": null,
+    "created_at": "2026-06-27T07:59:06Z",
+    "event": "closed",
+    "id": 27275246443,
+    "intent": null,
+    "node_id": "CE_lADOS5KECc8AAAABG5A4Qs8AAAAGWbs7aw",
+    "performed_via_github_app": null,
+    "state_reason": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/27275246443"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": "0dbdb01432654745d311aa72d350ec0037339990",
+    "commit_url": "https://api.github.com/repos/nelsong6/shows/commits/0dbdb01432654745d311aa72d350ec0037339990",
+    "created_at": "2026-06-27T17:25:16Z",
+    "event": "referenced",
+    "id": 27284566048,
+    "node_id": "REFE_lADOS5KECc8AAAABG5A4Qs8AAAAGWklwIA",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/27284566048"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": null,
+    "commit_url": null,
+    "created_at": "2026-07-10T21:16:00Z",
+    "event": "head_ref_deleted",
+    "id": 27834093583,
+    "node_id": "HRDE_lADOS5KECc8AAAABG5A4Qs8AAAAGewqQDw",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/27834093583"
+  }
+]

@@ -1,0 +1,490 @@
+[
+  {
+    "author": {
+      "date": "2026-06-26T22:49:40Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-26T22:49:40Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/d802a9dd7f4fb582911cec71d04585c52995fe7b",
+    "message": "desktop: occlusion standby + skip render while minimized\n\nStop driving the video swapchain when the window is not visible (per DXGI\nguidance) to cut churn across focus/occlusion transitions, while investigating\nthe alt-tab monitor re-sync on the VRR/DSC display.\n\n- render(): on Present -\u003e DXGI_STATUS_OCCLUDED, enter standby; while in standby\n  only poll with DXGI_PRESENT_TEST (no draw/present/commit), resume when visible.\n- WM_TIMER: skip render entirely while IsIconic (minimized).\n- WM_ACTIVATE + standby enter/leave logged — instrumentation to correlate focus\n  changes with the re-sync on the affected hardware.\n- State: add standby: Cell\u003cbool\u003e.\n\nPhase 2 (suppress idle presents) deferred: needs an mpv render-update signal the\ncompositor does not expose. Phase 3 (allow-tearing) dropped: not applicable to a\nDWM-composited CreateSwapChainForComposition swapchain.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+    "node_id": "C_kwDOS5KECdoAKGQ4MDJhOWRkN2Y0ZmI1ODI5MTFjZWM3MWQwNDU4NWM1Mjk5NWZlN2I",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/7a91b44cd3206732a32eb0600e7c33ec631afa32",
+        "sha": "7a91b44cd3206732a32eb0600e7c33ec631afa32",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/7a91b44cd3206732a32eb0600e7c33ec631afa32"
+      }
+    ],
+    "sha": "d802a9dd7f4fb582911cec71d04585c52995fe7b",
+    "tree": {
+      "sha": "278545a21645c93194af817602b2bd59337ee18b",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/278545a21645c93194af817602b2bd59337ee18b"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/d802a9dd7f4fb582911cec71d04585c52995fe7b",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-06-26T23:03:58Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-26T23:03:58Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/2189a91cec0a971957a037d4e4ea8a95a40c2209",
+    "message": "DIAGNOSTIC (do not merge): freeze presentation in render()\n\nAction 1 of the alt-tab monitor re-sync investigation. Gates Present/Commit\nbehind FREEZE_PRESENTATION=true so the render loop issues no presentation while\nthe build runs (on-screen frame frozen). Isolates whether the present loop\ndrives the flash: if the re-sync persists with zero presents, the present loop\nis not the cause and the transition is DWM/driver-level. Revert after observation.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+    "node_id": "C_kwDOS5KECdoAKDIxODlhOTFjZWMwYTk3MTk1N2EwMzdkNGU0ZWE4YTk1YTQwYzIyMDk",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/d802a9dd7f4fb582911cec71d04585c52995fe7b",
+        "sha": "d802a9dd7f4fb582911cec71d04585c52995fe7b",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/d802a9dd7f4fb582911cec71d04585c52995fe7b"
+      }
+    ],
+    "sha": "2189a91cec0a971957a037d4e4ea8a95a40c2209",
+    "tree": {
+      "sha": "c8a5ed38eb2728ba1e45b6f85cecbf076acfef54",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/c8a5ed38eb2728ba1e45b6f85cecbf076acfef54"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/2189a91cec0a971957a037d4e4ea8a95a40c2209",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-06-26T23:14:25Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-26T23:14:25Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+    "message": "desktop: gate presentation on focus (Action 2; supersedes freeze diagnostic)\n\nRevert the freeze-presentation diagnostic (a null result there was dubious: with\nno video there is no trigger). Instead present only while the window is focused;\nwhile defocused, render() issues no Present/Commit and the frame freezes until\nrefocus, with normal playback when focused.\n\nTests whether presenting through a focus change drives the alt-tab monitor\nre-sync, while keeping video playing so the triggering conditions still exist.\n\n- State: add focused: Cell\u003cbool\u003e (init true).\n- render(): early-return when not focused.\n- WM_ACTIVATE: set focused from activation state.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+    "node_id": "C_kwDOS5KECdoAKGMwMmU1NjQ0NDk3MTVjM2UyZjc4ZDBiNGQ0MDk2YWU1YjhiMDFhZjA",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/2189a91cec0a971957a037d4e4ea8a95a40c2209",
+        "sha": "2189a91cec0a971957a037d4e4ea8a95a40c2209",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/2189a91cec0a971957a037d4e4ea8a95a40c2209"
+      }
+    ],
+    "sha": "c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+    "tree": {
+      "sha": "a09841ab898786bad8332aea4a4d34c84a18997e",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/a09841ab898786bad8332aea4a4d34c84a18997e"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-06-26T23:22:44Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-26T23:22:44Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+    "message": "desktop: revert focus-gating; restore standby-only presentation\n\nFocus-gating (c02e564) did not resolve the alt-tab monitor re-sync — the flash\nwas observed with no presents during defocus — and it freezes defocused video,\nwhich is undesirable to ship. Restore the standby-only render loop (the spec-\ngrounded occlusion handling) plus the WM_ACTIVATE focus-transition logging.\n\nDetermination: the re-sync is DWM's focus-driven switch of the window swapchain\nbetween Composed (unfocused) and Independent-Flip/MPO direct-scanout (focused),\nwhich re-trains the VRR/DSC link. DWM owns that decision; the composition-\nswapchain API exposes no supported \"always composed\" control. Documented\nmitigations are system-side (DWM MPO disable / NVCP G-Sync fullscreen-only) and\nare out of scope. Not fixable in-app without a large, unverifiable rearchitecture\noff the DWM-composited flip-swapchain model.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+    "node_id": "C_kwDOS5KECdoAKDY1ZjlkNDFmMWQ1MDU0Mjk2NDFjZDFiOWVlZWRmNTNjMjZkMGUzYWY",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+        "sha": "c02e564449715c3e2f78d0b4d4096ae5b8b01af0",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/c02e564449715c3e2f78d0b4d4096ae5b8b01af0"
+      }
+    ],
+    "sha": "65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+    "tree": {
+      "sha": "e929c16a9d82f40bc52df58aa85b04e5db367fde",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/e929c16a9d82f40bc52df58aa85b04e5db367fde"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-06-27T06:33:38Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-27T06:33:38Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+    "message": "desktop: force video plane to Composed via sub-unity opacity (flash candidate)\n\nApply a DComp opacity effect (0.99) to the video visual so DWM must\nalpha-blend it, making the swapchain ineligible for the independent-flip /\nMPO scanout path. PresentMon recorded the video swapchain churning between\n\"Composed: Flip\" and \"Hardware Composed: Independent Flip\" across focus\nedges; that present-mode promotion/demotion is the candidate trigger for the\nVRR+DSC display-link re-train (\"flash\") on alt-tab. Pinning the plane to\nComposed removes the churn.\n\nCandidate fix under objective grading (PresentMon must show zero Independent\nFlip frames even when focused). 1% transparency is a test artifact to be\nrefined to a no-op filter effect if the mechanism is confirmed.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+    "node_id": "C_kwDOS5KECdoAKGFmOGEzOTVkZDg1YjFiMjFmN2E4YTY3MTk2YTYxMmE4MWNhYTY2YmI",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+        "sha": "65f9d41f1d505429641cd1b9eeedf53c26d0e3af",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/65f9d41f1d505429641cd1b9eeedf53c26d0e3af"
+      }
+    ],
+    "sha": "af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+    "tree": {
+      "sha": "05b2ded245ab9e5ab88d22b75d48629831a7f227",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/05b2ded245ab9e5ab88d22b75d48629831a7f227"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-06-27T06:56:01Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-27T06:56:01Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/a56dd6ce82eb289b631bb7a47b3dec64bf939cc4",
+    "message": "docs: record force-composed video-plane decision (ADR-0002 + shell contract)\n\nDocument the alt-tab monitor flash root cause (DWM promoting the video\nswapchain to independent-flip/MPO on focus edges, re-training the DSC/VRR\nlink) and the fix (sub-unity opacity pins the plane to DWM composition).\nCaptures the SDR coupling caveat (forcing composition defeats HDR\npassthrough) and the PresentMon grading method.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+    "node_id": "C_kwDOS5KECdoAKGE1NmRkNmNlODJlYjI4OWI2MzFiYjdhNDdiM2RlYzY0YmY5MzljYzQ",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+        "sha": "af8a395dd85b1b21f7a8a67196a612a81caa66bb",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/af8a395dd85b1b21f7a8a67196a612a81caa66bb"
+      }
+    ],
+    "sha": "a56dd6ce82eb289b631bb7a47b3dec64bf939cc4",
+    "tree": {
+      "sha": "927aaef78f25affd958d372e837b8af8d65d4c17",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/927aaef78f25affd958d372e837b8af8d65d4c17"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/a56dd6ce82eb289b631bb7a47b3dec64bf939cc4",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": "6bc91e88d5c87772561932bcb0d769d70318e208",
+    "commit_url": "https://api.github.com/repos/nelsong6/shows/commits/6bc91e88d5c87772561932bcb0d769d70318e208",
+    "created_at": "2026-06-27T06:58:58Z",
+    "event": "merged",
+    "id": 27274154380,
+    "node_id": "ME_lADOS5KECc8AAAABG40YGs8AAAAGWaqRjA",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/27274154380"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": null,
+    "commit_url": null,
+    "created_at": "2026-06-27T06:58:59Z",
+    "event": "closed",
+    "id": 27274154390,
+    "intent": null,
+    "node_id": "CE_lADOS5KECc8AAAABG40YGs8AAAAGWaqRlg",
+    "performed_via_github_app": null,
+    "state_reason": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/27274154390"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "created_at": "2026-06-27T08:56:26Z",
+    "event": "cross-referenced",
+    "source": {
+      "issue": {
+        "active_lock_reason": null,
+        "assignee": null,
+        "assignees": [],
+        "author_association": "OWNER",
+        "body": "## Why\n\nThe force-composed opacity (ADR-0002, merged in #2) turned out to be wrong and harmful:\n- **Visible regression:** 0.99 opacity over the transparent host window let ~1% of the desktop bleed through the video.\n- **Doesn't fix the bug:** the flash occurs when shows is **pinned**, where the video is *already* stably `Composed: Flip` yet still flashes — so pinning its own plane changes nothing. The earlier \"confirmed\" capture was unpinned (the titlebar offset, not the opacity, made it Composed). The flash is uptime-correlated and reproduces with no game present.\n\n## Changes\n- **Revert** the DComp opacity effect on the video visual — video is opaque again (ADR-0003 supersedes ADR-0002; shell-contract note dropped).\n- **Add observability** for the ongoing investigation (to `%APPDATA%\\shows\\shows.log`, prefix `OBS `): ~1Hz heartbeat (foreground window class + on_top/fullscreen/standby), WM_ACTIVATE/WM_ACTIVATEAPP focus edges, WM_DISPLAYCHANGE, and a global **Ctrl+Alt+F** flash marker. Pairs with continuous system-wide PresentMon + a resource monitor.\n\n## Status\nThe flash is **not yet fixed** — this stops chasing a refuted theory and instruments the real one. Research finding: a DP/DSC link re-train isn't directly observable from user space, so the rig fingerprints the OS event that accompanies it and correlates on QPC.\n\nSquash-merge recommended (history still contains the old diagnostic/revert commits).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)",
+        "closed_at": "2026-06-27T17:25:15Z",
+        "comments": 0,
+        "comments_url": "https://api.github.com/repos/nelsong6/shows/issues/5/comments",
+        "created_at": "2026-06-27T08:56:25Z",
+        "draft": false,
+        "events_url": "https://api.github.com/repos/nelsong6/shows/issues/5/events",
+        "html_url": "https://github.com/nelsong6/shows/pull/5",
+        "id": 4757616081,
+        "labels": [],
+        "labels_url": "https://api.github.com/repos/nelsong6/shows/issues/5/labels{/name}",
+        "locked": false,
+        "milestone": null,
+        "node_id": "PR_kwDOS5KECc7rQuU_",
+        "number": 5,
+        "performed_via_github_app": null,
+        "pull_request": {
+          "diff_url": "https://github.com/nelsong6/shows/pull/5.diff",
+          "html_url": "https://github.com/nelsong6/shows/pull/5",
+          "merged_at": "2026-06-27T17:25:15Z",
+          "patch_url": "https://github.com/nelsong6/shows/pull/5.patch",
+          "url": "https://api.github.com/repos/nelsong6/shows/pulls/5"
+        },
+        "reactions": {
+          "+1": 0,
+          "-1": 0,
+          "confused": 0,
+          "eyes": 0,
+          "heart": 0,
+          "hooray": 0,
+          "laugh": 0,
+          "rocket": 0,
+          "total_count": 0,
+          "url": "https://api.github.com/repos/nelsong6/shows/issues/5/reactions"
+        },
+        "repository": {
+          "allow_forking": true,
+          "archive_url": "https://api.github.com/repos/nelsong6/shows/{archive_format}{/ref}",
+          "archived": false,
+          "assignees_url": "https://api.github.com/repos/nelsong6/shows/assignees{/user}",
+          "blobs_url": "https://api.github.com/repos/nelsong6/shows/git/blobs{/sha}",
+          "branches_url": "https://api.github.com/repos/nelsong6/shows/branches{/branch}",
+          "clone_url": "https://github.com/nelsong6/shows.git",
+          "collaborators_url": "https://api.github.com/repos/nelsong6/shows/collaborators{/collaborator}",
+          "comments_url": "https://api.github.com/repos/nelsong6/shows/comments{/number}",
+          "commits_url": "https://api.github.com/repos/nelsong6/shows/commits{/sha}",
+          "compare_url": "https://api.github.com/repos/nelsong6/shows/compare/{base}...{head}",
+          "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/{+path}",
+          "contributors_url": "https://api.github.com/repos/nelsong6/shows/contributors",
+          "created_at": "2026-06-13T00:28:48Z",
+          "default_branch": "main",
+          "deployments_url": "https://api.github.com/repos/nelsong6/shows/deployments",
+          "description": "shows",
+          "disabled": false,
+          "downloads_url": "https://api.github.com/repos/nelsong6/shows/downloads",
+          "events_url": "https://api.github.com/repos/nelsong6/shows/events",
+          "fork": false,
+          "forks": 0,
+          "forks_count": 0,
+          "forks_url": "https://api.github.com/repos/nelsong6/shows/forks",
+          "full_name": "nelsong6/shows",
+          "git_commits_url": "https://api.github.com/repos/nelsong6/shows/git/commits{/sha}",
+          "git_refs_url": "https://api.github.com/repos/nelsong6/shows/git/refs{/sha}",
+          "git_tags_url": "https://api.github.com/repos/nelsong6/shows/git/tags{/sha}",
+          "git_url": "git://github.com/nelsong6/shows.git",
+          "has_discussions": false,
+          "has_downloads": false,
+          "has_issues": true,
+          "has_pages": false,
+          "has_projects": true,
+          "has_pull_requests": true,
+          "has_wiki": true,
+          "homepage": null,
+          "hooks_url": "https://api.github.com/repos/nelsong6/shows/hooks",
+          "html_url": "https://github.com/nelsong6/shows",
+          "id": 1267893257,
+          "is_template": false,
+          "issue_comment_url": "https://api.github.com/repos/nelsong6/shows/issues/comments{/number}",
+          "issue_events_url": "https://api.github.com/repos/nelsong6/shows/issues/events{/number}",
+          "issues_url": "https://api.github.com/repos/nelsong6/shows/issues{/number}",
+          "keys_url": "https://api.github.com/repos/nelsong6/shows/keys{/key_id}",
+          "labels_url": "https://api.github.com/repos/nelsong6/shows/labels{/name}",
+          "language": "Rust",
+          "languages_url": "https://api.github.com/repos/nelsong6/shows/languages",
+          "license": null,
+          "merges_url": "https://api.github.com/repos/nelsong6/shows/merges",
+          "milestones_url": "https://api.github.com/repos/nelsong6/shows/milestones{/number}",
+          "mirror_url": null,
+          "name": "shows",
+          "node_id": "R_kgDOS5KECQ",
+          "notifications_url": "https://api.github.com/repos/nelsong6/shows/notifications{?since,all,participating}",
+          "open_issues": 0,
+          "open_issues_count": 0,
+          "owner": {
+            "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+            "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+            "followers_url": "https://api.github.com/users/nelsong6/followers",
+            "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+            "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+            "gravatar_id": "",
+            "html_url": "https://github.com/nelsong6",
+            "id": 18473267,
+            "login": "nelsong6",
+            "node_id": "MDQ6VXNlcjE4NDczMjY3",
+            "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+            "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+            "repos_url": "https://api.github.com/users/nelsong6/repos",
+            "site_admin": false,
+            "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+            "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+            "type": "User",
+            "url": "https://api.github.com/users/nelsong6",
+            "user_view_type": "public"
+          },
+          "permissions": {
+            "admin": true,
+            "maintain": true,
+            "pull": true,
+            "push": true,
+            "triage": true
+          },
+          "private": false,
+          "pull_request_creation_policy": "all",
+          "pulls_url": "https://api.github.com/repos/nelsong6/shows/pulls{/number}",
+          "pushed_at": "2026-11-03T18:50:14Z",
+          "releases_url": "https://api.github.com/repos/nelsong6/shows/releases{/id}",
+          "size": 1448,
+          "ssh_url": "git@github.com:nelsong6/shows.git",
+          "stargazers_count": 0,
+          "stargazers_url": "https://api.github.com/repos/nelsong6/shows/stargazers",
+          "statuses_url": "https://api.github.com/repos/nelsong6/shows/statuses/{sha}",
+          "subscribers_url": "https://api.github.com/repos/nelsong6/shows/subscribers",
+          "subscription_url": "https://api.github.com/repos/nelsong6/shows/subscription",
+          "svn_url": "https://github.com/nelsong6/shows",
+          "tags_url": "https://api.github.com/repos/nelsong6/shows/tags",
+          "teams_url": "https://api.github.com/repos/nelsong6/shows/teams",
+          "topics": [],
+          "trees_url": "https://api.github.com/repos/nelsong6/shows/git/trees{/sha}",
+          "updated_at": "2026-11-03T18:50:19Z",
+          "url": "https://api.github.com/repos/nelsong6/shows",
+          "visibility": "public",
+          "watchers": 0,
+          "watchers_count": 0,
+          "web_commit_signoff_required": false
+        },
+        "repository_url": "https://api.github.com/repos/nelsong6/shows",
+        "state": "closed",
+        "state_reason": null,
+        "timeline_url": "https://api.github.com/repos/nelsong6/shows/issues/5/timeline",
+        "title": "desktop: revert force-composed opacity (ADR-0003) + add flash observability",
+        "updated_at": "2026-07-10T21:16:00Z",
+        "url": "https://api.github.com/repos/nelsong6/shows/issues/5",
+        "user": {
+          "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+          "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+          "followers_url": "https://api.github.com/users/nelsong6/followers",
+          "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+          "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+          "gravatar_id": "",
+          "html_url": "https://github.com/nelsong6",
+          "id": 18473267,
+          "login": "nelsong6",
+          "node_id": "MDQ6VXNlcjE4NDczMjY3",
+          "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+          "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+          "repos_url": "https://api.github.com/users/nelsong6/repos",
+          "site_admin": false,
+          "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+          "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+          "type": "User",
+          "url": "https://api.github.com/users/nelsong6",
+          "user_view_type": "public"
+        }
+      },
+      "type": "issue"
+    },
+    "updated_at": "2026-06-27T08:56:26Z"
+  }
+]

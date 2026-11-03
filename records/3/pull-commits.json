@@ -1,0 +1,133 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/77d6a6cba14101a0a28c45021bd932b94b86f832/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-27T06:56:57Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-27T06:56:57Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "desktop: fix pin desync, fullscreen/maximize pin corruption, drag dead-ends\n\nPlain pin/unpin \"didn't stay toggled\" and the window could lose its only\ndrag handle. Root cause: pin state lived in three stores that could drift\nand never re-sync — window_on_top is echoed only on change, unlike the\nheartbeat-backed pause/volume controls the pattern was copied from.\n\nFrontend (App.tsx):\n- One optimistic value (`pinned`/`onTopRef`) now drives BOTH the button\n  highlight and the next-command direction, so the button responds\n  instantly instead of waiting a status round-trip (the lag is what made\n  it feel like the toggle \"didn't take\").\n- Roll the optimistic value back to host truth when a /stay-on-top POST\n  fails (and surface a toast), so a lost command can't strand the toggle\n  direction against the idempotent host.\n- Gate the pin-mode surface drag on the host-confirmed window_on_top\n  (hostOnTopRef) — the same truth the host's nc_hit uses — so the window\n  always has exactly one drag handle, never zero.\n- Auto-hide gate uses optimistic displayPaused (no flash on Space).\n\nHost (compositor.rs):\n- Fullscreen exit re-applies HWND_TOPMOST from the live is_on_top, so a\n  pin done while fullscreen no longer leaves the titlebar gone forever.\n- Pin entry clears WS_MAXIMIZE (SW_RESTORE) before the aspect snap, so\n  maximized-\u003epin keeps working resize borders.\n- WM_GETMINMAXINFO floors the window above its own chrome width.\n- After a pin-mode modal move loop, nudge the overlay so the control bar\n  (the only mouse unpin affordance in pin mode) reveals.\n- Persist the pre-pin windowed rect, not the aspect-snapped pin rect.\n\nDocs: add the \"Pin toggle: one click, one command\" contract section that\ndesktop-shell.md already linked to; refresh ADR-0001's outstanding note.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+      "tree": {
+        "sha": "13388150cbf4220da9a10b06029574da9e8ac2ed",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/13388150cbf4220da9a10b06029574da9e8ac2ed"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/77d6a6cba14101a0a28c45021bd932b94b86f832",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/77d6a6cba14101a0a28c45021bd932b94b86f832",
+    "node_id": "C_kwDOS5KECdoAKDc3ZDZhNmNiYTE0MTAxYTBhMjhjNDUwMjFiZDkzMmI5NGI4NmY4MzI",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/7a91b44cd3206732a32eb0600e7c33ec631afa32",
+        "sha": "7a91b44cd3206732a32eb0600e7c33ec631afa32",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/7a91b44cd3206732a32eb0600e7c33ec631afa32"
+      }
+    ],
+    "sha": "77d6a6cba14101a0a28c45021bd932b94b86f832",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/77d6a6cba14101a0a28c45021bd932b94b86f832"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/7c8bf6148824473453e345fc1f278a224a6de10b/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-27T07:32:07Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-27T07:32:07Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "desktop: flush SSE status frames so the last change before idle is delivered\n\nThe titlebar never returned after unpinning while the video was paused. The\nroot cause was in the status stream, not the pin logic: tiny_http buffers the\nresponse in a 1024-byte BufWriter and never flushes a streaming body, so a\nsub-1 KiB status frame sits unsent until enough following bytes overflow the\nbuffer. With a paused video no further frames follow, so the unpin's\nwindow_on_top=false never reached the overlay — it stayed \"pinned\" (titlebar\nhidden, video-surface drag armed) even though the host had already unpinned.\nThis is pre-existing and is why the earlier frontend work couldn't cure it.\n\nFix: when the status stream would idle after delivering a frame, emit a \u003e1 KiB\nSSE comment (clients ignore ':'-prefixed lines) so the BufWriter overflows and\npushes that frame to the socket at once. Verified with a live SSE capture: the\nunpin's false now arrives ~150ms after the POST instead of never; unit test\nlocks the idle-flush behavior.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+      "tree": {
+        "sha": "1ec0c0ae9627279065f37ba9124d7fd5b533395c",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/1ec0c0ae9627279065f37ba9124d7fd5b533395c"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/7c8bf6148824473453e345fc1f278a224a6de10b",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/7c8bf6148824473453e345fc1f278a224a6de10b",
+    "node_id": "C_kwDOS5KECdoAKDdjOGJmNjE0ODgyNDQ3MzQ1M2UzNDVmYzFmMjc4YTIyNGE2ZGUxMGI",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/77d6a6cba14101a0a28c45021bd932b94b86f832",
+        "sha": "77d6a6cba14101a0a28c45021bd932b94b86f832",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/77d6a6cba14101a0a28c45021bd932b94b86f832"
+      }
+    ],
+    "sha": "7c8bf6148824473453e345fc1f278a224a6de10b",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/7c8bf6148824473453e345fc1f278a224a6de10b"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/4feaa91ccbdde998aa05beeeaf90b9fa42668f0a/comments",
+    "commit": {
+      "author": {
+        "date": "2026-06-27T07:43:09Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-06-27T07:43:09Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Merge remote-tracking branch 'origin/main' into claude/eloquent-wescoff-272aa9\n\n# Conflicts:\n#\tdesktop-rs/desktop/src/compositor.rs",
+      "tree": {
+        "sha": "664931cb4391a4afd2a6906853f91b86152b635d",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/664931cb4391a4afd2a6906853f91b86152b635d"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/4feaa91ccbdde998aa05beeeaf90b9fa42668f0a",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/4feaa91ccbdde998aa05beeeaf90b9fa42668f0a",
+    "node_id": "C_kwDOS5KECdoAKDRmZWFhOTFjY2JkZGU5OThhYTA1YmVlZWFmOTBiOWZhNDI2NjhmMGE",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/7c8bf6148824473453e345fc1f278a224a6de10b",
+        "sha": "7c8bf6148824473453e345fc1f278a224a6de10b",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/7c8bf6148824473453e345fc1f278a224a6de10b"
+      },
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/6bc91e88d5c87772561932bcb0d769d70318e208",
+        "sha": "6bc91e88d5c87772561932bcb0d769d70318e208",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/6bc91e88d5c87772561932bcb0d769d70318e208"
+      }
+    ],
+    "sha": "4feaa91ccbdde998aa05beeeaf90b9fa42668f0a",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/4feaa91ccbdde998aa05beeeaf90b9fa42668f0a"
+  }
+]

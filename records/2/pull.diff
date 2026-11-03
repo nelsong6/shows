@@ -1,0 +1,221 @@
+diff --git a/desktop-rs/desktop/src/compositor.rs b/desktop-rs/desktop/src/compositor.rs
+index f0a470f..c36fd84 100644
+--- a/desktop-rs/desktop/src/compositor.rs
++++ b/desktop-rs/desktop/src/compositor.rs
+@@ -6,7 +6,7 @@
+ //! Runs on the main/UI thread (WebView2 + the message loop live here); the
+ //! runner and control server run on background threads.
+ 
+-use std::cell::RefCell;
++use std::cell::{Cell, RefCell};
+ use std::path::PathBuf;
+ use std::sync::Arc;
+ use std::sync::mpsc;
+@@ -363,6 +363,12 @@ struct State {
+     saved_style: isize,
+     saved_exstyle: isize,
+     saved_rect: RECT,
++    // Occlusion standby. Set when `Present` reports `DXGI_STATUS_OCCLUDED`
++    // (window fully covered), cleared when a `DXGI_PRESENT_TEST` poll reports it
++    // visible again. While set, the frame timer only polls — no render, present,
++    // or commit — so the GPU video path is not driven while nothing is on screen
++    // (DXGI best practice; reduces churn across focus/occlusion transitions).
++    standby: Cell<bool>,
+ }
+ 
+ thread_local! {
+@@ -430,9 +436,18 @@ impl Compositor {
+         let bottom = unsafe { dcomp.CreateVisual()? };
+         let web = unsafe { dcomp.CreateVisual()? };
+         let sc_unknown: IUnknown = swapchain.cast()?;
++        // Force-composed candidate (flash investigation): a sub-unity opacity effect
++        // on the video visual makes DWM alpha-blend it, so the swapchain is ineligible
++        // for the independent-flip / MPO scanout path. This pins the present mode to
++        // "Composed: Flip" instead of letting DWM promote/demote between Composed and
++        // "Hardware Composed: Independent Flip" across focus edges — the present-mode
++        // churn PresentMon recorded as coincident with the monitor re-sync.
++        let video_fx = unsafe { dcomp.CreateEffectGroup()? };
+         unsafe {
++            video_fx.SetOpacity2(0.99)?;
+             bottom.SetContent(&sc_unknown)?;
+             bottom.SetOffsetY2(video_top as f32)?;
++            bottom.SetEffect(&video_fx)?;
+             root.AddVisual(&bottom, false, None::<&IDCompositionVisual>)?;
+             root.AddVisual(&web, true, &bottom)?; // overlay in front of the video
+             target.SetRoot(&root)?;
+@@ -554,6 +569,7 @@ impl Compositor {
+                 saved_style: 0,
+                 saved_exstyle: 0,
+                 saved_rect: RECT::default(),
++                standby: Cell::new(false),
+             });
+         });
+ 
+@@ -699,11 +715,28 @@ fn is_cursor_in_window(hwnd: HWND) -> bool {
+ 
+ fn render(s: &State) {
+     unsafe {
++        // Occlusion standby: while the window is fully covered, only poll for
++        // visibility — no draw, present, or commit. `DXGI_PRESENT_TEST` checks
++        // occlusion without presenting; any non-occluded result means the window
++        // is visible again, so resume.
++        if s.standby.get() {
++            if s.swapchain.Present(0, DXGI_PRESENT_TEST) != DXGI_STATUS_OCCLUDED {
++                s.standby.set(false);
++                log::info!("render: visible again — leaving occlusion standby");
++            }
++            return;
++        }
++
+         s.gl.render(); // mpv OpenGL render -> the shared D3D texture
+         if let Ok(backbuffer) = s.swapchain.GetBuffer::<ID3D11Texture2D>(0) {
+             s.context.CopyResource(&backbuffer, s.gl.texture());
+         }
+-        let _ = s.swapchain.Present(1, DXGI_PRESENT(0));
++        // `Present` returns DXGI_STATUS_OCCLUDED (a success HRESULT) when the
++        // window is fully covered and nothing was shown.
++        if s.swapchain.Present(1, DXGI_PRESENT(0)) == DXGI_STATUS_OCCLUDED {
++            s.standby.set(true);
++            log::info!("render: occluded — entering standby");
++        }
+         // WebView2's visual-hosting output appears only after a device commit.
+         let _ = s.dcomp.Commit();
+     }
+@@ -806,7 +839,18 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                 );
+                 LRESULT(code as isize)
+             }
++            WM_ACTIVATE => {
++                // Instrumentation: log focus transitions to correlate with the
++                // monitor re-sync. Low word == WA_INACTIVE(0) when losing activation.
++                log::info!("window activate: active={}", (w.0 & 0xFFFF) != 0);
++                DefWindowProcW(hwnd, msg, w, l)
++            }
+             WM_TIMER => {
++                // Minimized: nothing is on screen — skip render/present entirely
++                // rather than driving the swapchain into a hidden window.
++                if IsIconic(hwnd).as_bool() {
++                    return LRESULT(0);
++                }
+                 STATE.with(|s| {
+                     if let Some(state) = s.borrow().as_ref() {
+                         render(state);
+diff --git a/docs/adr/0002-force-composed-video-plane.md b/docs/adr/0002-force-composed-video-plane.md
+new file mode 100644
+index 0000000..02f6898
+--- /dev/null
++++ b/docs/adr/0002-force-composed-video-plane.md
+@@ -0,0 +1,95 @@
++# ADR-0002: Force the video plane to DWM composition to stop the focus-change display re-sync
++
++## Status
++
++Accepted — 2026-06-26. Empirically validated at the present-mode layer (see
++Decision); end-to-end mechanism confidence ~0.65, with long-run real-use
++confirmation ongoing because the symptom is intermittent.
++
++## Context
++
++On a 4K@144 DisplayPort link with DSC compression and VRR (49–144 Hz), the
++monitor briefly blanks / re-syncs (a "flash") when the user alt-tabs to or from
++the desktop app. The app is the **only** program on the affected machine that
++triggers it; no GPU TDR/driver reset occurs, so the event is a display-link
++reconfiguration, not a crash. System-side mitigations (disabling MPO, VRR/G-Sync,
++or changing resolution) were ruled out as unacceptable: only this one app
++misbehaves, so the fix must be in the app.
++
++The app renders libmpv video into a flip-model composition swapchain hosted by a
++DirectComposition `bottom` visual, with a transparent WebView2 overlay in a
++sibling `web` visual on top. That video surface is borderless, client-filling,
++opaque, and flip-model — i.e. it meets **all** the criteria DWM uses to grant a
++hardware overlay plane ("Hardware Composed: Independent Flip" / MPO). Browsers
++and other windowed apps on the machine do not meet all of them at once, which
++explains why this app is the unique trigger.
++
++PresentMon (`--v1_metrics`, `PresentMode` column) confirmed the behavior
++objectively: while the app is foreground it runs as **Hardware Composed:
++Independent Flip**, and it falls back to **Composed: Flip** when it loses
++foreground. DWM thus *promotes* the surface to a dedicated scanout plane on focus
++gain and *demotes* it on focus loss. That per-focus-edge change to the scanout
++plane topology is the candidate trigger for the DSC/VRR link reconfiguration —
++the flash. (The first two links of that chain are documented; that a plane
++retopology *by itself* re-trains the link is a strong inference, not documented
++end-to-end — hence the ~0.65 confidence.)
++
++## Decision
++
++Make the video surface ineligible for the hardware-overlay / independent-flip
++scanout path so DWM **always** composites it, removing the promote/demote churn
++at focus edges. This is done with a DirectComposition opacity effect just below
++unity on the `bottom` (video) visual, set once at compositor creation:
++
++```rust
++let video_fx = dcomp.CreateEffectGroup()?;   // IDCompositionDevice::CreateEffectGroup
++video_fx.SetOpacity2(0.99)?;                  // IDCompositionEffectGroup::SetOpacity2
++bottom.SetEffect(&video_fx)?;                 // IDCompositionVisual::SetEffect
++```
++
++A sub-unity opacity forces DWM to alpha-blend the visual. A multiplane-overlay
++plane supports only `OPAQUE` or *per-pixel* `ALPHABLEND` — there is **no
++constant/scalar plane-alpha mode** — so a uniform 0.99 over opaque video cannot
++be expressed as an overlay and DWM must composite. The lever is decisive, not a
++half-measure.
++
++Verification: with the effect applied and the window confirmed foreground,
++PresentMon showed **592/592** frames `Composed: Flip` (zero Independent Flip),
++and a 45 s real-use capture across alt-tabs showed **1104/1104** `Composed: Flip`
++with **0** present-mode transitions — versus a baseline that was predominantly
++Independent Flip while foreground. The promotion churn is eliminated.
++
++## Consequences
++
++- The video plane is permanently composited by DWM; it never takes the
++  independent-flip fast path. The cost is a per-frame compose (slightly more
++  GPU/power and no direct VRR scanout for the video). For a video player this is
++  an acceptable trade for a stable display link.
++- The effect is scoped to the `bottom` video visual only. The WebView2 overlay
++  is a sibling visual and is **not** dimmed.
++- **SDR-coupled (the one trap to remember).** Forcing composition is the same
++  path that disables HDR passthrough. The swapchain is currently 8-bit
++  `B8G8R8A8_UNORM` (SDR), so there is no live regression. If HDR / 10-bit is ever
++  enabled, this effect must be **gated off** for the HDR swapchain/colorspace or
++  it will clamp/tonemap and lose HDR passthrough.
++- The 0.99 opacity costs ~1% luminance. It is imperceptible and band-free, but if
++  ever objectionable it can be replaced by a near-identity color-matrix effect
++  (`IDCompositionDevice3::CreateColorMatrixEffect`, RGB diagonal `255/256` — not
++  strict identity, which DWM may elide as a no-op and re-promote). Re-verify with
++  PresentMon after any such change.
++- Any future change near presentation should be graded with the PresentMon
++  `PresentMode` method above, not by eye — the symptom is intermittent.
++
++## Rejected alternatives
++
++- **System-side mitigations** (disable MPO/VRR, change resolution) — rejected by
++  constraint: only this app misbehaves, so the fix belongs in the app.
++- **Tearing / sync-interval-0 presentation** (`DXGI_PRESENT_ALLOW_TEARING`,
++  `Present(0, …)`) — tried as an experiment and **refuted**: a rigorous PresentMon
++  run still showed present-mode transitions. It targets direct-flip
++  `CreateSwapChainForHwnd` swapchains, not a DWM-composited composition swapchain.
++- **Focus-coupled candidates** — deferring the `WM_SETFOCUS → MoveFocus` overlay
++  handoff (#1) and gating the per-tick `dcomp.Commit()` to change-only (#2). Held
++  in reserve: they only become relevant if the flash persists *despite* the
++  present mode being pinned to Composed (which would refute the mechanism here).
++  Not applied, to keep one variable at a time.
+diff --git a/docs/feature-contracts/desktop-shell.md b/docs/feature-contracts/desktop-shell.md
+index d69ae2a..f198d81 100644
+--- a/docs/feature-contracts/desktop-shell.md
++++ b/docs/feature-contracts/desktop-shell.md
+@@ -144,6 +144,13 @@ into the shared texture, presents the video swapchain, and commits the
+ DirectComposition device (the WebView overlay's visual-hosting output only
+ appears after a device commit).
+ 
++The video visual carries a sub-unity opacity effect (0.99) so DWM **always
++composites** it and never promotes it to a hardware overlay / independent-flip
++plane. This is deliberate: the promote/demote churn at focus edges re-trained the
++DSC/VRR display link and caused a monitor flash on alt-tab. It assumes an SDR
++swapchain — forcing composition also defeats HDR passthrough, so the effect must
++be gated off if HDR is ever enabled. See ADR-0002.
++
+ **Deferred (not yet implemented):** presenting video only on a new mpv frame
+ (`mpv_render_context_update`'s `FRAME` flag) to stop re-presenting an unchanged
+ frame while paused/idle. An attempt at this regressed first paint to a blank

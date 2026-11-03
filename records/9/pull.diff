@@ -1,0 +1,4643 @@
+diff --git a/desktop-rs/Cargo.lock b/desktop-rs/Cargo.lock
+index e1b833e..e22a7d5 100644
+--- a/desktop-rs/Cargo.lock
++++ b/desktop-rs/Cargo.lock
+@@ -1151,6 +1151,7 @@ dependencies = [
+ name = "shows-desktop"
+ version = "0.1.0"
+ dependencies = [
++ "chrono",
+  "embed-resource",
+  "env_logger",
+  "libloading 0.9.0",
+diff --git a/desktop-rs/core/src/replica.rs b/desktop-rs/core/src/replica.rs
+index c2fa400..5675eed 100644
+--- a/desktop-rs/core/src/replica.rs
++++ b/desktop-rs/core/src/replica.rs
+@@ -14,13 +14,13 @@
+ use std::collections::{BTreeMap, HashMap, HashSet};
+ use std::sync::Mutex;
+ 
+-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
++use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+ use serde::Serialize;
+-use serde_json::{json, Value};
++use serde_json::{Value, json};
+ use uuid::Uuid;
+ 
+ use crate::engine::{self, Episode, Show};
+-use crate::model::{LibraryEpisode, LibraryShow, LibraryQueue};
++use crate::model::{LibraryEpisode, LibraryQueue, LibraryShow};
+ 
+ pub const SCHEMA: &str = "
+ CREATE TABLE IF NOT EXISTS shows (
+@@ -114,11 +114,54 @@ pub struct Replica {
+     db: Mutex<Connection>,
+ }
+ 
++type DirtyShowRow = (
++    String,
++    String,
++    String,
++    String,
++    Option<String>,
++    Option<String>,
++    String,
++);
++type DirtyEpisodeRow = (
++    String,
++    String,
++    String,
++    i64,
++    Option<String>,
++    Option<f64>,
++    String,
++);
++type DirtyHistoryRow = (String, String, String, Option<String>, String);
++type DirtyQueueRow = (String, String, i32, String);
++
++#[derive(Debug, Clone)]
++struct PushSnapshot {
++    shows: Vec<DirtyShowRow>,
++    episodes: Vec<DirtyEpisodeRow>,
++    history: Vec<DirtyHistoryRow>,
++    queue: Option<(String, String, Vec<DirtyQueueRow>)>,
++}
++
+ impl Replica {
+     pub fn new(path: &str) -> Replica {
+         let conn = Connection::open(path).expect("open replica db");
+         conn.execute_batch(SCHEMA).expect("apply schema");
+-        Replica { db: Mutex::new(conn) }
++        Replica {
++            db: Mutex::new(conn),
++        }
++    }
++
++    /// Whether this replica has ever been seeded with library data. This is the
++    /// startup boundary between an established offline working copy (which can
++    /// play immediately) and a genuinely empty first install (which must seed
++    /// before it can choose a round).
++    pub fn has_library_data(&self) -> bool {
++        let conn = self.db.lock().unwrap();
++        conn.query_row("SELECT EXISTS(SELECT 1 FROM shows LIMIT 1)", [], |r| {
++            r.get::<_, bool>(0)
++        })
++        .expect("check library data")
+     }
+ 
+     // ── reads ───────────────────────────────────────────────────────────
+@@ -130,7 +173,8 @@ impl Replica {
+         }
+         let conn = self.db.lock().unwrap();
+         let marks = vec!["?"; playlists.len()].join(",");
+-        let sql = format!("SELECT id FROM shows WHERE removed_at IS NULL AND playlist IN ({marks})");
++        let sql =
++            format!("SELECT id FROM shows WHERE removed_at IS NULL AND playlist IN ({marks})");
+         let mut stmt = conn.prepare(&sql).expect("prep active");
+         let ids: Vec<String> = stmt
+             .query_map(params_from_iter(playlists.iter()), |r| r.get(0))
+@@ -188,11 +232,9 @@ impl Replica {
+ 
+     pub fn get_volume(&self) -> Option<f64> {
+         let conn = self.db.lock().unwrap();
+-        conn.query_row(
+-            "SELECT value FROM meta WHERE key = 'volume'",
+-            [],
+-            |r| r.get::<_, String>(0),
+-        )
++        conn.query_row("SELECT value FROM meta WHERE key = 'volume'", [], |r| {
++            r.get::<_, String>(0)
++        })
+         .optional()
+         .ok()
+         .flatten()
+@@ -333,7 +375,13 @@ impl Replica {
+     }
+ 
+     // ── library management (local-first; syncs up like any change) ───────
+-    pub fn create_show(&self, playlist: &str, name: &str, root_path: &str, episodes: &[String]) -> String {
++    pub fn create_show(
++        &self,
++        playlist: &str,
++        name: &str,
++        root_path: &str,
++        episodes: &[String],
++    ) -> String {
+         let now = now();
+         let sid = Uuid::new_v4().to_string();
+         let conn = self.db.lock().unwrap();
+@@ -383,7 +431,9 @@ impl Replica {
+         vals.push(show_id.to_string()); // for WHERE id=?
+         let sql = format!("UPDATE shows SET {} WHERE id=?", sets.join(", "));
+         let conn = self.db.lock().unwrap();
+-        let n = conn.execute(&sql, params_from_iter(vals.iter())).expect("update show");
++        let n = conn
++            .execute(&sql, params_from_iter(vals.iter()))
++            .expect("update show");
+         n > 0
+     }
+ 
+@@ -405,17 +455,19 @@ impl Replica {
+     pub fn mark_show_watched(&self, show_id: &str) -> bool {
+         let now = now();
+         let conn = self.db.lock().unwrap();
+-        
++
+         // Get all episodes that are unwatched
+         let mut stmt = conn
+-            .prepare("SELECT id, relative_path FROM episodes WHERE show_id=?1 AND watched_at IS NULL")
++            .prepare(
++                "SELECT id, relative_path FROM episodes WHERE show_id=?1 AND watched_at IS NULL",
++            )
+             .expect("prep unwatched");
+         let unwatched: Vec<(String, String)> = stmt
+             .query_map(params![show_id], |r| Ok((r.get(0)?, r.get(1)?)))
+             .expect("query unwatched")
+             .filter_map(Result::ok)
+             .collect();
+-            
++
+         for (eid, rel) in &unwatched {
+             conn.execute(
+                 "UPDATE episodes SET watched_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+@@ -428,13 +480,14 @@ impl Replica {
+             )
+             .expect("append history");
+         }
+-        
+-        let n = conn.execute(
+-            "UPDATE shows SET removed_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
+-            params![now, now, show_id],
+-        )
+-        .expect("tombstone");
+-        
++
++        let n = conn
++            .execute(
++                "UPDATE shows SET removed_at=?1, updated_at=?2, dirty=1 WHERE id=?3",
++                params![now, now, show_id],
++            )
++            .expect("tombstone");
++
+         n > 0
+     }
+ 
+@@ -442,25 +495,25 @@ impl Replica {
+     pub fn mark_show_unwatched(&self, show_id: &str) -> bool {
+         let now = now();
+         let conn = self.db.lock().unwrap();
+-        
++
+         conn.execute(
+             "UPDATE shows SET removed_at=NULL, updated_at=?1, dirty=1 WHERE id=?2",
+             params![now, show_id],
+         )
+         .expect("restore show");
+-        
++
+         conn.execute(
+             "UPDATE episodes SET watched_at=NULL, resume_pos=NULL, updated_at=?1, dirty=1 WHERE show_id=?2",
+             params![now, show_id],
+         )
+         .expect("reset episodes");
+-        
++
+         conn.execute(
+             "DELETE FROM watch_history WHERE show_id=?1",
+             params![show_id],
+         )
+         .expect("clear history");
+-        
++
+         true
+     }
+ 
+@@ -471,17 +524,19 @@ impl Replica {
+         let now = now();
+         let mut conn = self.db.lock().unwrap();
+         let tx = conn.transaction().expect("begin rescan tx");
+-        
++
+         let existing: std::collections::HashSet<String> = {
+-            let mut stmt = tx.prepare("SELECT relative_path FROM episodes WHERE show_id=?1").expect("prep paths");
++            let mut stmt = tx
++                .prepare("SELECT relative_path FROM episodes WHERE show_id=?1")
++                .expect("prep paths");
+             stmt.query_map(params![show_id], |r| r.get(0))
+                 .expect("query paths")
+                 .filter_map(Result::ok)
+                 .collect()
+         };
+-            
++
+         let mut added_ids = Vec::new();
+-        
++
+         for (i, rel) in sorted_rels.iter().enumerate() {
+             if !existing.contains(rel) {
+                 let new_id = Uuid::new_v4().to_string();
+@@ -499,7 +554,7 @@ impl Replica {
+                 .expect("update episode position");
+             }
+         }
+-        
++
+         tx.commit().expect("commit rescan tx");
+         added_ids
+     }
+@@ -514,8 +569,11 @@ impl Replica {
+         for eid in episode_ids {
+             // Retrieve relative_path to insert into watch_history
+             let rel: String = {
+-                let mut stmt = tx.prepare("SELECT relative_path FROM episodes WHERE id=?1").expect("prep rel");
+-                stmt.query_row(params![eid], |r| r.get(0)).unwrap_or_default()
++                let mut stmt = tx
++                    .prepare("SELECT relative_path FROM episodes WHERE id=?1")
++                    .expect("prep rel");
++                stmt.query_row(params![eid], |r| r.get(0))
++                    .unwrap_or_default()
+             };
+             if rel.is_empty() {
+                 continue;
+@@ -649,10 +707,16 @@ impl Replica {
+         .collect()
+     }
+ 
+-    pub fn save_round_queue(&self, entries: &[(String, String, i32, String, String)], updated_at: &str, dirty: bool) {
++    pub fn save_round_queue(
++        &self,
++        entries: &[(String, String, i32, String, String)],
++        updated_at: &str,
++        dirty: bool,
++    ) {
+         let mut conn = self.db.lock().unwrap();
+         let tx = conn.transaction().expect("begin save_round_queue tx");
+-        tx.execute("DELETE FROM round_queue", []).expect("delete round_queue");
++        tx.execute("DELETE FROM round_queue", [])
++            .expect("delete round_queue");
+         let dirty_val = if dirty { 1 } else { 0 };
+         let mut playlists = HashSet::new();
+         for entry in entries {
+@@ -755,7 +819,7 @@ impl Replica {
+                 .expect("lookup dirty empty queue")?
+             }
+         };
+-        
++
+         let mut stmt = conn
+             .prepare("SELECT episode_id, show_id, play_order, state FROM round_queue WHERE playlist=?1 ORDER BY play_order")
+             .expect("prep dirty_queue query");
+@@ -771,7 +835,7 @@ impl Replica {
+             .expect("query dirty queue entries")
+             .filter_map(Result::ok)
+             .collect();
+-        
++
+         Some(json!({
+             "playlist": playlist,
+             "updated_at": updated_at,
+@@ -952,7 +1016,11 @@ impl Replica {
+             by_day.insert(row.0, json!(row.1));
+         }
+ 
+-        per.sort_by(|a, b| b.ratio().partial_cmp(&a.ratio()).unwrap_or(std::cmp::Ordering::Equal));
++        per.sort_by(|a, b| {
++            b.ratio()
++                .partial_cmp(&a.ratio())
++                .unwrap_or(std::cmp::Ordering::Equal)
++        });
+         let active = shows.iter().filter(|s| s.3.is_none()).count();
+         json!({
+             "total_shows": shows.len(),
+@@ -966,100 +1034,127 @@ impl Replica {
+         })
+     }
+ 
+-    pub fn push_to_shared(&self, shared_conn: &mut Connection) -> Result<(Vec<String>, Vec<String>, Vec<String>, Option<String>), rusqlite::Error> {
++    /// Snapshot dirty local rows, release the replica mutex, write the snapshot
++    /// to the origin, then conditionally acknowledge only rows which still have
++    /// the exact version that was sent. Remote I/O must never hold the local
++    /// working-copy lock: playback and controls remain local even when SMB is
++    /// asleep or unreachable.
++    pub fn push_to_shared(&self, shared_conn: &mut Connection) -> Result<(), rusqlite::Error> {
++        let snapshot = self.snapshot_dirty()?;
++        Self::write_snapshot_to_shared(shared_conn, &snapshot)?;
++        self.acknowledge_snapshot(&snapshot)?;
++        Ok(())
++    }
++
++    fn snapshot_dirty(&self) -> Result<PushSnapshot, rusqlite::Error> {
+         let local_conn = self.db.lock().unwrap();
+ 
+-        // 1. Shows
+-        let mut stmt = local_conn.prepare("SELECT id, playlist, name, root_path, date_added, removed_at, updated_at FROM shows WHERE dirty=1")?;
+-        let dirty_shows: Vec<(String, String, String, String, Option<String>, Option<String>, String)> = stmt.query_map([], |r| {
+-            Ok((
+-                r.get(0)?,
+-                r.get(1)?,
+-                r.get(2)?,
+-                r.get(3)?,
+-                r.get(4)?,
+-                r.get(5)?,
+-                r.get(6)?,
+-            ))
+-        })?
+-        .filter_map(Result::ok)
+-        .collect();
++        let shows = {
++            let mut stmt = local_conn.prepare(
++                "SELECT id, playlist, name, root_path, date_added, removed_at, updated_at FROM shows WHERE dirty=1",
++            )?;
++            stmt.query_map([], |r| {
++                Ok((
++                    r.get(0)?,
++                    r.get(1)?,
++                    r.get(2)?,
++                    r.get(3)?,
++                    r.get(4)?,
++                    r.get(5)?,
++                    r.get(6)?,
++                ))
++            })?
++            .collect::<Result<Vec<DirtyShowRow>, _>>()?
++        };
+ 
+-        // 2. Episodes
+-        let mut stmt = local_conn.prepare("SELECT id, show_id, relative_path, position, watched_at, resume_pos, updated_at FROM episodes WHERE dirty=1")?;
+-        let dirty_episodes: Vec<(String, String, String, i64, Option<String>, Option<f64>, String)> = stmt.query_map([], |r| {
+-            Ok((
+-                r.get(0)?,
+-                r.get(1)?,
+-                r.get(2)?,
+-                r.get(3)?,
+-                r.get(4)?,
+-                r.get(5)?,
+-                r.get(6)?,
+-            ))
+-        })?
+-        .filter_map(Result::ok)
+-        .collect();
++        let episodes = {
++            let mut stmt = local_conn.prepare(
++                "SELECT id, show_id, relative_path, position, watched_at, resume_pos, updated_at FROM episodes WHERE dirty=1",
++            )?;
++            stmt.query_map([], |r| {
++                Ok((
++                    r.get(0)?,
++                    r.get(1)?,
++                    r.get(2)?,
++                    r.get(3)?,
++                    r.get(4)?,
++                    r.get(5)?,
++                    r.get(6)?,
++                ))
++            })?
++            .collect::<Result<Vec<DirtyEpisodeRow>, _>>()?
++        };
+ 
+-        // 3. History
+-        let mut stmt = local_conn.prepare("SELECT id, show_id, episode_id, relative_path, played_at FROM watch_history WHERE dirty=1")?;
+-        let dirty_history: Vec<(String, String, String, Option<String>, String)> = stmt.query_map([], |r| {
+-            Ok((
+-                r.get(0)?,
+-                r.get(1)?,
+-                r.get(2)?,
+-                r.get(3)?,
+-                r.get(4)?,
+-            ))
+-        })?
+-        .filter_map(Result::ok)
+-        .collect();
++        let history = {
++            let mut stmt = local_conn.prepare(
++                "SELECT id, show_id, episode_id, relative_path, played_at FROM watch_history WHERE dirty=1",
++            )?;
++            stmt.query_map([], |r| {
++                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
++            })?
++            .collect::<Result<Vec<DirtyHistoryRow>, _>>()?
++        };
+ 
+-        // 4. Queue (round_queue is synced per playlist, so if any row is dirty in a playlist, we sync all entries for that playlist)
+-        let dirty_pl: Option<(String, String)> = local_conn.query_row(
+-            "SELECT playlist, updated_at FROM round_queue WHERE dirty=1 LIMIT 1",
+-            [],
+-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+-        )
+-        .optional()?;
+-        let dirty_pl = match dirty_pl {
+-            Some(dirty_pl) => Some(dirty_pl),
++        // A queue is one LWW unit per playlist. Every state change stamps every
++        // row in that playlist with the same version.
++        let dirty_queue: Option<(String, String)> = match local_conn
++            .query_row(
++                "SELECT playlist, updated_at FROM round_queue WHERE dirty=1 LIMIT 1",
++                [],
++                |r| Ok((r.get(0)?, r.get(1)?)),
++            )
++            .optional()?
++        {
++            Some(queue) => Some(queue),
+             None => local_conn
+                 .query_row(
+                     "SELECT substr(key, 13), value FROM meta WHERE key LIKE 'dirty_queue:%' LIMIT 1",
+                     [],
+-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
++                    |r| Ok((r.get(0)?, r.get(1)?)),
+                 )
+                 .optional()?,
+         };
+-
+-        let queue_data = if let Some((playlist, updated_at)) = dirty_pl {
+-            let mut stmt = local_conn.prepare("SELECT episode_id, show_id, play_order, state FROM round_queue WHERE playlist=?1 ORDER BY play_order")?;
+-            let entries: Vec<(String, String, i32, String)> = stmt.query_map([&playlist], |r| {
+-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+-            })?
+-            .filter_map(Result::ok)
+-            .collect();
++        let queue = if let Some((playlist, updated_at)) = dirty_queue {
++            let entries = {
++                let mut stmt = local_conn.prepare(
++                    "SELECT episode_id, show_id, play_order, state FROM round_queue WHERE playlist=?1 ORDER BY play_order",
++                )?;
++                stmt.query_map([&playlist], |r| {
++                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
++                })?
++                .collect::<Result<Vec<DirtyQueueRow>, _>>()?
++            };
+             Some((playlist, updated_at, entries))
+         } else {
+             None
+         };
+ 
+-        // Write all these to the shared database inside a transaction
++        Ok(PushSnapshot {
++            shows,
++            episodes,
++            history,
++            queue,
++        })
++    }
++
++    fn write_snapshot_to_shared(
++        shared_conn: &mut Connection,
++        snapshot: &PushSnapshot,
++    ) -> Result<(), rusqlite::Error> {
+         let tx = shared_conn.transaction()?;
+         {
+-            // Write shows
+-            for s in &dirty_shows {
+-                let existing: Option<String> = tx.query_row(
+-                    "SELECT updated_at FROM shows WHERE id=?1",
+-                    params![s.0],
+-                    |r| r.get(0)
+-                )
+-                .optional()?;
+-                
++            for s in &snapshot.shows {
++                let existing: Option<String> = tx
++                    .query_row(
++                        "SELECT updated_at FROM shows WHERE id=?1",
++                        params![s.0],
++                        |r| r.get(0),
++                    )
++                    .optional()?;
++
+                 let should_write = match existing {
+                     None => true,
+-                    Some(ref cur_updated) => newer(Some(&s.6), Some(cur_updated))
++                    Some(ref cur_updated) => newer(Some(&s.6), Some(cur_updated)),
+                 };
+                 if should_write {
+                     tx.execute(
+@@ -1069,18 +1164,18 @@ impl Replica {
+                 }
+             }
+ 
+-            // Write episodes
+-            for e in &dirty_episodes {
+-                let existing: Option<String> = tx.query_row(
+-                    "SELECT updated_at FROM episodes WHERE id=?1",
+-                    params![e.0],
+-                    |r| r.get(0)
+-                )
+-                .optional()?;
+-                
++            for e in &snapshot.episodes {
++                let existing: Option<String> = tx
++                    .query_row(
++                        "SELECT updated_at FROM episodes WHERE id=?1",
++                        params![e.0],
++                        |r| r.get(0),
++                    )
++                    .optional()?;
++
+                 let should_write = match existing {
+                     None => true,
+-                    Some(ref cur_updated) => newer(Some(&e.6), Some(cur_updated))
++                    Some(ref cur_updated) => newer(Some(&e.6), Some(cur_updated)),
+                 };
+                 if should_write {
+                     tx.execute(
+@@ -1090,23 +1185,22 @@ impl Replica {
+                 }
+             }
+ 
+-            // Write watch_history
+-            for h in &dirty_history {
++            for h in &snapshot.history {
+                 tx.execute(
+                     "INSERT OR IGNORE INTO watch_history(id,show_id,episode_id,relative_path,played_at,dirty) VALUES(?1,?2,?3,?4,?5,0)",
+                     params![h.0, h.1, h.2, h.3, h.4]
+                 )?;
+             }
+ 
+-            // Write queue
+-            if let Some((ref playlist, ref updated_at, ref entries)) = queue_data {
+-                let row_updated: Option<String> = tx.query_row(
+-                    "SELECT MAX(updated_at) FROM round_queue WHERE playlist=?1",
+-                    params![playlist],
+-                    |r| r.get(0)
+-                )
+-                .optional()?
+-                .flatten();
++            if let Some((ref playlist, ref updated_at, ref entries)) = snapshot.queue {
++                let row_updated: Option<String> = tx
++                    .query_row(
++                        "SELECT MAX(updated_at) FROM round_queue WHERE playlist=?1",
++                        params![playlist],
++                        |r| r.get(0),
++                    )
++                    .optional()?
++                    .flatten();
+                 let meta_updated: Option<String> = tx
+                     .query_row(
+                         "SELECT value FROM meta WHERE key=?1",
+@@ -1124,13 +1218,16 @@ impl Replica {
+                         meta.to_string()
+                     }),
+                 };
+-                
++
+                 let should_write = match existing_updated {
+                     None => true,
+-                    Some(ref cur_updated) => newer(Some(updated_at), Some(cur_updated.as_str()))
++                    Some(ref cur_updated) => newer(Some(updated_at), Some(cur_updated.as_str())),
+                 };
+                 if should_write {
+-                    tx.execute("DELETE FROM round_queue WHERE playlist=?1", params![playlist])?;
++                    tx.execute(
++                        "DELETE FROM round_queue WHERE playlist=?1",
++                        params![playlist],
++                    )?;
+                     tx.execute(
+                         "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+                         params![format!("queue_updated:{playlist}"), updated_at],
+@@ -1146,14 +1243,47 @@ impl Replica {
+             }
+         }
+         tx.commit()?;
++        Ok(())
++    }
++
++    fn acknowledge_snapshot(&self, snapshot: &PushSnapshot) -> Result<(), rusqlite::Error> {
++        let mut local_conn = self.db.lock().unwrap();
++        let tx = local_conn.transaction()?;
+ 
+-        // Collect IDs of successfully written dirty rows to mark them as clean in the local DB
+-        let show_ids: Vec<String> = dirty_shows.into_iter().map(|s| s.0).collect();
+-        let episode_ids: Vec<String> = dirty_episodes.into_iter().map(|e| e.0).collect();
+-        let history_ids: Vec<String> = dirty_history.into_iter().map(|h| h.0).collect();
+-        let queue_playlist = queue_data.map(|q| q.0);
++        for show in &snapshot.shows {
++            tx.execute(
++                "UPDATE shows SET dirty=0 WHERE id=?1 AND updated_at=?2 AND dirty=1",
++                params![show.0, show.6],
++            )?;
++        }
++        for episode in &snapshot.episodes {
++            tx.execute(
++                "UPDATE episodes SET dirty=0 WHERE id=?1 AND updated_at=?2 AND dirty=1",
++                params![episode.0, episode.6],
++            )?;
++        }
++        // History is append-only and has no updated_at column. Match its full
++        // immutable payload so even a corrupt/replaced ID is never acknowledged.
++        for history in &snapshot.history {
++            tx.execute(
++                "UPDATE watch_history SET dirty=0 \
++                 WHERE id=?1 AND show_id=?2 AND episode_id=?3 AND relative_path IS ?4 \
++                   AND played_at=?5 AND dirty=1",
++                params![history.0, history.1, history.2, history.3, history.4],
++            )?;
++        }
++        if let Some((playlist, updated_at, _)) = &snapshot.queue {
++            tx.execute(
++                "UPDATE round_queue SET dirty=0 WHERE playlist=?1 AND updated_at=?2 AND dirty=1",
++                params![playlist, updated_at],
++            )?;
++            tx.execute(
++                "DELETE FROM meta WHERE key=?1 AND value=?2",
++                params![format!("dirty_queue:{playlist}"), updated_at],
++            )?;
++        }
+ 
+-        Ok((show_ids, episode_ids, history_ids, queue_playlist))
++        tx.commit()
+     }
+ 
+     pub fn mark_all_dirty(&self) -> Result<(), rusqlite::Error> {
+@@ -1199,11 +1329,27 @@ impl PerShow {
+ }
+ 
+ fn load_show(conn: &Connection, show_id: &str) -> Option<Show> {
+-    let base: Option<(String, String, String, String, Option<String>, Option<String>)> = conn
++    let base: Option<(
++        String,
++        String,
++        String,
++        String,
++        Option<String>,
++        Option<String>,
++    )> = conn
+         .query_row(
+             "SELECT id,playlist,name,root_path,date_added,removed_at FROM shows WHERE id=?1",
+             params![show_id],
+-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
++            |r| {
++                Ok((
++                    r.get(0)?,
++                    r.get(1)?,
++                    r.get(2)?,
++                    r.get(3)?,
++                    r.get(4)?,
++                    r.get(5)?,
++                ))
++            },
+         )
+         .optional()
+         .expect("load show");
+@@ -1299,15 +1445,20 @@ fn merge_queue_impl(conn: &Connection, q: &LibraryQueue) {
+         }),
+     };
+     let dirty_count = row_stats.1 + i64::from(dirty_empty.is_some());
+-        
++
+     let should_overwrite = match local_updated {
+         None => true,
+-        Some(cur_updated) => dirty_count == 0 && newer(Some(&q.updated_at), Some(cur_updated.as_str())),
++        Some(cur_updated) => {
++            dirty_count == 0 && newer(Some(&q.updated_at), Some(cur_updated.as_str()))
++        }
+     };
+-    
++
+     if should_overwrite {
+-        conn.execute("DELETE FROM round_queue WHERE playlist=?1", params![q.playlist])
+-            .expect("delete old round_queue");
++        conn.execute(
++            "DELETE FROM round_queue WHERE playlist=?1",
++            params![q.playlist],
++        )
++        .expect("delete old round_queue");
+         conn.execute(
+             "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+             params![format!("queue_updated:{}", q.playlist), q.updated_at],
+@@ -1380,7 +1531,9 @@ fn dirty_episodes(conn: &Connection) -> Vec<Value> {
+ 
+ fn dirty_history(conn: &Connection) -> Vec<Value> {
+     let mut stmt = conn
+-        .prepare("SELECT id,show_id,episode_id,relative_path,played_at FROM watch_history WHERE dirty=1")
++        .prepare(
++            "SELECT id,show_id,episode_id,relative_path,played_at FROM watch_history WHERE dirty=1",
++        )
+         .expect("prep dirty history");
+     stmt.query_map([], |r| {
+         Ok(json!({
+@@ -1452,7 +1605,10 @@ mod tests {
+         let rnd = next_round(&shows);
+         let rids: BTreeSet<&str> = rnd.iter().map(|o| o.show_id.as_str()).collect();
+         assert_eq!(rids, ["s1", "s2"].into_iter().collect());
+-        assert_eq!(rnd.iter().find(|o| o.show_id == "s1").unwrap().episode_id, "a");
++        assert_eq!(
++            rnd.iter().find(|o| o.show_id == "s1").unwrap().episode_id,
++            "a"
++        );
+     }
+ 
+     #[test]
+@@ -1463,9 +1619,19 @@ mod tests {
+         assert_eq!(n, 1);
+         assert!(removed.is_empty());
+         let s1 = r.show("s1").unwrap();
+-        assert!(s1.episodes.iter().find(|e| e.id == "a").unwrap().watched_at.is_some());
++        assert!(
++            s1.episodes
++                .iter()
++                .find(|e| e.id == "a")
++                .unwrap()
++                .watched_at
++                .is_some()
++        );
+         let nr = next_round(&r.active_shows(&["nelson".into()]));
+-        assert_eq!(nr.iter().find(|o| o.show_id == "s1").unwrap().episode_id, "b");
++        assert_eq!(
++            nr.iter().find(|o| o.show_id == "s1").unwrap().episode_id,
++            "b"
++        );
+         let p = r.pending();
+         assert!(p.episodes >= 1 && p.history == 1);
+     }
+@@ -1478,7 +1644,10 @@ mod tests {
+         assert_eq!(n, 1);
+         assert_eq!(removed, ["s2"]);
+         assert!(r.show("s2").unwrap().removed_at.is_some());
+-        assert_eq!(ids(&r.active_shows(&["nelson".into()])), ["s1"].into_iter().collect());
++        assert_eq!(
++            ids(&r.active_shows(&["nelson".into()])),
++            ["s1"].into_iter().collect()
++        );
+     }
+ 
+     #[test]
+@@ -1487,7 +1656,10 @@ mod tests {
+         seed(&r);
+         assert!(r.defer("s1", "a"));
+         let s1 = r.show("s1").unwrap();
+-        assert_eq!(s1.episodes.iter().find(|e| e.id == "a").unwrap().position, 2);
++        assert_eq!(
++            s1.episodes.iter().find(|e| e.id == "a").unwrap().position,
++            2
++        );
+         assert_eq!(first_unwatched(&s1.episodes).unwrap().id, "b");
+         r.advance(&[("s1".into(), "b".into())]);
+         assert!(!r.defer("s1", "b")); // now watched -> no-op
+@@ -1511,7 +1683,10 @@ mod tests {
+         let a = r.playback_preferences("a");
+         assert_eq!(a.subtitle_track.as_deref(), Some("no"));
+         assert_eq!(a.audio_track.as_deref(), Some("2"));
+-        assert_eq!(r.playback_preferences("b"), EpisodePlaybackPreferences::default());
++        assert_eq!(
++            r.playback_preferences("b"),
++            EpisodePlaybackPreferences::default()
++        );
+         assert_eq!(r.pending().episodes, 0);
+     }
+ 
+@@ -1554,7 +1729,13 @@ mod tests {
+             ..Default::default()
+         }]);
+         assert_eq!(
+-            r.show("s1").unwrap().episodes.iter().find(|e| e.id == "a").unwrap().relative_path,
++            r.show("s1")
++                .unwrap()
++                .episodes
++                .iter()
++                .find(|e| e.id == "a")
++                .unwrap()
++                .relative_path,
+             "a.mkv"
+         );
+         // ...but a NEWER server update to the (clean) show row does win.
+@@ -1576,8 +1757,16 @@ mod tests {
+         seed(&r);
+         r.advance(&[("s1".into(), "a".into())]);
+         let d = r.dirty();
+-        let ep_ids: Vec<String> = d.episodes.iter().map(|e| e["id"].as_str().unwrap().to_string()).collect();
+-        let h_ids: Vec<String> = d.history.iter().map(|h| h["id"].as_str().unwrap().to_string()).collect();
++        let ep_ids: Vec<String> = d
++            .episodes
++            .iter()
++            .map(|e| e["id"].as_str().unwrap().to_string())
++            .collect();
++        let h_ids: Vec<String> = d
++            .history
++            .iter()
++            .map(|h| h["id"].as_str().unwrap().to_string())
++            .collect();
+         r.mark_synced("episodes", &ep_ids);
+         r.mark_synced("watch_history", &h_ids);
+         let p = r.pending();
+@@ -1585,12 +1774,81 @@ mod tests {
+         assert_eq!(p.history, 0);
+     }
+ 
++    #[test]
++    fn push_ack_keeps_row_dirty_when_it_changes_during_remote_phase() {
++        let r = Replica::new(":memory:");
++        let show_id = r.create_show("nelson", "S1", "D:\\A", &["a.mkv".into()]);
++        let episode_id = r.show(&show_id).unwrap().episodes[0].id.clone();
++
++        // push_to_shared deliberately releases the local mutex after this
++        // snapshot. Model a playback/control mutation while the remote write is
++        // in flight, before the snapshot is acknowledged.
++        let snapshot = r.snapshot_dirty().unwrap();
++        let sent_version = snapshot
++            .episodes
++            .iter()
++            .find(|episode| episode.0 == episode_id)
++            .unwrap()
++            .6
++            .clone();
++        let current_version = "9999-12-31T23:59:59Z".to_string();
++        r.db.lock()
++            .unwrap()
++            .execute(
++                "UPDATE episodes SET resume_pos=42.0, updated_at=?1, dirty=1 WHERE id=?2",
++                params![current_version, episode_id],
++            )
++            .unwrap();
++        assert_ne!(current_version, sent_version);
++
++        let mut shared = Connection::open_in_memory().unwrap();
++        shared.execute_batch(SCHEMA).unwrap();
++        Replica::write_snapshot_to_shared(&mut shared, &snapshot).unwrap();
++        r.acknowledge_snapshot(&snapshot).unwrap();
++
++        assert_eq!(r.pending().shows, 0);
++        assert_eq!(r.pending().episodes, 1);
++        assert_eq!(r.resume_pos(&episode_id), Some(42.0));
++        let pushed_resume: Option<f64> = shared
++            .query_row(
++                "SELECT resume_pos FROM episodes WHERE id=?1",
++                [&episode_id],
++                |row| row.get(0),
++            )
++            .unwrap();
++        assert_eq!(pushed_resume, None);
++    }
++
++    #[test]
++    fn library_data_distinguishes_first_install_from_established_replica() {
++        let r = Replica::new(":memory:");
++        assert!(!r.has_library_data());
++
++        let show_id = r.create_show("nelson", "S1", "D:\\A", &["a.mkv".into()]);
++        assert!(r.has_library_data());
++
++        // A fully watched/tombstoned library is still an established replica;
++        // it must not turn the next launch back into a blocking first seed.
++        let episode_id = r.show(&show_id).unwrap().episodes[0].id.clone();
++        r.advance(&[(show_id, episode_id)]);
++        assert!(r.has_library_data());
++    }
++
+     #[test]
+     fn create_show_is_dirty_and_in_round() {
+         let r = Replica::new(":memory:");
+-        let sid = r.create_show("nelson", "New", "D:\\New", &["e1.mkv".into(), "e2.mkv".into()]);
++        let sid = r.create_show(
++            "nelson",
++            "New",
++            "D:\\New",
++            &["e1.mkv".into(), "e2.mkv".into()],
++        );
+         assert!(!sid.is_empty());
+-        let me = r.active_shows(&["nelson".into()]).into_iter().find(|s| s.id == sid).unwrap();
++        let me = r
++            .active_shows(&["nelson".into()])
++            .into_iter()
++            .find(|s| s.id == sid)
++            .unwrap();
+         assert_eq!(me.episodes.len(), 2);
+         let p = r.pending();
+         assert_eq!(p.shows, 1);
+@@ -1602,7 +1860,11 @@ mod tests {
+         let r = Replica::new(":memory:");
+         let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into()]);
+         assert!(r.remove_show(&sid));
+-        assert!(r.active_shows(&["nelson".into()]).iter().all(|s| s.id != sid));
++        assert!(
++            r.active_shows(&["nelson".into()])
++                .iter()
++                .all(|s| s.id != sid)
++        );
+     }
+ 
+     #[test]
+@@ -1618,7 +1880,11 @@ mod tests {
+         );
+ 
+         assert!(r.remove_show(&sid));
+-        assert!(r.get_round_queue().iter().any(|(_, show_id, ..)| show_id == &sid));
++        assert!(
++            r.get_round_queue()
++                .iter()
++                .any(|(_, show_id, ..)| show_id == &sid)
++        );
+         assert!(r.dirty_queue().is_none());
+     }
+ 
+@@ -1627,10 +1893,17 @@ mod tests {
+         let r = Replica::new(":memory:");
+         let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()]);
+         assert_eq!(
+-            r.rescan_episodes(&sid, &["a.mkv".into(), "b.mkv".into(), "c.mkv".into()]).len(),
++            r.rescan_episodes(&sid, &["a.mkv".into(), "b.mkv".into(), "c.mkv".into()])
++                .len(),
+             1
+         );
+-        let c = r.show(&sid).unwrap().episodes.into_iter().find(|e| e.relative_path == "c.mkv").unwrap();
++        let c = r
++            .show(&sid)
++            .unwrap()
++            .episodes
++            .into_iter()
++            .find(|e| e.relative_path == "c.mkv")
++            .unwrap();
+         assert_eq!(c.position, 2); // continues after a(0), b(1)
+     }
+ 
+@@ -1640,7 +1913,9 @@ mod tests {
+         let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()]);
+         assert_eq!(
+             r.episode_paths(&sid),
+-            ["a.mkv".to_string(), "b.mkv".to_string()].into_iter().collect()
++            ["a.mkv".to_string(), "b.mkv".to_string()]
++                .into_iter()
++                .collect()
+         );
+         assert!(r.update_show(&sid, Some("Y"), None, Some("couple")));
+         let s = r.show(&sid).unwrap();
+@@ -1673,40 +1948,52 @@ mod tests {
+     #[test]
+     fn round_queue_helpers_and_merge() {
+         let r = Replica::new(":memory:");
+-        
++
+         // Initially empty
+         assert!(r.get_round_queue().is_empty());
+         assert!(r.dirty_queue().is_none());
+-        
++
+         // Save queue
+         let entries = vec![
+-            ("ep1".to_string(), "show1".to_string(), 0, "pending".to_string(), "nelson".to_string()),
+-            ("ep2".to_string(), "show2".to_string(), 1, "pending".to_string(), "nelson".to_string()),
++            (
++                "ep1".to_string(),
++                "show1".to_string(),
++                0,
++                "pending".to_string(),
++                "nelson".to_string(),
++            ),
++            (
++                "ep2".to_string(),
++                "show2".to_string(),
++                1,
++                "pending".to_string(),
++                "nelson".to_string(),
++            ),
+         ];
+         r.save_round_queue(&entries, "2026-05-31T00:00:00Z", true);
+-        
++
+         let q = r.get_round_queue();
+         assert_eq!(q.len(), 2);
+         assert_eq!(q[0].0, "ep1");
+         assert_eq!(q[1].0, "ep2");
+         assert_eq!(q[0].6, 1); // dirty = 1
+-        
++
+         // Check dirty queue serializes correctly
+         let dq = r.dirty_queue().unwrap();
+         assert_eq!(dq["playlist"], "nelson");
+         assert_eq!(dq["entries"].as_array().unwrap().len(), 2);
+-        
++
+         // Mark synced
+         r.mark_queue_synced("nelson");
+         assert!(r.dirty_queue().is_none());
+-        
++
+         // Update entry state
+         r.update_round_entry_state("ep1", "playing", "nelson");
+         let q2 = r.get_round_queue();
+         assert_eq!(q2[0].3, "playing");
+         assert_eq!(q2[0].6, 1); // dirty = 1 again
+         assert_eq!(q2[1].6, 1); // whole playlist queue marked dirty
+-        
++
+         // Merge queue (should win if newer/clean).
+         // Re-seed the local queue with a FIXED, clean timestamp so this merge
+         // comparison is deterministic and independent of the wall clock. The
+@@ -1720,14 +2007,12 @@ mod tests {
+         let incoming = LibraryQueue {
+             playlist: "nelson".to_string(),
+             updated_at: "2035-06-01T00:00:00Z".to_string(),
+-            entries: vec![
+-                RoundQueueEntry {
+-                    episode_id: "ep1".to_string(),
+-                    show_id: "show1".to_string(),
+-                    play_order: 0,
+-                    state: "watched".to_string(),
+-                }
+-            ],
++            entries: vec![RoundQueueEntry {
++                episode_id: "ep1".to_string(),
++                show_id: "show1".to_string(),
++                play_order: 0,
++                state: "watched".to_string(),
++            }],
+         };
+         r.merge_queues(&[incoming]);
+         let q3 = r.get_round_queue();
+@@ -1740,8 +2025,20 @@ mod tests {
+     fn remove_round_entry_preserves_rest_and_marks_queue_dirty() {
+         let r = Replica::new(":memory:");
+         let entries = vec![
+-            ("ep1".to_string(), "s1".to_string(), 0, "pending".to_string(), "nelson".to_string()),
+-            ("ep2".to_string(), "s2".to_string(), 1, "pending".to_string(), "nelson".to_string()),
++            (
++                "ep1".to_string(),
++                "s1".to_string(),
++                0,
++                "pending".to_string(),
++                "nelson".to_string(),
++            ),
++            (
++                "ep2".to_string(),
++                "s2".to_string(),
++                1,
++                "pending".to_string(),
++                "nelson".to_string(),
++            ),
+         ];
+         r.save_round_queue(&entries, "2026-05-31T00:00:00Z", false);
+ 
+diff --git a/desktop-rs/core/src/runner.rs b/desktop-rs/core/src/runner.rs
+index 92f9ee6..31dff7f 100644
+--- a/desktop-rs/core/src/runner.rs
++++ b/desktop-rs/core/src/runner.rs
+@@ -21,11 +21,14 @@
+ //! libmpv `Player` and the real `Syncer` implement the traits.
+ 
+ use std::collections::HashSet;
++use std::sync::atomic::{AtomicU8, Ordering};
++use std::sync::mpsc::{Sender, channel};
+ use std::sync::{Arc, Condvar, Mutex};
+-use std::time::Duration;
++use std::time::{Duration, Instant};
+ 
+ use crate::engine;
+ use crate::replica::Replica;
++use crate::sync::{SyncProgress, SyncProgressState};
+ 
+ /// A `threading.Event`-equivalent: settable, with a blocking `wait`.
+ pub struct StopFlag {
+@@ -125,15 +128,15 @@ pub trait PlayerOps: Send + Sync {
+ 
+ /// The sync operations the runner triggers (implemented by [`crate::sync::Syncer`]).
+ pub trait SyncOps: Send + Sync {
+-    fn seed(&self) -> bool;
++    fn sync(&self) -> bool;
+     fn push(&self) -> bool;
+     fn pending(&self) -> i64;
+     fn online(&self) -> bool;
+ }
+ 
+ impl SyncOps for crate::sync::Syncer {
+-    fn seed(&self) -> bool {
+-        crate::sync::Syncer::seed(self)
++    fn sync(&self) -> bool {
++        crate::sync::Syncer::sync(self)
+     }
+     fn push(&self) -> bool {
+         crate::sync::Syncer::push(self)
+@@ -146,6 +149,29 @@ impl SyncOps for crate::sync::Syncer {
+     }
+ }
+ 
++const REQUEST_PUSH: u8 = 0b01;
++const REQUEST_SYNC: u8 = 0b10;
++
++fn start_sync_worker(syncer: Arc<dyn SyncOps>) -> (Sender<()>, Arc<AtomicU8>) {
++    let (wake_tx, wake_rx) = channel::<()>();
++    let pending = Arc::new(AtomicU8::new(0));
++    let worker_pending = pending.clone();
++    std::thread::Builder::new()
++        .name("shows-sync-worker".into())
++        .spawn(move || {
++            while wake_rx.recv().is_ok() {
++                let requested = worker_pending.swap(0, Ordering::AcqRel);
++                if requested & REQUEST_SYNC != 0 {
++                    syncer.sync();
++                } else if requested & REQUEST_PUSH != 0 {
++                    syncer.push();
++                }
++            }
++        })
++        .expect("spawn sync worker");
++    (wake_tx, pending)
++}
++
+ #[derive(Debug, Clone)]
+ pub struct RoundEntry {
+     pub show_id: String,
+@@ -349,6 +375,7 @@ pub type OnDrained = Box<dyn Fn() + Send + Sync>;
+ pub type OnError = Box<dyn Fn(&str) + Send + Sync>;
+ pub type OnFileSync = Box<dyn Fn(&FileSyncReport) + Send + Sync>;
+ pub type OnStatus = Box<dyn Fn(&str, &str) + Send + Sync>;
++pub type OnSyncProgress = Box<dyn Fn(&SyncProgress) + Send + Sync>;
+ 
+ #[derive(Default)]
+ pub struct Callbacks {
+@@ -358,6 +385,7 @@ pub struct Callbacks {
+     pub on_error: Option<OnError>,
+     pub on_file_sync: Option<OnFileSync>,
+     pub on_status: Option<OnStatus>,
++    pub on_sync_progress: Option<OnSyncProgress>,
+ }
+ 
+ struct Inner {
+@@ -376,6 +404,8 @@ pub struct Runner {
+     stop: Arc<StopFlag>,
+     cb: Callbacks,
+     inner: Mutex<Inner>,
++    sync_wake: Sender<()>,
++    sync_requests: Arc<AtomicU8>,
+ }
+ 
+ impl Runner {
+@@ -387,6 +417,7 @@ impl Runner {
+         stop: Arc<StopFlag>,
+         cb: Callbacks,
+     ) -> Runner {
++        let (sync_wake, sync_requests) = start_sync_worker(syncer.clone());
+         Runner {
+             replica,
+             syncer,
+@@ -401,29 +432,83 @@ impl Runner {
+                 playing: None,
+                 loaded_any: false,
+             }),
++            sync_wake,
++            sync_requests,
+         }
+     }
+ 
+     pub fn run(&self) {
+-        if let Some(cb) = &self.cb.on_status {
+-            cb("syncing", "syncing shared database");
++        self.emit_sync_progress(SyncProgress::new(
++            "startup.plan",
++            SyncProgressState::Started,
++            "Planning local-first startup",
++        ));
++        let has_local_library = self.replica.has_library_data();
++        self.emit_sync_progress(SyncProgress::new(
++            "startup.plan",
++            SyncProgressState::Succeeded,
++            if has_local_library {
++                "Local library is available; load it before shared-database sync"
++            } else {
++                "Local library is empty; seed it from the shared database before loading a round"
++            },
++        ));
++
++        // The only synchronous network path is a genuinely empty first install:
++        // without any local library there is nothing the offline engine can play.
++        if !has_local_library {
++            if let Some(cb) = &self.cb.on_status {
++                cb("syncing", "seeding empty local library");
++            }
++            self.syncer.sync();
+         }
+-        self.syncer.push(); // push any pending local changes or trigger auto-seed on startup
+-        self.syncer.seed(); // pull/reconcile once before the first local round
+         if let Some(cb) = &self.cb.on_status {
+-            cb("fetching", "loading round");
++            cb("fetching", "loading local round");
+         }
+-        self.run_loop();
++        self.run_loop(has_local_library);
+     }
+ 
+-    fn run_loop(&self) {
++    fn run_loop(&self, mut background_startup_sync: bool) {
++        let mut first_round = true;
+         while !self.stop.is_set() {
++            if first_round {
++                self.emit_sync_progress(SyncProgress::new(
++                    "local-round.load",
++                    SyncProgressState::Started,
++                    "Loading or selecting a round from the local replica",
++                ));
++            }
+             let (mut round, mut pos) = self.load_round_from_db();
+             if round.is_empty() {
+-                round = self.compute_and_save_new_round();
++                // A first-round queue is pushed only after local-round.load is
++                // terminal. Otherwise a first install can start an async push
++                // after origin.complete but before local completion, freezing
++                // a dangling `started` event into the launch-scoped timeline.
++                round = self.compute_and_save_new_round(!first_round);
+                 pos = 0;
+             }
++            if round.is_empty() && first_round && background_startup_sync {
++                // The replica is established but has no local round for the
++                // selected playlists. There is nothing useful to start, so wait
++                // for one reconciliation and retry locally before declaring it
++                // drained. A fire-and-forget worker would otherwise merge new
++                // playable rows and leave the runner parked until restart.
++                self.syncer.sync();
++                background_startup_sync = false;
++                (round, pos) = self.load_round_from_db();
++                if round.is_empty() {
++                    round = self.compute_and_save_new_round(false);
++                    pos = 0;
++                }
++            }
+             if round.is_empty() {
++                if first_round {
++                    self.emit_sync_progress(SyncProgress::new(
++                        "local-round.load",
++                        SyncProgressState::Skipped,
++                        "The local library has no playable round",
++                    ));
++                }
+                 log::info!("playlists drained: {}", self.playlists.join(","));
+                 if let Some(cb) = &self.cb.on_drained {
+                     cb();
+@@ -446,7 +531,34 @@ impl Runner {
+                 pos,
+                 round.get(pos).map(|e| e.episode_id.as_str()).unwrap_or("")
+             );
++            let file_cache_started = Instant::now();
++            if first_round {
++                self.emit_sync_progress(SyncProgress::new(
++                    "file-cache.check",
++                    SyncProgressState::Started,
++                    format!("Checking {} round file(s) in the local cache", round.len()),
++                ));
++            }
+             let file_sync = self.pull_and_prune_files(&round);
++            if first_round {
++                self.emit_sync_progress(
++                    SyncProgress::new(
++                        "file-cache.check",
++                        if file_sync.incomplete() {
++                            SyncProgressState::Failed
++                        } else {
++                            SyncProgressState::Succeeded
++                        },
++                        format!("Local round file check: {}", file_sync.summary()),
++                    )
++                    .with_duration(
++                        file_cache_started
++                            .elapsed()
++                            .as_millis()
++                            .min(u128::from(u64::MAX)) as u64,
++                    ),
++                );
++            }
+             if let Some(cb) = &self.cb.on_file_sync {
+                 cb(&file_sync);
+             }
+@@ -455,6 +567,24 @@ impl Runner {
+             if let Some(cb) = &self.cb.on_round {
+                 cb(&round, pos);
+             }
++            if first_round {
++                self.emit_sync_progress(SyncProgress::new(
++                    "local-round.load",
++                    SyncProgressState::Succeeded,
++                    format!("Loaded {} episode(s) from the local replica", round.len()),
++                ));
++                if background_startup_sync {
++                    // Playback is now fully queued. Only now may the worker touch
++                    // a sleeping origin, so no network wait can delay first play.
++                    self.request_full_sync();
++                } else if self.replica.dirty_queue().is_some() {
++                    // First install (or the drained/retry path) already completed
++                    // its origin pull. Flush the newly-created queue only after
++                    // local-round.load closes the boot timeline.
++                    self.request_push();
++                }
++                first_round = false;
++            }
+ 
+             let wait_res = self.player.wait_for_round_end(&self.stop);
+             if self.stop.is_set() {
+@@ -481,10 +611,31 @@ impl Runner {
+                 self.stop.wait();
+                 return;
+             }
+-            self.syncer.push(); // flush this round's advances (smart moment)
++            self.request_push(); // flush this round's advances without blocking playback
++        }
++    }
++
++    fn emit_sync_progress(&self, progress: SyncProgress) {
++        if let Some(cb) = &self.cb.on_sync_progress {
++            cb(&progress);
+         }
+     }
+ 
++    fn request_sync_work(&self, request: u8) {
++        let previous = self.sync_requests.fetch_or(request, Ordering::AcqRel);
++        if previous == 0 {
++            let _ = self.sync_wake.send(());
++        }
++    }
++
++    fn request_full_sync(&self) {
++        self.request_sync_work(REQUEST_SYNC);
++    }
++
++    fn request_push(&self) {
++        self.request_sync_work(REQUEST_PUSH);
++    }
++
+     // ── interactive controls (control-server thread) ─────────────────────
+     pub fn set_pos(&self, i: usize) {
+         self.inner.lock().unwrap().pos = i;
+@@ -507,7 +658,7 @@ impl Runner {
+         if let Some(cur) = cur {
+             let show_name = cur.show_name.clone();
+             self.apply_advance(&[cur]);
+-            self.syncer.push();
++            self.request_push();
+             ControlOutcome::applied("skipped", format!("skipped {show_name}"))
+         } else {
+             ControlOutcome::noop("no_current_episode", "nothing is currently selected")
+@@ -556,7 +707,7 @@ impl Runner {
+             .insert(cur.episode_id.clone());
+         self.replica
+             .update_round_entry_state(&cur.episode_id, "deferred", &cur.playlist);
+-        self.syncer.push();
++        self.request_push();
+         self.player.skip();
+         ControlOutcome::applied("deferred", format!("deferred {show_name}"))
+     }
+@@ -590,7 +741,7 @@ impl Runner {
+                 inner.pos = idx;
+             }
+             self.player.set_playlist_pos(idx);
+-            self.syncer.push();
++            self.request_push();
+             ControlOutcome::applied("playing_selected_show", format!("selected show {show_id}"))
+         } else {
+             log::warn!(
+@@ -726,7 +877,7 @@ impl Runner {
+         }
+     }
+ 
+-    fn compute_and_save_new_round(&self) -> Vec<RoundEntry> {
++    fn compute_and_save_new_round(&self, push: bool) -> Vec<RoundEntry> {
+         let round = self.fetch_round();
+         if !round.is_empty() {
+             let entries: Vec<(String, String, i32, String, String)> = round
+@@ -744,7 +895,9 @@ impl Runner {
+                 .collect();
+             let now = chrono::Utc::now().to_rfc3339();
+             self.replica.save_round_queue(&entries, &now, true);
+-            self.syncer.push();
++            if push {
++                self.request_push();
++            }
+         }
+         round
+     }
+@@ -1075,21 +1228,126 @@ mod tests {
+ 
+     #[derive(Default)]
+     struct StubSyncer {
+-        seeds: AtomicUsize,
++        syncs: AtomicUsize,
+         pushes: AtomicUsize,
+     }
+     impl SyncOps for StubSyncer {
+-        fn seed(&self) -> bool {
+-            self.seeds.fetch_add(1, Ordering::SeqCst);
++        fn sync(&self) -> bool {
++            self.syncs.fetch_add(1, Ordering::SeqCst);
++            true
++        }
++        fn push(&self) -> bool {
++            self.pushes.fetch_add(1, Ordering::SeqCst);
++            true
++        }
++        fn pending(&self) -> i64 {
++            0
++        }
++        fn online(&self) -> bool {
++            true
++        }
++    }
++
++    #[derive(Default)]
++    struct BlockGate {
++        state: Mutex<(bool, bool)>, // (entered, released)
++        changed: Condvar,
++    }
++
++    impl BlockGate {
++        fn enter_and_wait(&self) {
++            let mut state = self.state.lock().unwrap();
++            state.0 = true;
++            self.changed.notify_all();
++            while !state.1 {
++                state = self.changed.wait(state).unwrap();
++            }
++        }
++
++        fn wait_until_entered(&self, timeout: Duration) -> bool {
++            let state = self.state.lock().unwrap();
++            let (state, _) = self
++                .changed
++                .wait_timeout_while(state, timeout, |state| !state.0)
++                .unwrap();
++            state.0
++        }
++
++        fn release(&self) {
++            let mut state = self.state.lock().unwrap();
++            state.1 = true;
++            self.changed.notify_all();
++        }
++    }
++
++    struct GatedSyncer {
++        sync_gate: Option<Arc<BlockGate>>,
++        push_gate: Option<Arc<BlockGate>>,
++        seed: Option<(Arc<Replica>, Vec<LibraryShow>)>,
++        syncs: AtomicUsize,
++        pushes: AtomicUsize,
++    }
++
++    impl GatedSyncer {
++        fn blocking_sync(gate: Arc<BlockGate>) -> GatedSyncer {
++            GatedSyncer {
++                sync_gate: Some(gate),
++                push_gate: None,
++                seed: None,
++                syncs: AtomicUsize::new(0),
++                pushes: AtomicUsize::new(0),
++            }
++        }
++
++        fn blocking_seed(
++            gate: Arc<BlockGate>,
++            replica: Arc<Replica>,
++            shows: Vec<LibraryShow>,
++        ) -> GatedSyncer {
++            GatedSyncer {
++                sync_gate: Some(gate),
++                push_gate: None,
++                seed: Some((replica, shows)),
++                syncs: AtomicUsize::new(0),
++                pushes: AtomicUsize::new(0),
++            }
++        }
++
++        fn blocking_push(gate: Arc<BlockGate>) -> GatedSyncer {
++            GatedSyncer {
++                sync_gate: None,
++                push_gate: Some(gate),
++                seed: None,
++                syncs: AtomicUsize::new(0),
++                pushes: AtomicUsize::new(0),
++            }
++        }
++    }
++
++    impl SyncOps for GatedSyncer {
++        fn sync(&self) -> bool {
++            self.syncs.fetch_add(1, Ordering::SeqCst);
++            if let Some(gate) = &self.sync_gate {
++                gate.enter_and_wait();
++            }
++            if let Some((replica, shows)) = &self.seed {
++                replica.merge_shows(shows);
++            }
+             true
+         }
++
+         fn push(&self) -> bool {
+             self.pushes.fetch_add(1, Ordering::SeqCst);
++            if let Some(gate) = &self.push_gate {
++                gate.enter_and_wait();
++            }
+             true
+         }
++
+         fn pending(&self) -> i64 {
+             0
+         }
++
+         fn online(&self) -> bool {
+             true
+         }
+@@ -1143,10 +1401,28 @@ mod tests {
+         stop: Arc<StopFlag>,
+         cb: Callbacks,
+     ) -> Arc<Runner> {
+-        Arc::new(Runner::new(
++        runner_with_syncer(
+             r,
+             Arc::new(StubSyncer::default()),
+             player,
++            playlists,
++            stop,
++            cb,
++        )
++    }
++
++    fn runner_with_syncer(
++        r: Arc<Replica>,
++        syncer: Arc<dyn SyncOps>,
++        player: Arc<dyn PlayerOps>,
++        playlists: &[&str],
++        stop: Arc<StopFlag>,
++        cb: Callbacks,
++    ) -> Arc<Runner> {
++        Arc::new(Runner::new(
++            r,
++            syncer,
++            player,
+             playlists.iter().map(|s| s.to_string()).collect(),
+             stop,
+             cb,
+@@ -1166,34 +1442,277 @@ mod tests {
+ 
+     // ── interactive controls ─────────────────────────────────────────
+     #[test]
+-    fn startup_reports_sync_then_round_loading() {
+-        let r = replica(&[]);
++    fn established_startup_reports_local_progress_before_background_sync() {
++        let r = replica(&[show("s1", "nelson", &["a"])]);
+         let p = Arc::new(FakePlayer::default());
+         let stop = StopFlag::new();
+-        let statuses: Arc<Mutex<Vec<(String, String)>>> = Default::default();
+-        let (statuses2, stop2) = (statuses.clone(), stop.clone());
++        let syncer = Arc::new(StubSyncer::default());
++        let progress: Arc<Mutex<Vec<(String, SyncProgressState)>>> = Default::default();
++        let (progress2, stop2) = (progress.clone(), stop.clone());
+         let cb = Callbacks {
+-            on_status: Some(Box::new(move |phase, message| {
+-                statuses2
++            on_sync_progress: Some(Box::new(move |event| {
++                progress2
+                     .lock()
+                     .unwrap()
+-                    .push((phase.to_string(), message.to_string()));
++                    .push((event.stage.clone(), event.state));
+             })),
+-            on_drained: Some(Box::new(move || {
++            on_round: Some(Box::new(move |_, _| {
++                stop2.set();
++            })),
++            ..Default::default()
++        };
++        let run = runner_with_syncer(r, syncer.clone(), p, &["nelson"], stop, cb);
++
++        run.run();
++
++        assert_eq!(
++            *progress.lock().unwrap(),
++            vec![
++                ("startup.plan".into(), SyncProgressState::Started),
++                ("startup.plan".into(), SyncProgressState::Succeeded),
++                ("local-round.load".into(), SyncProgressState::Started),
++                ("file-cache.check".into(), SyncProgressState::Started),
++                ("file-cache.check".into(), SyncProgressState::Succeeded),
++                ("local-round.load".into(), SyncProgressState::Succeeded),
++            ]
++        );
++        for _ in 0..100 {
++            if syncer.syncs.load(Ordering::SeqCst) == 1 {
++                break;
++            }
++            std::thread::sleep(Duration::from_millis(5));
++        }
++        assert_eq!(syncer.syncs.load(Ordering::SeqCst), 1);
++    }
++
++    #[test]
++    fn established_replica_does_not_wait_for_blocking_startup_sync() {
++        let r = replica(&[show("s1", "nelson", &["a"])]);
++        let gate = Arc::new(BlockGate::default());
++        let syncer = Arc::new(GatedSyncer::blocking_sync(gate.clone()));
++        let stop = StopFlag::new();
++        let (round_tx, round_rx) = std::sync::mpsc::channel();
++        let stop2 = stop.clone();
++        let cb = Callbacks {
++            on_round: Some(Box::new(move |_, _| {
++                let _ = round_tx.send(());
+                 stop2.set();
+             })),
+             ..Default::default()
+         };
+-        let run = runner(r, p, &["nelson"], stop, cb);
++        let run = runner_with_syncer(
++            r,
++            syncer,
++            Arc::new(FakePlayer::default()),
++            &["nelson"],
++            stop,
++            cb,
++        );
++        let (done_tx, done_rx) = std::sync::mpsc::channel();
++        let handle = std::thread::spawn(move || {
++            run.run();
++            let _ = done_tx.send(());
++        });
++
++        round_rx
++            .recv_timeout(Duration::from_secs(1))
++            .expect("local round should load before origin sync finishes");
++        assert!(gate.wait_until_entered(Duration::from_secs(1)));
++        let returned_before_sync = done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
++        gate.release();
++        if !returned_before_sync {
++            let _ = done_rx.recv_timeout(Duration::from_secs(1));
++        }
++        handle.join().unwrap();
++        assert!(
++            returned_before_sync,
++            "runner startup was blocked by the background shared-database sync"
++        );
++    }
++
++    #[test]
++    fn established_drained_replica_retries_after_sync_adds_selected_playlist() {
++        let r = replica(&[show("other", "other", &["old"])]);
++        let gate = Arc::new(BlockGate::default());
++        let syncer = Arc::new(GatedSyncer::blocking_seed(
++            gate.clone(),
++            r.clone(),
++            vec![show("s1", "nelson", &["a"])],
++        ));
++        let stop = StopFlag::new();
++        let drained = Arc::new(AtomicUsize::new(0));
++        let drained2 = drained.clone();
++        let (round_tx, round_rx) = std::sync::mpsc::channel();
++        let stop2 = stop.clone();
++        let cb = Callbacks {
++            on_round: Some(Box::new(move |round, _| {
++                let _ = round_tx.send(round.len());
++                stop2.set();
++            })),
++            on_drained: Some(Box::new(move || {
++                drained2.fetch_add(1, Ordering::SeqCst);
++            })),
++            ..Default::default()
++        };
++        let run = runner_with_syncer(
++            r,
++            syncer.clone(),
++            Arc::new(FakePlayer::default()),
++            &["nelson"],
++            stop,
++            cb,
++        );
++        let (done_tx, done_rx) = std::sync::mpsc::channel();
++        let handle = std::thread::spawn(move || {
++            run.run();
++            let _ = done_tx.send(());
++        });
++
++        assert!(gate.wait_until_entered(Duration::from_secs(1)));
++        assert_eq!(
++            round_rx.recv_timeout(Duration::from_millis(100)),
++            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
++            "no round should load before reconciliation finishes"
++        );
++        assert_eq!(drained.load(Ordering::SeqCst), 0);
++
++        gate.release();
++        assert_eq!(round_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
++        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
++        handle.join().unwrap();
++        assert_eq!(syncer.syncs.load(Ordering::SeqCst), 1);
++        assert_eq!(drained.load(Ordering::SeqCst), 0);
++    }
++
++    #[test]
++    fn first_install_defers_new_queue_push_until_local_terminal() {
++        let r = replica(&[]);
++        let push_gate = Arc::new(BlockGate::default());
++        let syncer = Arc::new(GatedSyncer {
++            sync_gate: None,
++            push_gate: Some(push_gate.clone()),
++            seed: Some((r.clone(), vec![show("s1", "nelson", &["a"])])),
++            syncs: AtomicUsize::new(0),
++            pushes: AtomicUsize::new(0),
++        });
++        let stop = StopFlag::new();
++        let pushes_at_local_terminal = Arc::new(AtomicUsize::new(usize::MAX));
++        let observed = pushes_at_local_terminal.clone();
++        let syncer2 = syncer.clone();
++        let stop2 = stop.clone();
++        let cb = Callbacks {
++            on_sync_progress: Some(Box::new(move |event| {
++                if event.stage == "local-round.load"
++                    && event.state == SyncProgressState::Succeeded
++                {
++                    observed.store(syncer2.pushes.load(Ordering::SeqCst), Ordering::SeqCst);
++                    stop2.set();
++                }
++            })),
++            ..Default::default()
++        };
++        let run = runner_with_syncer(
++            r,
++            syncer.clone(),
++            Arc::new(FakePlayer::default()),
++            &["nelson"],
++            stop,
++            cb,
++        );
+ 
+         run.run();
+ 
+-        let statuses = statuses.lock().unwrap();
++        assert_eq!(syncer.syncs.load(Ordering::SeqCst), 1);
+         assert_eq!(
+-            statuses[0],
+-            ("syncing".into(), "syncing shared database".into())
++            pushes_at_local_terminal.load(Ordering::SeqCst),
++            0,
++            "the queue push must not start before local-round.load is terminal"
++        );
++        assert!(push_gate.wait_until_entered(Duration::from_secs(1)));
++        push_gate.release();
++    }
++
++    #[test]
++    fn empty_replica_waits_for_seed_before_loading_first_round() {
++        let r = replica(&[]);
++        let gate = Arc::new(BlockGate::default());
++        let syncer = Arc::new(GatedSyncer::blocking_seed(
++            gate.clone(),
++            r.clone(),
++            vec![show("s1", "nelson", &["a"])],
++        ));
++        let stop = StopFlag::new();
++        let (round_tx, round_rx) = std::sync::mpsc::channel();
++        let stop2 = stop.clone();
++        let cb = Callbacks {
++            on_round: Some(Box::new(move |_, _| {
++                let _ = round_tx.send(());
++                stop2.set();
++            })),
++            ..Default::default()
++        };
++        let run = runner_with_syncer(
++            r,
++            syncer.clone(),
++            Arc::new(FakePlayer::default()),
++            &["nelson"],
++            stop,
++            cb,
++        );
++        let (done_tx, done_rx) = std::sync::mpsc::channel();
++        let handle = std::thread::spawn(move || {
++            run.run();
++            let _ = done_tx.send(());
++        });
++
++        assert!(gate.wait_until_entered(Duration::from_secs(1)));
++        assert_eq!(
++            round_rx.recv_timeout(Duration::from_millis(100)),
++            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
++            "an empty replica must not select a round before its synchronous seed"
++        );
++        gate.release();
++        round_rx
++            .recv_timeout(Duration::from_secs(1))
++            .expect("seeded local round should load");
++        done_rx
++            .recv_timeout(Duration::from_secs(1))
++            .expect("runner should stop after the test round callback");
++        handle.join().unwrap();
++        assert_eq!(syncer.syncs.load(Ordering::SeqCst), 1);
++    }
++
++    #[test]
++    fn automatic_control_push_does_not_block_on_remote_io() {
++        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
++        let gate = Arc::new(BlockGate::default());
++        let syncer = Arc::new(GatedSyncer::blocking_push(gate.clone()));
++        let run = runner_with_syncer(
++            r,
++            syncer,
++            Arc::new(FakePlayer::default()),
++            &["nelson"],
++            StopFlag::new(),
++            Callbacks::default(),
++        );
++        set_round(&run);
++        run.set_pos(0);
++        let (done_tx, done_rx) = std::sync::mpsc::channel();
++        let handle = std::thread::spawn(move || {
++            let outcome = run.skip();
++            let _ = done_tx.send(outcome.ok());
++        });
++
++        assert!(gate.wait_until_entered(Duration::from_secs(1)));
++        let returned_before_push = done_rx
++            .recv_timeout(Duration::from_secs(1))
++            .unwrap_or(false);
++        gate.release();
++        handle.join().unwrap();
++        assert!(
++            returned_before_push,
++            "control path waited for its automatic remote push"
+         );
+-        assert_eq!(statuses[1], ("fetching".into(), "loading round".into()));
+     }
+ 
+     #[test]
+@@ -1456,7 +1975,7 @@ mod tests {
+             }
+             stop2.set();
+         }));
+-        run.run_loop();
++        run.run_loop(false);
+         assert!(watched(&r, "a").is_some());
+         assert!(watched(&r, "b").is_some());
+     }
+@@ -1488,7 +2007,7 @@ mod tests {
+             }
+             stop2.set();
+         }));
+-        run.run_loop();
++        run.run_loop(false);
+         assert!(watched(&r, "simpsons").is_some());
+         assert!(watched(&r, "malcolm").is_none());
+     }
+@@ -1515,7 +2034,7 @@ mod tests {
+             }
+             stop2.set();
+         }));
+-        run.run_loop();
++        run.run_loop(false);
+         assert!(watched(&r, "a").is_some());
+         assert!(watched(&r, "b").is_none());
+     }
+@@ -1566,7 +2085,7 @@ mod tests {
+             ..Default::default()
+         };
+         let run = runner(r.clone(), p, &["nelson"], stop, cb);
+-        run.run_loop();
++        run.run_loop(false);
+         assert!(
+             errors
+                 .lock()
+@@ -1592,7 +2111,7 @@ mod tests {
+             ..Default::default()
+         };
+         let run = runner(r, Arc::new(FakePlayer::default()), &["nelson"], stop, cb);
+-        run.run_loop();
++        run.run_loop(false);
+         assert!(drained.load(Ordering::SeqCst));
+     }
+ 
+diff --git a/desktop-rs/core/src/sync.rs b/desktop-rs/core/src/sync.rs
+index 1b76773..e3f538d 100644
+--- a/desktop-rs/core/src/sync.rs
++++ b/desktop-rs/core/src/sync.rs
+@@ -11,10 +11,12 @@
+ use crate::model::{LibraryEpisode, LibraryQueue, LibraryShow, RoundQueueEntry};
+ use crate::replica::{Replica, SCHEMA};
+ use rusqlite::{Connection, OptionalExtension};
++use serde::Serialize;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Mutex};
++use std::time::Instant;
+ 
+-#[derive(Debug, Clone)]
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+ pub struct PendingBreakdown {
+     pub shows: i64,
+     pub episodes: i64,
+@@ -22,6 +24,63 @@ pub struct PendingBreakdown {
+     pub queue: i64,
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "lowercase")]
++pub enum SyncProgressState {
++    Started,
++    Succeeded,
++    Skipped,
++    Failed,
++}
++
++impl SyncProgressState {
++    pub fn as_str(self) -> &'static str {
++        match self {
++            SyncProgressState::Started => "started",
++            SyncProgressState::Succeeded => "succeeded",
++            SyncProgressState::Skipped => "skipped",
++            SyncProgressState::Failed => "failed",
++        }
++    }
++}
++
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub struct SyncProgress {
++    pub stage: String,
++    pub state: SyncProgressState,
++    pub message: String,
++    pub duration_ms: Option<u64>,
++    pub pending: Option<PendingBreakdown>,
++}
++
++impl SyncProgress {
++    pub fn new(
++        stage: impl Into<String>,
++        state: SyncProgressState,
++        message: impl Into<String>,
++    ) -> SyncProgress {
++        SyncProgress {
++            stage: stage.into(),
++            state,
++            message: message.into(),
++            duration_ms: None,
++            pending: None,
++        }
++    }
++
++    pub fn with_duration(mut self, duration_ms: u64) -> SyncProgress {
++        self.duration_ms = Some(duration_ms);
++        self
++    }
++
++    pub fn with_pending(mut self, pending: PendingBreakdown) -> SyncProgress {
++        self.pending = Some(pending);
++        self
++    }
++}
++
++pub type SyncProgressCallback = Arc<dyn Fn(SyncProgress) + Send + Sync>;
++
+ impl PendingBreakdown {
+     pub fn total(&self) -> i64 {
+         self.shows + self.episodes + self.history + self.queue
+@@ -34,6 +93,8 @@ pub struct Syncer {
+     playlists: Vec<String>,
+     online: AtomicBool,
+     last_error: Mutex<Option<String>>,
++    progress_callback: Mutex<Option<SyncProgressCallback>>,
++    remote_operation: Mutex<()>,
+ }
+ 
+ impl Syncer {
+@@ -48,9 +109,15 @@ impl Syncer {
+             playlists,
+             online: AtomicBool::new(true), // optimistic; the first failed attempt flips it
+             last_error: Mutex::new(None),
++            progress_callback: Mutex::new(None),
++            remote_operation: Mutex::new(()),
+         }
+     }
+ 
++    pub fn set_progress_callback(&self, callback: Option<SyncProgressCallback>) {
++        *self.progress_callback.lock().unwrap() = callback;
++    }
++
+     pub fn online(&self) -> bool {
+         self.online.load(Ordering::Relaxed)
+     }
+@@ -75,115 +142,102 @@ impl Syncer {
+         *self.last_error.lock().unwrap() = Some(message);
+     }
+ 
++    fn emit(&self, progress: SyncProgress) {
++        log::info!(
++            "sync progress: stage={} state={} message={}",
++            progress.stage,
++            progress.state.as_str(),
++            progress.message
++        );
++        let callback = self.progress_callback.lock().unwrap().clone();
++        if let Some(callback) = callback {
++            callback(progress);
++        }
++    }
++
+     /// Pull the library and reconcile it into the replica (initial seed and later
+     /// pulls). Returns the resulting online state.
+     pub fn seed(&self) -> bool {
+-        if self.shared_db_path.is_none() {
+-            self.mark_offline("No shared DB path configured");
++        let _operation = self.remote_operation.lock().unwrap();
++        let Some(conn) = self.connect("seed") else {
+             return false;
+-        }
+-        match self.open_shared() {
+-            Ok(conn) => {
+-                match load_library_shows(&conn, &self.playlists) {
+-                    Ok(shows) => self.replica.merge_shows(&shows),
+-                    Err(e) => {
+-                        self.mark_offline(format!("Failed to load shows from shared DB: {e}"));
+-                        return false;
+-                    }
+-                }
+-                match load_library_queues(&conn, &self.playlists) {
+-                    Ok(queues) => self.replica.merge_queues(&queues),
+-                    Err(e) => {
+-                        self.mark_offline(format!("Failed to load queues from shared DB: {e}"));
+-                        return false;
+-                    }
+-                }
+-                self.mark_online();
+-                true
+-            }
+-            Err(e) => {
+-                self.mark_offline(format!("Failed to open shared DB for seed: {e}"));
+-                false
+-            }
+-        }
++        };
++        self.pull_with_connection(&conn)
+     }
+ 
+     /// Push dirty records and clear their dirty flags on success. No-op when
+     /// nothing is pending. Returns the resulting online state.
+     pub fn push(&self) -> bool {
+-        if self.shared_db_path.is_none() {
+-            self.mark_offline("No shared DB path configured");
++        let _operation = self.remote_operation.lock().unwrap();
++        let Some(mut conn) = self.connect("push") else {
+             return false;
+-        }
+-        let mut has_dirty = self.pending() > 0 || self.replica.dirty_queue().is_some();
+-
+-        // Auto-seed: if local database has shows but the shared database is completely empty,
+-        // mark all local records dirty to write them to the shared database.
+-        if !self.replica.active_shows(&self.playlists).is_empty() {
+-            if let Ok(conn) = self.open_shared() {
+-                if let Ok(count) =
+-                    conn.query_row("SELECT COUNT(*) FROM shows", [], |r| r.get::<_, i64>(0))
+-                {
+-                    if count == 0 {
+-                        log::info!(
+-                            "Shared DB is empty; auto-marking local database as dirty to seed it."
+-                        );
+-                        if let Err(e) = self.replica.mark_all_dirty() {
+-                            log::warn!("Failed to mark all records dirty for seeding: {e}");
+-                        } else {
+-                            has_dirty = true;
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-
+-        if !has_dirty {
+-            return match self.open_shared() {
+-                Ok(_) => {
+-                    self.mark_online();
+-                    true
+-                }
+-                Err(e) => {
+-                    self.mark_offline(format!("Failed to open shared DB for push: {e}"));
+-                    false
+-                }
+-            };
+-        }
+-        match self.open_shared() {
+-            Ok(mut conn) => match self.replica.push_to_shared(&mut conn) {
+-                Ok((show_ids, episode_ids, history_ids, queue_playlist)) => {
+-                    self.replica.mark_synced("shows", &show_ids);
+-                    self.replica.mark_synced("episodes", &episode_ids);
+-                    self.replica.mark_synced("watch_history", &history_ids);
+-                    if let Some(ref pl) = queue_playlist {
+-                        self.replica.mark_queue_synced(pl);
+-                    }
+-                    self.mark_online();
+-                    true
+-                }
+-                Err(e) => {
+-                    self.mark_offline(format!(
+-                        "Push failed; {} change(s) stay queued: {e}",
+-                        self.pending()
+-                    ));
+-                    false
+-                }
+-            },
+-            Err(e) => {
+-                self.mark_offline(format!("Failed to open shared DB for push: {e}"));
+-                false
+-            }
+-        }
++        };
++        self.push_with_connection(&mut conn)
+     }
+ 
+-    /// Push then pull — the manual "check connectivity" / reconcile action.
++    /// Push then pull over one serialized shared connection. Opening a sleeping
++    /// mapped drive is the expensive operation; a sync run must never pay for it
++    /// three times or race another remote operation.
+     pub fn sync(&self) -> bool {
+-        self.push();
+-        if self.online() {
+-            self.seed();
+-        }
+-        self.online()
++        let _operation = self.remote_operation.lock().unwrap();
++        let started = Instant::now();
++        let Some(mut conn) = self.connect("sync") else {
++            let pending = self.pending_breakdown();
++            self.emit(
++                SyncProgress::new(
++                    "origin.push",
++                    SyncProgressState::Skipped,
++                    "Push was not attempted because the shared database connection failed",
++                )
++                .with_pending(pending.clone()),
++            );
++            self.emit(SyncProgress::new(
++                "origin.pull",
++                SyncProgressState::Skipped,
++                "Pull was not attempted because the shared database connection failed",
++            ));
++            self.emit(
++                SyncProgress::new(
++                    "origin.complete",
++                    SyncProgressState::Failed,
++                    "Startup sync could not connect to the shared database",
++                )
++                .with_duration(elapsed_ms(started))
++                .with_pending(pending),
++            );
++            return false;
++        };
++
++        let pushed = self.push_with_connection(&mut conn);
++        let pulled = if pushed {
++            self.pull_with_connection(&conn)
++        } else {
++            self.emit(SyncProgress::new(
++                "origin.pull",
++                SyncProgressState::Skipped,
++                "Pull was not attempted because the local push failed",
++            ));
++            false
++        };
++        let succeeded = pushed && pulled;
++        self.emit(
++            SyncProgress::new(
++                "origin.complete",
++                if succeeded {
++                    SyncProgressState::Succeeded
++                } else {
++                    SyncProgressState::Failed
++                },
++                if succeeded {
++                    "Startup sync completed"
++                } else {
++                    "Startup sync failed; local playback remains available"
++                },
++            )
++            .with_duration(elapsed_ms(started))
++            .with_pending(self.pending_breakdown()),
++        );
++        succeeded
+     }
+ 
+     /// Unpushed local changes — the git "ahead" count.
+@@ -201,6 +255,192 @@ impl Syncer {
+         }
+     }
+ 
++    fn connect(&self, purpose: &str) -> Option<Connection> {
++        let path = self.shared_db_path.as_deref().unwrap_or("(not configured)");
++        let started = Instant::now();
++        self.emit(SyncProgress::new(
++            "origin.connect",
++            SyncProgressState::Started,
++            format!("Opening shared database at {path}"),
++        ));
++        match self.open_shared() {
++            Ok(conn) => {
++                self.emit(
++                    SyncProgress::new(
++                        "origin.connect",
++                        SyncProgressState::Succeeded,
++                        format!("Opened shared database at {path}"),
++                    )
++                    .with_duration(elapsed_ms(started)),
++                );
++                Some(conn)
++            }
++            Err(e) => {
++                let message = format!("Failed to open shared DB for {purpose}: {e}");
++                self.mark_offline(message.clone());
++                self.emit(
++                    SyncProgress::new("origin.connect", SyncProgressState::Failed, message)
++                        .with_duration(elapsed_ms(started)),
++                );
++                None
++            }
++        }
++    }
++
++    fn push_with_connection(&self, conn: &mut Connection) -> bool {
++        let started = Instant::now();
++        let mut pending = self.pending_breakdown();
++        self.emit(
++            SyncProgress::new(
++                "origin.push",
++                SyncProgressState::Started,
++                format!("Checking {} pending local change(s)", pending.total()),
++            )
++            .with_pending(pending.clone()),
++        );
++
++        if self.replica.has_library_data() {
++            let origin_count =
++                match conn.query_row("SELECT COUNT(*) FROM shows", [], |r| r.get::<_, i64>(0)) {
++                    Ok(count) => count,
++                    Err(e) => {
++                        let message = format!("Failed to inspect shared database before push: {e}");
++                        self.mark_offline(message.clone());
++                        self.emit(
++                            SyncProgress::new("origin.push", SyncProgressState::Failed, message)
++                                .with_duration(elapsed_ms(started))
++                                .with_pending(pending),
++                        );
++                        return false;
++                    }
++                };
++            if origin_count == 0 {
++                log::info!("Shared DB is empty; marking the local library dirty to seed it.");
++                if let Err(e) = self.replica.mark_all_dirty() {
++                    let message = format!("Failed to prepare local library for origin seed: {e}");
++                    self.mark_offline(message.clone());
++                    self.emit(
++                        SyncProgress::new("origin.push", SyncProgressState::Failed, message)
++                            .with_duration(elapsed_ms(started))
++                            .with_pending(pending),
++                    );
++                    return false;
++                }
++                pending = self.pending_breakdown();
++            }
++        }
++
++        if pending.total() == 0 {
++            self.mark_online();
++            self.emit(
++                SyncProgress::new(
++                    "origin.push",
++                    SyncProgressState::Skipped,
++                    "No local changes needed pushing",
++                )
++                .with_duration(elapsed_ms(started))
++                .with_pending(pending),
++            );
++            return true;
++        }
++
++        match self.replica.push_to_shared(conn) {
++            Ok(()) => {
++                self.mark_online();
++                self.emit(
++                    SyncProgress::new(
++                        "origin.push",
++                        SyncProgressState::Succeeded,
++                        format!("Pushed {} local change(s)", pending.total()),
++                    )
++                    .with_duration(elapsed_ms(started))
++                    .with_pending(pending),
++                );
++                true
++            }
++            Err(e) => {
++                let remaining = self.pending_breakdown();
++                let message = format!(
++                    "Push failed; {} change(s) stay queued: {e}",
++                    remaining.total()
++                );
++                self.mark_offline(message.clone());
++                self.emit(
++                    SyncProgress::new("origin.push", SyncProgressState::Failed, message)
++                        .with_duration(elapsed_ms(started))
++                        .with_pending(remaining),
++                );
++                false
++            }
++        }
++    }
++
++    fn pull_with_connection(&self, conn: &Connection) -> bool {
++        let pull_started = Instant::now();
++        self.emit(SyncProgress::new(
++            "origin.pull",
++            SyncProgressState::Started,
++            format!("Reading shared library for {}", self.playlists.join(", ")),
++        ));
++
++        let shows = match load_library_shows(conn, &self.playlists) {
++            Ok(shows) => shows,
++            Err(e) => {
++                let message = format!("Failed to load shows from shared DB: {e}");
++                self.mark_offline(message.clone());
++                self.emit(
++                    SyncProgress::new("origin.pull", SyncProgressState::Failed, message)
++                        .with_duration(elapsed_ms(pull_started)),
++                );
++                return false;
++            }
++        };
++        let queues = match load_library_queues(conn, &self.playlists) {
++            Ok(queues) => queues,
++            Err(e) => {
++                let message = format!("Failed to load queues from shared DB: {e}");
++                self.mark_offline(message.clone());
++                self.emit(
++                    SyncProgress::new("origin.pull", SyncProgressState::Failed, message)
++                        .with_duration(elapsed_ms(pull_started)),
++                );
++                return false;
++            }
++        };
++        let show_count = shows.len();
++        let episode_count: usize = shows.iter().map(|show| show.episodes.len()).sum();
++        let queue_count: usize = queues.iter().map(|queue| queue.entries.len()).sum();
++        self.emit(
++            SyncProgress::new(
++                "origin.pull",
++                SyncProgressState::Succeeded,
++                format!(
++                    "Read {show_count} show(s), {episode_count} episode(s), and {queue_count} queue entry(s)"
++                ),
++            )
++            .with_duration(elapsed_ms(pull_started)),
++        );
++
++        let merge_started = Instant::now();
++        self.emit(SyncProgress::new(
++            "replica.merge",
++            SyncProgressState::Started,
++            "Merging shared changes into the local replica",
++        ));
++        self.replica.merge_shows(&shows);
++        self.replica.merge_queues(&queues);
++        self.mark_online();
++        self.emit(
++            SyncProgress::new(
++                "replica.merge",
++                SyncProgressState::Succeeded,
++                format!("Merged {show_count} show(s) into the local replica"),
++            )
++            .with_duration(elapsed_ms(merge_started)),
++        );
++        true
++    }
++
+     fn open_shared(&self) -> Result<Connection, rusqlite::Error> {
+         let path = self.shared_db_path.as_ref().ok_or_else(|| {
+             rusqlite::Error::InvalidPath(std::path::PathBuf::from("No shared DB path configured"))
+@@ -212,6 +452,10 @@ impl Syncer {
+     }
+ }
+ 
++fn elapsed_ms(started: Instant) -> u64 {
++    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
++}
++
+ fn load_library_shows(
+     conn: &Connection,
+     playlists: &[String],
+@@ -512,4 +756,81 @@ mod tests {
+         assert_eq!(active[0].name, "S1");
+         assert_eq!(active[0].episodes.len(), 1);
+     }
++
++    #[test]
++    fn full_sync_reuses_one_connection_and_emits_ordered_progress() {
++        let local = Arc::new(Replica::new(":memory:"));
++        let shared_path = temp_db_path();
++        let shared = Replica::new(&shared_path);
++        shared.create_show("nelson", "S1", "D:\\A", &["a.mkv".into()]);
++
++        let syncer = Syncer::new(local.clone(), Some(shared_path), vec!["nelson".into()]);
++        let events: Arc<Mutex<Vec<(String, SyncProgressState)>>> = Default::default();
++        syncer.set_progress_callback(Some({
++            let events = events.clone();
++            Arc::new(move |progress| {
++                events
++                    .lock()
++                    .unwrap()
++                    .push((progress.stage, progress.state));
++            })
++        }));
++
++        assert!(syncer.sync());
++
++        let events = events.lock().unwrap().clone();
++        assert_eq!(
++            events,
++            vec![
++                ("origin.connect".into(), SyncProgressState::Started),
++                ("origin.connect".into(), SyncProgressState::Succeeded),
++                ("origin.push".into(), SyncProgressState::Started),
++                ("origin.push".into(), SyncProgressState::Skipped),
++                ("origin.pull".into(), SyncProgressState::Started),
++                ("origin.pull".into(), SyncProgressState::Succeeded),
++                ("replica.merge".into(), SyncProgressState::Started),
++                ("replica.merge".into(), SyncProgressState::Succeeded),
++                ("origin.complete".into(), SyncProgressState::Succeeded),
++            ]
++        );
++        assert_eq!(
++            events
++                .iter()
++                .filter(|(stage, state)| {
++                    stage == "origin.connect" && *state == SyncProgressState::Started
++                })
++                .count(),
++            1,
++            "a full push/pull sync must open the shared database exactly once"
++        );
++        assert_eq!(local.active_shows(&["nelson".into()]).len(), 1);
++    }
++
++    #[test]
++    fn failed_connection_reports_skipped_remote_work_before_completion() {
++        let local = Arc::new(Replica::new(":memory:"));
++        let syncer = Syncer::new(local, Some(missing_parent_db_path()), vec!["nelson".into()]);
++        let events: Arc<Mutex<Vec<(String, SyncProgressState)>>> = Default::default();
++        syncer.set_progress_callback(Some({
++            let events = events.clone();
++            Arc::new(move |progress| {
++                events
++                    .lock()
++                    .unwrap()
++                    .push((progress.stage, progress.state));
++            })
++        }));
++
++        assert!(!syncer.sync());
++        assert_eq!(
++            *events.lock().unwrap(),
++            vec![
++                ("origin.connect".into(), SyncProgressState::Started),
++                ("origin.connect".into(), SyncProgressState::Failed),
++                ("origin.push".into(), SyncProgressState::Skipped),
++                ("origin.pull".into(), SyncProgressState::Skipped),
++                ("origin.complete".into(), SyncProgressState::Failed),
++            ]
++        );
++    }
+ }
+diff --git a/desktop-rs/desktop/Cargo.toml b/desktop-rs/desktop/Cargo.toml
+index edd3e84..1526e70 100644
+--- a/desktop-rs/desktop/Cargo.toml
++++ b/desktop-rs/desktop/Cargo.toml
+@@ -4,6 +4,7 @@ version = "0.1.0"
+ edition = "2024"
+ 
+ [dependencies]
++chrono = "0.4.44"
+ env_logger = "0.11.10"
+ libloading = "0.9.0"
+ log = "0.4.30"
+diff --git a/desktop-rs/desktop/src/compositor.rs b/desktop-rs/desktop/src/compositor.rs
+index 159f8c7..4a758c2 100644
+--- a/desktop-rs/desktop/src/compositor.rs
++++ b/desktop-rs/desktop/src/compositor.rs
+@@ -55,8 +55,8 @@ const WM_WINDOW_CLOSE: u32 = WM_APP + 4;
+ const WM_SET_STAY_ON_TOP: u32 = WM_APP + 5;
+ // Begin a native window move (caption drag) initiated from the overlay — used in
+ // pin mode, where there is no titlebar and the bare video surface is the drag
+-// handle. The overlay decides what is draggable (it owns the DOM) and asks the
+-// host to start the standard move loop.
++// handle. The overlay decides what surface is draggable (it owns the DOM); the
++// host authorizes the move from live `is_on_top`, never echoed browser state.
+ const WM_BEGIN_DRAG: u32 = WM_APP + 6;
+ // Observability: id for the global Ctrl+Alt+F hotkey that stamps a monitor-flash
+ // marker into the log. Global (not an overlay keybind) because the flash happens
+@@ -735,6 +735,16 @@ fn obs_heartbeat(hwnd: HWND, state: &State) {
+             rc.bottom - rc.top,
+         );
+     }
++    // Shell state is cheap and authoritative. Re-echo it on the compositor's
++    // existing heartbeat so one coalesced/lost SSE frame cannot strand the
++    // overlay with the wrong titlebar or drag affordance while playback is
++    // paused. This is a state projection, not another source of truth.
++    if let Some(cb) = &state.status_callback {
++        cb(serde_json::json!({
++            "window_on_top": state.is_on_top,
++            "window_fullscreen": state.is_fullscreen,
++        }));
++    }
+ }
+ 
+ fn current_cursor_screen_pos() -> Option<POINT> {
+@@ -1341,6 +1351,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                 let changed = STATE.with(|s| {
+                     s.borrow_mut().as_mut().and_then(|st| {
+                         if st.is_on_top == desired {
++                            // Idempotent no-ops still acknowledge host truth.
++                            // If the change frame was lost, a repeated desired
++                            // command must be able to repair the overlay.
++                            if let Some(cb) = &st.status_callback {
++                                cb(serde_json::json!({ "window_on_top": st.is_on_top }));
++                            }
+                             return None;
+                         }
+                         st.is_on_top = desired;
+@@ -1437,6 +1453,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
+                 // Start the standard window-move loop as if the caption were
+                 // grabbed at the current cursor. The overlay posts this when the
+                 // user drags the bare video surface in pin mode (no titlebar).
++                let pinned = STATE.with(|s| {
++                    s.borrow()
++                        .as_ref()
++                        .map(|state| state.is_on_top)
++                        .unwrap_or(false)
++                });
++                if !pinned {
++                    return LRESULT(0);
++                }
+                 let _ = ReleaseCapture();
+                 let mut pt = POINT::default();
+                 let _ = GetCursorPos(&mut pt);
+diff --git a/desktop-rs/desktop/src/main.rs b/desktop-rs/desktop/src/main.rs
+index 9b1192e..c6020e4 100644
+--- a/desktop-rs/desktop/src/main.rs
++++ b/desktop-rs/desktop/src/main.rs
+@@ -49,8 +49,8 @@ impl NotifyingSyncer {
+ }
+ 
+ impl SyncOps for NotifyingSyncer {
+-    fn seed(&self) -> bool {
+-        let online = self.inner.seed();
++    fn sync(&self) -> bool {
++        let online = self.inner.sync();
+         self.notify();
+         online
+     }
+@@ -187,6 +187,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+             }
+         });
+     let server = ControlServer::new(dist_dir, replica.clone(), playlists.clone());
++    server.begin_startup_sync(syncer.shared_db_path());
++    syncer.set_progress_callback(Some({
++        let s = server.clone();
++        Arc::new(move |progress| s.append_startup_sync_event(progress.into()))
++    }));
+     let port = server.start();
+     let overlay_url = format!("http://127.0.0.1:{port}/");
+     log::info!("control server on {overlay_url}");
+@@ -215,7 +220,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+     // Runner pushes phase/round/advance into the control server's status.
+     let stop = StopFlag::new();
+     let cb = {
+-        let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status) = (
++        let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status, s_sync_progress) = (
++            server.clone(),
+             server.clone(),
+             server.clone(),
+             server.clone(),
+@@ -304,6 +310,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+                 };
+                 s_status.push_status(StatusPatch::phase(phase, message));
+             })),
++            on_sync_progress: Some(Box::new(move |progress| {
++                s_sync_progress.append_startup_sync_event(progress.clone().into());
++            })),
+         }
+     };
+     let runner_syncer = Arc::new(NotifyingSyncer::new(syncer.clone(), {
+diff --git a/desktop-rs/desktop/src/webserver.rs b/desktop-rs/desktop/src/webserver.rs
+index aec3941..a2bbe5d 100644
+--- a/desktop-rs/desktop/src/webserver.rs
++++ b/desktop-rs/desktop/src/webserver.rs
+@@ -9,7 +9,7 @@ use std::io::Read;
+ use std::path::{Path, PathBuf};
+ use std::sync::atomic::{AtomicU64, Ordering};
+ use std::sync::{Arc, Condvar, Mutex, Weak};
+-use std::time::Duration;
++use std::time::{Duration, Instant};
+ 
+ use serde_json::{Value, json};
+ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+@@ -17,7 +17,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+ use shows_core::replica::Replica;
+ use shows_core::runner::{ControlOutcome, Runner};
+ use shows_core::scan;
+-use shows_core::sync::Syncer;
++use shows_core::sync::{SyncProgress, SyncProgressState, Syncer};
+ 
+ use crate::player::Player;
+ 
+@@ -92,6 +92,188 @@ pub struct StatusFileSync {
+     pub problems: Vec<StatusFileSyncProblem>,
+ }
+ 
++#[derive(Debug, Clone)]
++pub struct StartupSyncCounts {
++    pub shows: i64,
++    pub episodes: i64,
++    pub history: i64,
++    pub queue: i64,
++}
++
++impl StartupSyncCounts {
++    fn total(&self) -> i64 {
++        self.shows + self.episodes + self.history + self.queue
++    }
++}
++
++#[derive(Debug, Clone)]
++pub struct StartupSyncEvent {
++    pub stage: String,
++    pub state: String,
++    pub message: String,
++    pub duration_ms: Option<u64>,
++    pub counts: Option<StartupSyncCounts>,
++}
++
++impl From<SyncProgress> for StartupSyncEvent {
++    fn from(progress: SyncProgress) -> Self {
++        let state = match progress.state {
++            SyncProgressState::Started => "started",
++            SyncProgressState::Succeeded => "succeeded",
++            SyncProgressState::Skipped => "skipped",
++            SyncProgressState::Failed => "failed",
++        };
++        Self {
++            stage: progress.stage,
++            state: state.into(),
++            message: progress.message,
++            duration_ms: progress.duration_ms,
++            counts: progress.pending.map(|pending| StartupSyncCounts {
++                shows: pending.shows,
++                episodes: pending.episodes,
++                history: pending.history,
++                queue: pending.queue,
++            }),
++        }
++    }
++}
++
++struct StartupSyncTimeline {
++    state: String,
++    started_at: String,
++    started: Instant,
++    finished_at: Option<String>,
++    elapsed_ms: Option<u64>,
++    shared_db_path: Option<String>,
++    playlists: Vec<String>,
++    next_seq: u64,
++    had_failure: bool,
++    local_done: bool,
++    origin_done: bool,
++    last_counts: Option<StartupSyncCounts>,
++    events: Vec<Value>,
++}
++
++impl StartupSyncTimeline {
++    fn new(shared_db_path: Option<String>, playlists: Vec<String>) -> Self {
++        Self {
++            state: "running".into(),
++            started_at: now_rfc3339(),
++            started: Instant::now(),
++            finished_at: None,
++            elapsed_ms: None,
++            shared_db_path,
++            playlists,
++            next_seq: 1,
++            had_failure: false,
++            local_done: false,
++            origin_done: false,
++            last_counts: None,
++            events: Vec::new(),
++        }
++    }
++
++    fn append(&mut self, event: StartupSyncEvent) -> bool {
++        // This object is deliberately launch-scoped. Smart-moment pushes and
++        // later manual syncs use the same Syncer callback but cannot rewrite or
++        // grow the completed boot trace.
++        if self.state != "running" {
++            return false;
++        }
++        let terminal = event.state != "started";
++        if event.stage == "local-round.load" && terminal {
++            self.local_done = true;
++        }
++        if event.stage == "origin.complete" && terminal {
++            self.origin_done = true;
++            if let Some(counts) = &event.counts {
++                self.last_counts = Some(counts.clone());
++            }
++        }
++        let seq = self.next_seq;
++        self.next_seq += 1;
++        if event.state == "failed" {
++            self.had_failure = true;
++        }
++        let counts = event.counts.map(|counts| {
++            json!({
++                "shows": counts.shows,
++                "episodes": counts.episodes,
++                "history": counts.history,
++                "queue": counts.queue,
++                "total": counts.total(),
++            })
++        });
++        self.events.push(json!({
++            "seq": seq,
++            "at": now_rfc3339(),
++            "stage": event.stage,
++            "state": event.state,
++            "message": event.message,
++            "duration_ms": event.duration_ms,
++            "counts": counts,
++        }));
++
++        if self.local_done && self.origin_done {
++            self.finish();
++        }
++        true
++    }
++
++    fn finish(&mut self) {
++        let succeeded = !self.had_failure;
++        let elapsed_ms = self.started.elapsed().as_millis() as u64;
++        let finished_at = now_rfc3339();
++        let counts = self.last_counts.as_ref().map(|counts| {
++            json!({
++                "shows": counts.shows,
++                "episodes": counts.episodes,
++                "history": counts.history,
++                "queue": counts.queue,
++                "total": counts.total(),
++            })
++        });
++        let seq = self.next_seq;
++        self.next_seq += 1;
++        self.events.push(json!({
++            "seq": seq,
++            "at": finished_at,
++            "stage": "startup.complete",
++            "state": if succeeded { "succeeded" } else { "failed" },
++            "message": if succeeded {
++                "Local round startup and origin reconciliation completed"
++            } else {
++                "Startup completed with one or more degraded steps"
++            },
++            "duration_ms": elapsed_ms,
++            "counts": counts,
++        }));
++        self.state = if succeeded {
++            "succeeded".into()
++        } else {
++            "degraded".into()
++        };
++        self.finished_at = Some(finished_at);
++        self.elapsed_ms = Some(elapsed_ms);
++    }
++
++    fn json(&self) -> Value {
++        json!({
++            "state": self.state,
++            "started_at": self.started_at,
++            "finished_at": self.finished_at,
++            "elapsed_ms": self.elapsed_ms,
++            "shared_db_path": self.shared_db_path,
++            "playlists": self.playlists,
++            "events": self.events,
++        })
++    }
++}
++
++fn now_rfc3339() -> String {
++    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
++}
++
+ #[derive(Debug, Clone)]
+ pub struct StatusPatch {
+     fields: serde_json::Map<String, Value>,
+@@ -230,6 +412,7 @@ pub struct ControlServer {
+     status: Mutex<serde_json::Map<String, Value>>,
+     status_events: StatusBroadcaster,
+     status_seq: AtomicU64,
++    startup_sync: Mutex<StartupSyncTimeline>,
+     player: Mutex<Option<Arc<Player>>>,
+     runner: Mutex<Option<Arc<Runner>>>,
+     syncer: Mutex<Option<Arc<Syncer>>>,
+@@ -256,6 +439,7 @@ impl ControlServer {
+         status.insert("window_maximized".into(), json!(false));
+         status.insert("window_fullscreen".into(), json!(false));
+         status.insert("window_on_top".into(), json!(false));
++        let startup_sync = StartupSyncTimeline::new(None, playlists.clone());
+         Arc::new(ControlServer {
+             dist_dir,
+             playlists,
+@@ -263,6 +447,7 @@ impl ControlServer {
+             status: Mutex::new(status),
+             status_events: StatusBroadcaster::default(),
+             status_seq: AtomicU64::new(0),
++            startup_sync: Mutex::new(startup_sync),
+             player: Mutex::new(None),
+             runner: Mutex::new(None),
+             syncer: Mutex::new(None),
+@@ -283,6 +468,19 @@ impl ControlServer {
+         *self.syncer.lock().unwrap() = Some(s);
+         self.notify();
+     }
++
++    pub fn begin_startup_sync(&self, shared_db_path: Option<String>) {
++        *self.startup_sync.lock().unwrap() =
++            StartupSyncTimeline::new(shared_db_path, self.playlists.clone());
++        self.notify();
++    }
++
++    pub fn append_startup_sync_event(&self, event: StartupSyncEvent) {
++        let appended = self.startup_sync.lock().unwrap().append(event);
++        if appended {
++            self.notify();
++        }
++    }
+     pub fn set_on_fullscreen(&self, f: FullscreenCb) {
+         *self.on_fullscreen.lock().unwrap() = Some(f);
+     }
+@@ -1004,6 +1202,10 @@ impl ControlServer {
+ 
+     fn status_json(&self) -> Value {
+         let mut status = self.status.lock().unwrap().clone();
++        status.insert(
++            "startup_sync".into(),
++            self.startup_sync.lock().unwrap().json(),
++        );
+         if let Some(p) = self.player.lock().unwrap().as_ref() {
+             status.insert("playback".into(), p.playback_state());
+         }
+@@ -1074,7 +1276,10 @@ impl ControlServer {
+         }
+     }
+     fn push_sync(&self) {
+-        if let Some(s) = self.syncer.lock().unwrap().clone() {
++        // Drop the server mutex before Syncer emits progress. Its callback
++        // broadcasts a status snapshot, which reads this same slot.
++        let syncer = self.syncer.lock().unwrap().clone();
++        if let Some(s) = syncer {
+             s.push();
+         }
+         self.notify();
+@@ -1574,6 +1779,23 @@ mod tests {
+         assert_eq!(buf, flush);
+     }
+ 
++    #[test]
++    fn identical_shell_state_is_rebroadcast_as_an_acknowledgement() {
++        let server = ControlServer::new(
++            None,
++            Arc::new(Replica::new(":memory:")),
++            vec!["nelson".to_string()],
++        );
++
++        server.push_raw(json!({"window_on_top": false}));
++        let after_first = server.status_seq.load(Ordering::Relaxed);
++        server.push_raw(json!({"window_on_top": false}));
++        let after_second = server.status_seq.load(Ordering::Relaxed);
++
++        assert_eq!(after_second, after_first + 1);
++        assert_eq!(server.status_json()["window_on_top"], false);
++    }
++
+     #[test]
+     fn control_outcome_json_reports_noop_status() {
+         let value = control_outcome_json(&ControlOutcome::Noop {
+@@ -1606,9 +1828,170 @@ mod tests {
+         assert_eq!(value["window_maximized"], false);
+         assert_eq!(value["window_fullscreen"], false);
+         assert_eq!(value["window_on_top"], false);
++        assert_eq!(value["startup_sync"]["state"], "running");
++        assert!(value["startup_sync"]["events"].is_array());
++        assert!(value["startup_sync"]["events"].as_array().unwrap().is_empty());
+         assert!(value["alerts"].is_array());
+     }
+ 
++    #[test]
++    fn startup_sync_timeline_is_ordered_retained_and_terminal() {
++        let server = ControlServer::new(
++            None,
++            Arc::new(Replica::new(":memory:")),
++            vec!["nelson".to_string()],
++        );
++        server.begin_startup_sync(Some("S:\\shows.db".into()));
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "local-round.load".into(),
++            state: "succeeded".into(),
++            message: "loaded local round".into(),
++            duration_ms: Some(8),
++            counts: None,
++        });
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "origin.connect".into(),
++            state: "started".into(),
++            message: "opening shared database".into(),
++            duration_ms: None,
++            counts: None,
++        });
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "origin.connect".into(),
++            state: "succeeded".into(),
++            message: "opened shared database".into(),
++            duration_ms: Some(24_123),
++            counts: None,
++        });
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "origin.complete".into(),
++            state: "succeeded".into(),
++            message: "origin reconciliation complete".into(),
++            duration_ms: Some(24_130),
++            counts: Some(StartupSyncCounts {
++                shows: 1,
++                episodes: 2,
++                history: 3,
++                queue: 4,
++            }),
++        });
++
++        let value = server.status_json();
++        let sync = &value["startup_sync"];
++        assert_eq!(sync["state"], "succeeded");
++        assert_eq!(sync["shared_db_path"], "S:\\shows.db");
++        assert_eq!(sync["playlists"], json!(["nelson"]));
++        assert!(sync["finished_at"].is_string());
++        assert!(sync["elapsed_ms"].is_number());
++        assert_eq!(sync["events"].as_array().unwrap().len(), 5);
++        assert_eq!(sync["events"][0]["seq"], 1);
++        assert_eq!(sync["events"][1]["seq"], 2);
++        assert_eq!(sync["events"][2]["seq"], 3);
++        assert_eq!(sync["events"][3]["seq"], 4);
++        assert_eq!(sync["events"][4]["seq"], 5);
++        assert_eq!(sync["events"][2]["duration_ms"], 24_123);
++        assert_eq!(sync["events"][3]["counts"]["total"], 10);
++        assert_eq!(sync["events"][4]["stage"], "startup.complete");
++        assert_eq!(sync["events"][4]["counts"]["total"], 10);
++
++        // The timeline lives in the full status projection, so a subscriber
++        // arriving after completion receives all earlier events in its first frame.
++        let initial_frame = server.status_frame(&value);
++        assert!(initial_frame.contains("\"stage\":\"origin.connect\""));
++        assert!(initial_frame.contains("\"stage\":\"startup.complete\""));
++    }
++
++    #[test]
++    fn failed_startup_step_makes_terminal_timeline_degraded() {
++        let server = ControlServer::new(
++            None,
++            Arc::new(Replica::new(":memory:")),
++            vec!["nelson".to_string()],
++        );
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "origin.connect".into(),
++            state: "failed".into(),
++            message: "shared database unavailable".into(),
++            duration_ms: Some(5_000),
++            counts: None,
++        });
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "origin.complete".into(),
++            state: "failed".into(),
++            message: "continuing from local replica".into(),
++            duration_ms: Some(5_001),
++            counts: None,
++        });
++        assert_eq!(server.status_json()["startup_sync"]["state"], "running");
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "local-round.load".into(),
++            state: "succeeded".into(),
++            message: "loaded local round".into(),
++            duration_ms: Some(10),
++            counts: None,
++        });
++
++        assert_eq!(server.status_json()["startup_sync"]["state"], "degraded");
++    }
++
++    #[test]
++    fn startup_timeline_waits_for_local_result_and_ignores_later_syncs() {
++        let server = ControlServer::new(
++            None,
++            Arc::new(Replica::new(":memory:")),
++            vec!["nelson".to_string()],
++        );
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "origin.complete".into(),
++            state: "succeeded".into(),
++            message: "origin ready".into(),
++            duration_ms: Some(2),
++            counts: None,
++        });
++        assert_eq!(server.status_json()["startup_sync"]["state"], "running");
++
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "file-cache.check".into(),
++            state: "failed".into(),
++            message: "one local file is missing".into(),
++            duration_ms: Some(3),
++            counts: None,
++        });
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "local-round.load".into(),
++            state: "succeeded".into(),
++            message: "local round loaded".into(),
++            duration_ms: Some(4),
++            counts: None,
++        });
++        let completed = server.status_json();
++        assert_eq!(completed["startup_sync"]["state"], "degraded");
++        let completed_len = completed["startup_sync"]["events"]
++            .as_array()
++            .unwrap()
++            .len();
++        assert_eq!(
++            completed["startup_sync"]["events"][completed_len - 1]["stage"],
++            "startup.complete"
++        );
++
++        server.append_startup_sync_event(StartupSyncEvent {
++            stage: "origin.push".into(),
++            state: "started".into(),
++            message: "later smart-moment push".into(),
++            duration_ms: None,
++            counts: None,
++        });
++        assert_eq!(
++            server.status_json()["startup_sync"]["events"]
++                .as_array()
++                .unwrap()
++                .len(),
++            completed_len,
++            "post-boot sync events must not grow the launch trace"
++        );
++    }
++
+     #[test]
+     fn non_error_phase_patch_clears_blocked_round_state() {
+         let patch = StatusPatch::phase(StatusPhase::Fetching, "loading round");
+diff --git a/desktop-rs/frontend/.gitignore b/desktop-rs/frontend/.gitignore
+index b947077..7f70b50 100644
+--- a/desktop-rs/frontend/.gitignore
++++ b/desktop-rs/frontend/.gitignore
+@@ -1,2 +1,3 @@
+ node_modules/
+ dist/
++.test-dist/
+diff --git a/desktop-rs/frontend/package.json b/desktop-rs/frontend/package.json
+index f0106ca..d3c70e2 100644
+--- a/desktop-rs/frontend/package.json
++++ b/desktop-rs/frontend/package.json
+@@ -5,8 +5,10 @@
+   "type": "module",
+   "scripts": {
+     "dev": "vite",
++    "prebuild": "npm test",
+     "build": "tsc && vite build",
+-    "preview": "vite preview"
++    "preview": "vite preview",
++    "test": "tsc --target ES2022 --module ESNext --moduleResolution Node --outDir .test-dist --rootDir src --skipLibCheck src/pinSync.ts && node --test test/pinSync.test.mjs"
+   },
+   "dependencies": {
+     "react": "^18.2.0",
+@@ -19,4 +21,4 @@
+     "typescript": "^4.6.4",
+     "vite": "^3.0.7"
+   }
+-}
+\ No newline at end of file
++}
+diff --git a/desktop-rs/frontend/src/App.css b/desktop-rs/frontend/src/App.css
+index abdd9dd..a422284 100644
+--- a/desktop-rs/frontend/src/App.css
++++ b/desktop-rs/frontend/src/App.css
+@@ -1552,3 +1552,455 @@ button.gb.toggle-view-btn {
+     display: none;
+   }
+ }
++
++/* Startup sync diagnostics. */
++.sync-log-tab,
++.sync-log-panel {
++  width: 100%;
++  min-width: 0;
++}
++
++.sync-log-panel {
++  --sync-accent: var(--fg-dim);
++  --sync-tint: color-mix(in srgb, var(--fg) 5%, transparent);
++  max-width: 980px;
++  margin: 0 auto;
++  padding-bottom: 24px;
++}
++
++.sync-log-hero {
++  --sync-accent: var(--fg-dim);
++  --sync-tint: color-mix(in srgb, var(--fg) 5%, transparent);
++  padding: 20px;
++  border: 1px solid color-mix(in srgb, var(--sync-accent) 34%, var(--border));
++  border-radius: 10px;
++  background:
++    linear-gradient(135deg, var(--sync-tint), transparent 56%),
++    var(--surface);
++  box-shadow: inset 3px 0 0 var(--sync-accent);
++}
++
++.sync-log-hero.running {
++  --sync-accent: var(--state-busy-fg);
++  --sync-tint: color-mix(in srgb, var(--state-busy-bg) 65%, transparent);
++}
++
++.sync-log-hero.succeeded {
++  --sync-accent: var(--state-success-fg);
++  --sync-tint: color-mix(in srgb, var(--state-success-bg) 65%, transparent);
++}
++
++.sync-log-hero.degraded {
++  --sync-accent: var(--state-pending-fg);
++  --sync-tint: color-mix(in srgb, var(--state-pending-bg) 65%, transparent);
++}
++
++.sync-log-title-row,
++.sync-timeline-heading,
++.sync-event-header,
++.sync-event-meta {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 16px;
++}
++
++.sync-log-title-row h2,
++.sync-timeline-heading h3 {
++  margin: 0;
++  color: var(--fg);
++  font-weight: 600;
++  letter-spacing: -0.015em;
++}
++
++.sync-log-title-row h2 {
++  font-size: 22px;
++}
++
++.sync-timeline-heading h3 {
++  font-size: 17px;
++}
++
++.sync-log-eyebrow {
++  margin: 0 0 4px;
++  color: var(--fg-dim);
++  font-size: 10.5px;
++  font-weight: 650;
++  letter-spacing: 0.12em;
++  text-transform: uppercase;
++}
++
++.sync-log-lede {
++  max-width: 680px;
++  margin: 12px 0 18px;
++  color: var(--fg-muted);
++  font-size: 13px;
++  line-height: 1.55;
++}
++
++.sync-overall-state,
++.sync-event-state {
++  display: inline-flex;
++  align-items: center;
++  flex: 0 0 auto;
++  border: 1px solid color-mix(in srgb, var(--sync-accent) 42%, var(--border));
++  border-radius: 999px;
++  background: var(--sync-tint);
++  color: var(--sync-accent);
++  font-size: 10.5px;
++  font-weight: 700;
++  letter-spacing: 0.08em;
++  line-height: 1;
++  text-transform: uppercase;
++}
++
++.sync-overall-state {
++  gap: 7px;
++  padding: 7px 10px;
++}
++
++.sync-overall-state::before {
++  width: 7px;
++  height: 7px;
++  border-radius: 50%;
++  background: currentColor;
++  content: '';
++}
++
++.sync-overall-state.running {
++  --sync-accent: var(--state-busy-fg);
++  --sync-tint: color-mix(in srgb, var(--state-busy-bg) 70%, transparent);
++}
++
++.sync-overall-state.succeeded {
++  --sync-accent: var(--state-success-fg);
++  --sync-tint: color-mix(in srgb, var(--state-success-bg) 70%, transparent);
++}
++
++.sync-overall-state.degraded {
++  --sync-accent: var(--state-pending-fg);
++  --sync-tint: color-mix(in srgb, var(--state-pending-bg) 70%, transparent);
++}
++
++.sync-overall-state.running::before {
++  animation: sync-pulse 1.5s ease-in-out infinite;
++}
++
++.sync-log-summary {
++  display: grid;
++  grid-template-columns: repeat(3, minmax(0, 1fr));
++  gap: 8px;
++  margin: 0;
++}
++
++.sync-summary-item {
++  min-width: 0;
++  padding: 11px 12px;
++  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
++  border-radius: 6px;
++  background: color-mix(in srgb, var(--bg) 48%, transparent);
++}
++
++.sync-summary-item.sync-summary-wide {
++  grid-column: span 2;
++}
++
++.sync-summary-item dt {
++  margin-bottom: 5px;
++  color: var(--fg-dim);
++  font-size: 9.5px;
++  font-weight: 700;
++  letter-spacing: 0.1em;
++  text-transform: uppercase;
++}
++
++.sync-summary-item dd {
++  min-width: 0;
++  margin: 0;
++  overflow-wrap: anywhere;
++  color: var(--fg-secondary);
++  font-size: 12px;
++  line-height: 1.4;
++}
++
++.sync-summary-item code {
++  color: var(--fg-secondary);
++  font-family: var(--font-code);
++  font-size: 11px;
++  white-space: normal;
++}
++
++.sync-summary-item .sync-elapsed {
++  color: var(--sync-accent);
++  font-size: 16px;
++  font-variant-numeric: tabular-nums;
++  font-weight: 650;
++}
++
++.sync-timeline-heading {
++  margin: 24px 2px 13px;
++}
++
++.sync-timeline-heading > span {
++  color: var(--fg-dim);
++  font-size: 11px;
++  font-variant-numeric: tabular-nums;
++}
++
++.sync-timeline {
++  margin: 0;
++  padding: 0;
++  list-style: none;
++}
++
++.sync-event {
++  --event-color: var(--fg-dim);
++  position: relative;
++  display: grid;
++  grid-template-columns: 78px 16px minmax(0, 1fr);
++  gap: 12px;
++  padding: 0 0 14px;
++}
++
++.sync-event.started {
++  --event-color: var(--state-busy-fg);
++}
++
++.sync-event.succeeded {
++  --event-color: var(--state-success-fg);
++}
++
++.sync-event.skipped {
++  --event-color: var(--state-pending-fg);
++}
++
++.sync-event.failed {
++  --event-color: var(--state-danger-fg);
++}
++
++.sync-event:not(:last-child)::after {
++  position: absolute;
++  top: 18px;
++  bottom: -4px;
++  left: 97px;
++  width: 1px;
++  background: var(--border);
++  content: '';
++}
++
++.sync-event-time {
++  padding-top: 12px;
++  color: var(--fg-dim);
++  font-family: var(--font-code);
++  font-size: 10.5px;
++  font-variant-numeric: tabular-nums;
++  text-align: right;
++  white-space: nowrap;
++}
++
++.sync-event-marker {
++  position: relative;
++  z-index: 1;
++  width: 9px;
++  height: 9px;
++  margin: 14px auto 0;
++  border: 2px solid var(--event-color);
++  border-radius: 50%;
++  background: var(--bg);
++  box-shadow: 0 0 0 3px var(--bg);
++}
++
++.sync-event.started .sync-event-marker {
++  background: var(--event-color);
++  animation: sync-pulse 1.5s ease-in-out infinite;
++}
++
++.sync-event-card {
++  min-width: 0;
++  padding: 12px 14px;
++  border: 1px solid var(--border);
++  border-radius: 7px;
++  background: color-mix(in srgb, var(--surface) 82%, transparent);
++}
++
++.sync-event.failed .sync-event-card {
++  border-color: color-mix(in srgb, var(--state-danger-fg) 42%, var(--border));
++  background: color-mix(in srgb, var(--state-danger-bg) 44%, var(--surface));
++}
++
++.sync-event-stage {
++  display: flex;
++  align-items: baseline;
++  min-width: 0;
++  gap: 8px;
++}
++
++.sync-event-stage strong {
++  overflow: hidden;
++  color: var(--fg);
++  font-size: 12.5px;
++  font-weight: 600;
++  text-overflow: ellipsis;
++  text-transform: capitalize;
++  white-space: nowrap;
++}
++
++.sync-event-seq {
++  color: var(--fg-dimmest);
++  font-family: var(--font-code);
++  font-size: 9.5px;
++  font-variant-numeric: tabular-nums;
++}
++
++.sync-event-state {
++  --sync-accent: var(--event-color);
++  --sync-tint: color-mix(in srgb, var(--event-color) 10%, transparent);
++  padding: 5px 7px;
++  font-size: 9px;
++}
++
++.sync-event-card > p {
++  margin: 7px 0 0;
++  color: var(--fg-muted);
++  font-size: 12px;
++  line-height: 1.5;
++}
++
++.sync-event-meta {
++  justify-content: flex-start;
++  flex-wrap: wrap;
++  margin-top: 9px;
++  color: var(--fg-dim);
++  font-family: var(--font-code);
++  font-size: 9.5px;
++  font-variant-numeric: tabular-nums;
++}
++
++.sync-event-duration {
++  color: var(--event-color);
++  font-weight: 650;
++}
++
++.sync-event-counts {
++  display: inline-flex;
++  flex-wrap: wrap;
++  gap: 6px;
++}
++
++.sync-event-counts strong {
++  color: var(--fg-secondary);
++  font-weight: 600;
++}
++
++.sync-log-empty {
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: center;
++  min-height: 220px;
++  padding: 28px;
++  border: 1px dashed var(--border-strong);
++  border-radius: 10px;
++  background: color-mix(in srgb, var(--surface) 56%, transparent);
++  color: var(--fg-muted);
++  text-align: center;
++}
++
++.sync-log-title-row + .sync-log-empty {
++  margin-top: 16px;
++}
++
++.sync-log-empty.compact {
++  min-height: 120px;
++}
++
++.sync-log-empty-mark {
++  width: 11px;
++  height: 11px;
++  margin-bottom: 12px;
++  border: 2px solid var(--state-busy-fg);
++  border-radius: 50%;
++  box-shadow: 0 0 0 5px color-mix(in srgb, var(--state-busy-fg) 10%, transparent);
++}
++
++.sync-log-empty strong {
++  color: var(--fg-secondary);
++  font-size: 13px;
++  font-weight: 600;
++}
++
++.sync-log-empty p {
++  max-width: 510px;
++  margin: 7px 0 0;
++  color: var(--fg-dim);
++  font-size: 12px;
++  line-height: 1.55;
++}
++
++@keyframes sync-pulse {
++  0%, 100% { opacity: 1; transform: scale(1); }
++  50% { opacity: 0.45; transform: scale(0.82); }
++}
++
++@media (max-width: 760px) {
++  .sync-log-summary {
++    grid-template-columns: repeat(2, minmax(0, 1fr));
++  }
++
++  .sync-event {
++    grid-template-columns: 66px 14px minmax(0, 1fr);
++    gap: 9px;
++  }
++
++  .sync-event:not(:last-child)::after {
++    left: 81.5px;
++  }
++}
++
++@media (max-width: 560px) {
++  .sync-log-hero {
++    padding: 16px;
++  }
++
++  .sync-log-summary {
++    grid-template-columns: minmax(0, 1fr);
++  }
++
++  .sync-summary-item.sync-summary-wide {
++    grid-column: span 1;
++  }
++
++  .sync-event {
++    grid-template-columns: 12px minmax(0, 1fr);
++  }
++
++  .sync-event-time {
++    grid-column: 2;
++    grid-row: 1;
++    padding: 0 0 3px;
++    text-align: left;
++  }
++
++  .sync-event-marker {
++    grid-column: 1;
++    grid-row: 2;
++    margin-top: 15px;
++  }
++
++  .sync-event-card {
++    grid-column: 2;
++    grid-row: 2;
++  }
++
++  .sync-event:not(:last-child)::after {
++    top: 37px;
++    left: 5.5px;
++  }
++}
++
++@media (prefers-reduced-motion: reduce) {
++  .sync-overall-state.running::before,
++  .sync-event.started .sync-event-marker {
++    animation: none;
++  }
++}
+diff --git a/desktop-rs/frontend/src/App.tsx b/desktop-rs/frontend/src/App.tsx
+index 2063767..012571b 100644
+--- a/desktop-rs/frontend/src/App.tsx
++++ b/desktop-rs/frontend/src/App.tsx
+@@ -46,12 +46,14 @@ import {
+   fetchShowDetails,
+   type ShowDetailsResponse,
+ } from './api';
++import {PinSyncController} from './pinSync';
+ import './App.css';
+ 
+ const VOLUME_MIN = 0;
+ const VOLUME_MAX = 130;
+ const VOLUME_STEP = 5;
+ const CONTROLS_IDLE_MS = 2000;
++const PIN_ACK_TIMEOUT_MS = 1500;
+ 
+ function clampVolume(volume: number): number {
+   if (!Number.isFinite(volume)) return VOLUME_MIN;
+@@ -114,6 +116,10 @@ function App() {
+     message: '',
+     playlist: '',
+   });
++  // Advances for every full status snapshot, even when an individual field has
++  // the same primitive value. Shell-state heartbeats use same-value snapshots
++  // as acknowledgements after a coalesced pin/unpin edge.
++  const [statusRevision, setStatusRevision] = useState(0);
+   const [shows, setShows] = useState<Show[]>([]);
+   const [selected, setSelected] = useState<string | null>(null);
+   const [showDetails, setShowDetails] = useState<ShowDetailsResponse | null>(null);
+@@ -130,7 +136,10 @@ function App() {
+   const [controlToast, setControlToast] = useState<{message: string; level: 'info' | 'danger'} | null>(null);
+   const [repairedRoundEntries, setRepairedRoundEntries] = useState<Set<string>>(() => new Set());
+ 
+-  useEffect(() => subscribeStatus(setStatus), []);
++  useEffect(() => subscribeStatus((nextStatus) => {
++    setStatus(nextStatus);
++    setStatusRevision((revision) => revision + 1);
++  }), []);
+ 
+   const showControlToast = useCallback((message: string, level: 'info' | 'danger' = 'info') => {
+     setControlToast({message, level});
+@@ -329,12 +338,9 @@ function App() {
+   //    highlight and the direction of the next toggle command. Updated
+   //    immediately on click so the control feels instant, and rolled back to
+   //    host truth if a command is lost (see pumpOnTopQueue).
+-  //  - `hostOnTopRef`: the HOST-CONFIRMED truth echoed as status.window_on_top.
+-  //    It alone decides whether a native caption exists, so the surface-drag
+-  //    handle must gate on it (never on the optimistic intent) to stay in
+-  //    lockstep with the host's nc_hit `has_titlebar`. Otherwise a lost command
+-  //    can leave the window with zero drag handles (caption gone AND surface
+-  //    drag suppressed) — the "can't move the window" failure.
++  //  - `hostOnTopRef`: the most recently echoed HOST-CONFIRMED truth. It is
++  //    used for failed-command rollback; native code authorizes surface drag
++  //    from its live `is_on_top`, so an SSE delay cannot remove both handles.
+   const onTopRef = useRef(false);
+   const hostOnTopRef = useRef(false);
+   const [pinned, setPinned] = useState(false);
+@@ -344,7 +350,7 @@ function App() {
+   }, []);
+   const surfaceDragProps = {
+     onPointerDown: (e: ReactPointerEvent) => {
+-      if (!hostOnTopRef.current || e.button !== 0) return;
++      if (e.button !== 0) return;
+       surfaceDragStart.current = { x: e.screenX, y: e.screenY };
+     },
+     onPointerMove: (e: ReactPointerEvent) => {
+@@ -365,16 +371,12 @@ function App() {
+ 
+   // Pin (stay-on-top) follows ADR-0001's optimistic + idempotent-set +
+   // reconcile pattern, with one correction the pause/volume controls don't
+-  // need: those are re-echoed on every mpv heartbeat, so a missed reconcile
+-  // self-heals; window_on_top is emitted ONLY on change, so a stranded
+-  // optimistic value would never recover. We therefore (a) keep ONE optimistic
+-  // value (`pinned`/`onTopRef`) as the single source for both highlight and
+-  // command direction, (b) roll it back to host truth when a command is lost,
+-  // and (c) track the host-confirmed value in `hostOnTopRef` for the drag gate.
+-  const onTopSync = useRef<{ desired: boolean | null; inFlight: boolean }>({
+-    desired: null,
+-    inFlight: false,
+-  });
++  // need: shell truth is re-echoed by the compositor heartbeat so a missed edge
++  // self-heals. We therefore (a) keep ONE optimistic value
++  // (`pinned`/`onTopRef`) as the single source for both highlight and command
++  // direction, (b) roll it back to host truth when a command is lost, and (c)
++  // track the last host-confirmed value in `hostOnTopRef` for rollback.
++  const onTopSync = useRef(new PinSyncController());
+ 
+   // Mirror the host-confirmed pin state into a ref the instant it is echoed, so
+   // failure-rollback and the surface-drag gate always read current host truth.
+@@ -385,55 +387,50 @@ function App() {
+   useEffect(() => {
+     if (status.window_on_top == null) return;
+     const observed = Boolean(status.window_on_top);
+-    const desired = onTopSync.current.desired;
+-    if (desired === null || observed === desired) {
+-      onTopSync.current.desired = null;
+-      setPinnedOptimistic(observed);
+-    }
+-  }, [status.window_on_top, setPinnedOptimistic]);
++    const reconciled = onTopSync.current.observe(observed);
++    if (reconciled !== null) setPinnedOptimistic(reconciled);
++  }, [status.window_on_top, statusRevision, setPinnedOptimistic]);
+ 
+   const pumpOnTopQueue = useCallback(() => {
+     const sync = onTopSync.current;
+-    if (sync.inFlight || sync.desired === null) return;
++    const request = sync.dispatch();
++    if (request === null) return;
++
++    const settle = (succeeded: boolean) => {
++      const outcome = onTopSync.current.settle(request, succeeded);
++      if (outcome.rollback) {
++        // Command lost: undo the optimistic advance back to the host's
++        // last-confirmed state. Without this the next click computes the
++        // wrong direction (a silent no-op against the idempotent host) and
++        // the surface-drag gate desyncs from the real caption state.
++        setPinnedOptimistic(hostOnTopRef.current);
++        showControlToast('pin failed', 'danger');
++      }
++      if (outcome.awaitAck) {
++        window.setTimeout(() => {
++          const reconciled = onTopSync.current.expireAcknowledgement(request);
++          if (reconciled !== null) setPinnedOptimistic(reconciled);
++        }, PIN_ACK_TIMEOUT_MS);
++      }
++      if (outcome.pump) pumpOnTopQueue();
++    };
+ 
+-    const sent = sync.desired;
+-    sync.inFlight = true;
+-    void setStayOnTop(sent)
+-      .catch(() => {
+-        const current = onTopSync.current;
+-        if (current.desired === sent) {
+-          current.desired = null;
+-          // Command lost: undo the optimistic advance back to the host's
+-          // last-confirmed state. Without this the next click computes the
+-          // wrong direction (a silent no-op against the idempotent host) and
+-          // the surface-drag gate desyncs from the real caption state.
+-          setPinnedOptimistic(hostOnTopRef.current);
+-          showControlToast('pin failed', 'danger');
+-        }
+-      })
+-      .finally(() => {
+-        const current = onTopSync.current;
+-        current.inFlight = false;
+-        if (current.desired !== null && current.desired !== sent) {
+-          pumpOnTopQueue();
+-        }
+-      });
++    void setStayOnTop(request.value).then(
++      () => settle(true),
++      () => settle(false),
++    );
+   }, [setPinnedOptimistic, showControlToast]);
+ 
+   const requestStayOnTop = useCallback((onTop: boolean) => {
+     setPinnedOptimistic(onTop);
+-    onTopSync.current.desired = onTop;
++    onTopSync.current.queue(onTop);
+     pumpOnTopQueue();
+   }, [pumpOnTopQueue, setPinnedOptimistic]);
+ 
+-  // Button and `i` keybind both route through here. A click can reach the
+-  // webview as two events where a keypress can't, so we also drop a duplicate
+-  // within a short window; the idempotent set above makes that safe, never wrong.
+-  const pinGuardRef = useRef(0);
++  // Button and `i` keybind both route through the desired-state queue. Two real
++  // rapid clicks are two intents: the second supersedes the first and is pumped
++  // after the in-flight request, returning to the starting state.
+   const togglePin = useCallback(() => {
+-    const now = Date.now();
+-    if (now - pinGuardRef.current < 400) return;
+-    pinGuardRef.current = now;
+     requestStayOnTop(!onTopRef.current);
+   }, [requestStayOnTop]);
+ 
+@@ -537,10 +534,10 @@ function App() {
+     // the paused check the bar and cursor would hide while paused — leaving the
+     // controls invisible and unclickable until the mouse moves. Paused = show
+     // the controls, like every other player.
+-    const playing = status.phase === 'playing' && !displayPaused;
++    const activelyAdvancing = status.phase === 'playing' && !displayPaused;
+     const keepOpen = showSettings || controlsPointerDown || controlsHovered;
+     window.clearTimeout(controlsIdleTimer.current);
+-    if (!playing || keepOpen) {
++    if (!activelyAdvancing || keepOpen) {
+       lastMousePos.current = null;
+       setControlsIdle(false);
+       return;
+@@ -618,8 +615,8 @@ function App() {
+   }, [selected, status.last_advance?.advanced_count]);
+ 
+   const playingByShow = new Set((status.round ?? []).map((r) => r.show_id));
+-  const playing = status.phase === 'playing';
+-  const overlayVisible = !playing || showSettings;
++  const roundActive = status.phase === 'playing';
++  const overlayVisible = !roundActive || showSettings;
+   const round = status.round ?? [];
+   const pos = currentPos(status);
+   const selectedShow = shows.find((s) => s.id === selected) ?? null;
+@@ -932,7 +929,7 @@ function App() {
+         />
+       )}
+       {overlayVisible ? (
+-        <div className={`layout${playing ? ' over-video' : ''}`}>
++        <div className={`layout${roundActive ? ' over-video' : ''}`}>
+ 
+ 
+           <main className="main">
+@@ -961,7 +958,7 @@ function App() {
+       <BottomControlBar
+         status={status}
+         pos={pos}
+-        playing={playing}
++        roundActive={roundActive}
+         viewing={showSettings}
+         onToggleView={() => {
+           setShowSettings((v) => !v);
+@@ -1181,7 +1178,7 @@ function ControlToast({ message, level }: { message: string; level: 'info' | 'da
+ function BottomControlBar({
+   status,
+   pos,
+-  playing,
++  roundActive,
+   viewing,
+   onToggleView,
+   viewingSettings,
+@@ -1205,7 +1202,7 @@ function BottomControlBar({
+ }: {
+   status: Status;
+   pos: number;
+-  playing: boolean;
++  roundActive: boolean;
+   viewing: boolean;
+   onToggleView: () => void;
+   viewingSettings: boolean;
+@@ -1258,12 +1255,15 @@ function BottomControlBar({
+     }
+   };
+ 
++  const isMuted = pb ? volume === 0 : false;
+   const round = status.round ?? [];
+-  const nowPlayingText = round.length
+-    ? `${round[pos].show_name}   (${pos + 1}/${round.length})`
++  const currentEntry =
++    round.length > 0 && pos >= 0 && pos < round.length ? round[pos] : null;
++  const nowPlayingState = displayPaused ? 'paused' : isMuted ? 'muted' : null;
++  const nowPlayingText = currentEntry
++    ? `${nowPlayingState ? `${nowPlayingState} - ` : ''}${currentEntry.show_name}   (${pos + 1}/${round.length})`
+     : status.message || '—';
+ 
+-  const isMuted = pb ? volume === 0 : false;
+   const ccActive = pb ? pb.sid !== 'no' && pb.sid != null : false;
+   // Optimistic intent (echoed-state-independent) so the pin button highlights
+   // the instant it is clicked, instead of waiting a full status round-trip —
+@@ -1315,7 +1315,7 @@ function BottomControlBar({
+           <button
+             className="control-btn"
+             onClick={onPrevious}
+-            disabled={!playing}
++            disabled={!roundActive}
+             title="Previous Show (p)"
+           >
+             <PrevIcon />
+@@ -1333,7 +1333,7 @@ function BottomControlBar({
+           <button
+             className="control-btn play-pause-btn"
+             onClick={() => onRequestPause(!displayPaused)}
+-            disabled={!playing}
++            disabled={!roundActive}
+             title="Play / Pause (Space)"
+           >
+             {displayPaused ? <PlayIcon /> : <PauseIcon />}
+@@ -1351,7 +1351,7 @@ function BottomControlBar({
+           <button
+             className="control-btn"
+             onClick={onSkip}
+-            disabled={!playing}
++            disabled={!roundActive}
+             title="Skip Show (n)"
+           >
+             <NextIcon />
+@@ -1429,7 +1429,7 @@ function BottomControlBar({
+           <button
+             className="control-btn"
+             onClick={onPrevious}
+-            disabled={!playing}
++            disabled={!roundActive}
+             title="Previous Show (p)"
+           >
+             <PrevIcon />
+@@ -1447,7 +1447,7 @@ function BottomControlBar({
+           <button
+             className="control-btn play-pause-btn"
+             onClick={() => onRequestPause(!displayPaused)}
+-            disabled={!playing}
++            disabled={!roundActive}
+             title="Play / Pause (Space)"
+           >
+             {displayPaused ? <PlayIcon /> : <PauseIcon />}
+@@ -1465,7 +1465,7 @@ function BottomControlBar({
+           <button
+             className="control-btn"
+             onClick={onSkip}
+-            disabled={!playing}
++            disabled={!roundActive}
+             title="Skip Show (n)"
+           >
+             <NextIcon />
+@@ -1477,7 +1477,7 @@ function BottomControlBar({
+           <button
+             className="control-btn defer-btn"
+             onClick={onDefer}
+-            disabled={!playing}
++            disabled={!roundActive}
+             title="Defer Episode (d)"
+           >
+             <DeferIcon />
+@@ -1555,7 +1555,7 @@ function BottomControlBar({
+             <SyncIcon />
+           </button>
+ 
+-          {playing && (
++          {roundActive && (
+             <button
+               className={`control-btn playlist-btn${viewing && !viewingSettings ? ' active' : ''}`}
+               onClick={onToggleView}
+@@ -2215,6 +2215,228 @@ function durationDays(start: string, end: string): string {
+   return `${days}d`;
+ }
+ 
++function formatSyncDuration(milliseconds: number | null | undefined): string {
++  if (milliseconds == null || !Number.isFinite(milliseconds)) return '—';
++  const ms = Math.max(0, milliseconds);
++  if (ms < 1000) return `${Math.round(ms)} ms`;
++  if (ms < 60_000) {
++    const seconds = ms / 1000;
++    return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
++  }
++  const minutes = Math.floor(ms / 60_000);
++  const seconds = Math.floor((ms % 60_000) / 1000);
++  return `${minutes}m ${seconds}s`;
++}
++
++function formatSyncDateTime(iso: string | null | undefined): string {
++  if (!iso) return '—';
++  const date = new Date(iso);
++  if (isNaN(date.getTime())) return iso;
++  return date.toLocaleString(undefined, {
++    month: 'short',
++    day: 'numeric',
++    hour: 'numeric',
++    minute: '2-digit',
++    second: '2-digit',
++  });
++}
++
++function formatSyncClock(iso: string): string {
++  const date = new Date(iso);
++  if (isNaN(date.getTime())) return '—';
++  return date.toLocaleTimeString(undefined, {
++    hour: '2-digit',
++    minute: '2-digit',
++    second: '2-digit',
++  });
++}
++
++function syncPendingSummary(status: Status): string {
++  const sync = status.sync;
++  if (!sync) return 'not reported';
++  const label = `${sync.pending} ${sync.pending === 1 ? 'change' : 'changes'}`;
++  const breakdown = sync.pending_breakdown;
++  if (!breakdown || sync.pending === 0) return label;
++
++  const parts = [
++    breakdown.shows ? `${breakdown.shows} shows` : '',
++    breakdown.episodes ? `${breakdown.episodes} episodes` : '',
++    breakdown.history ? `${breakdown.history} history` : '',
++    breakdown.queue ? `${breakdown.queue} queue` : '',
++  ].filter(Boolean);
++  return parts.length ? `${label} · ${parts.join(', ')}` : label;
++}
++
++function SyncLogPanel({status}: {status: Status}) {
++  const sync = status.startup_sync;
++  const [now, setNow] = useState(Date.now());
++
++  useEffect(() => {
++    if (sync?.state !== 'running') return;
++    setNow(Date.now());
++    const timer = window.setInterval(() => setNow(Date.now()), 250);
++    return () => window.clearInterval(timer);
++  }, [sync?.state, sync?.started_at]);
++
++  if (!sync) {
++    return (
++      <section className="sync-log-panel" aria-labelledby="sync-log-title">
++        <div className="sync-log-title-row">
++          <div>
++            <p className="sync-log-eyebrow">startup diagnostics</p>
++            <h2 id="sync-log-title">sync log</h2>
++          </div>
++        </div>
++        <div className="sync-log-empty" role="status">
++          <span className="sync-log-empty-mark" aria-hidden="true" />
++          <strong>no startup sync trace yet</strong>
++          <p>
++            The next launch will show each shared-database step here, including what the app
++            attempted, how long it took, and whether it completed.
++          </p>
++        </div>
++      </section>
++    );
++  }
++
++  const startedMs = Date.parse(sync.started_at);
++  const finishedMs = sync.finished_at ? Date.parse(sync.finished_at) : Number.NaN;
++  const elapsedMs = sync.state === 'running' && Number.isFinite(startedMs)
++    ? Math.max(0, now - startedMs)
++    : sync.elapsed_ms != null
++      ? sync.elapsed_ms
++      : Number.isFinite(startedMs) && Number.isFinite(finishedMs)
++        ? Math.max(0, finishedMs - startedMs)
++        : null;
++  const dbPath = sync.shared_db_path ?? status.sync?.shared_db_path ?? 'not configured';
++  const playlists = sync.playlists.length > 0
++    ? sync.playlists.join(', ')
++    : status.playlist || 'none';
++  const events = [...sync.events].sort((a, b) => a.seq - b.seq);
++
++  return (
++    <section className="sync-log-panel" aria-labelledby="sync-log-title">
++      <header className={`sync-log-hero ${sync.state}`}>
++        <div className="sync-log-title-row">
++          <div>
++            <p className="sync-log-eyebrow">startup diagnostics</p>
++            <h2 id="sync-log-title">sync log</h2>
++          </div>
++          <span className={`sync-overall-state ${sync.state}`} role="status" aria-live="polite">
++            {sync.state}
++          </span>
++        </div>
++        <p className="sync-log-lede">
++          {sync.state === 'running'
++            ? 'The app is still reconciling its local replica with the shared database.'
++            : sync.state === 'succeeded'
++              ? 'Startup reconciliation completed successfully.'
++              : 'Startup continued, but one or more sync steps did not complete cleanly.'}
++        </p>
++
++        <dl className="sync-log-summary">
++          <div className="sync-summary-item">
++            <dt>elapsed</dt>
++            <dd className="sync-elapsed" aria-label={`Elapsed ${formatSyncDuration(elapsedMs)}`}>
++              {formatSyncDuration(elapsedMs)}
++            </dd>
++          </div>
++          <div className="sync-summary-item">
++            <dt>started</dt>
++            <dd><time dateTime={sync.started_at}>{formatSyncDateTime(sync.started_at)}</time></dd>
++          </div>
++          <div className="sync-summary-item">
++            <dt>finished</dt>
++            <dd>
++              {sync.finished_at
++                ? <time dateTime={sync.finished_at}>{formatSyncDateTime(sync.finished_at)}</time>
++                : 'in progress'}
++            </dd>
++          </div>
++          <div className="sync-summary-item sync-summary-wide">
++            <dt>shared database</dt>
++            <dd><code title={dbPath}>{dbPath}</code></dd>
++          </div>
++          <div className="sync-summary-item">
++            <dt>playlists</dt>
++            <dd>{playlists}</dd>
++          </div>
++          <div className="sync-summary-item sync-summary-wide">
++            <dt>pending now</dt>
++            <dd>{syncPendingSummary(status)}</dd>
++          </div>
++        </dl>
++      </header>
++
++      <div className="sync-timeline-heading">
++        <div>
++          <p className="sync-log-eyebrow">ordered trace</p>
++          <h3>boot sequence</h3>
++        </div>
++        <span>{events.length} {events.length === 1 ? 'event' : 'events'}</span>
++      </div>
++
++      {events.length === 0 ? (
++        <div className="sync-log-empty compact" role="status">
++          <span className="sync-log-empty-mark" aria-hidden="true" />
++          <strong>waiting for the first sync step</strong>
++          <p>The trace is active; events will appear here as startup proceeds.</p>
++        </div>
++      ) : (
++        <ol
++          className="sync-timeline"
++          aria-label="Startup sync events"
++          role="log"
++          aria-live="polite"
++          aria-relevant="additions text"
++        >
++          {events.map((event) => {
++            const counts = event.counts;
++            const countParts = counts ? [
++              counts.shows ? `${counts.shows} shows` : '',
++              counts.episodes ? `${counts.episodes} episodes` : '',
++              counts.history ? `${counts.history} history` : '',
++              counts.queue ? `${counts.queue} queue` : '',
++            ].filter(Boolean) : [];
++
++            return (
++              <li className={`sync-event ${event.state}`} key={event.seq}>
++                <time className="sync-event-time" dateTime={event.at} title={formatSyncDateTime(event.at)}>
++                  {formatSyncClock(event.at)}
++                </time>
++                <span className="sync-event-marker" aria-hidden="true" />
++                <article className="sync-event-card">
++                  <div className="sync-event-header">
++                    <div className="sync-event-stage">
++                      <span className="sync-event-seq">#{event.seq}</span>
++                      <strong>{event.stage.replace(/[_-]+/g, ' ')}</strong>
++                    </div>
++                    <span className={`sync-event-state ${event.state}`}>{event.state}</span>
++                  </div>
++                  <p>{event.message}</p>
++                  {(event.duration_ms != null || counts) && (
++                    <footer className="sync-event-meta">
++                      {event.duration_ms != null && (
++                        <span className="sync-event-duration">{formatSyncDuration(event.duration_ms)}</span>
++                      )}
++                      {counts && (
++                        <span className="sync-event-counts">
++                          <strong>{counts.total} total</strong>
++                          {countParts.length > 0 && <span>{countParts.join(' · ')}</span>}
++                        </span>
++                      )}
++                    </footer>
++                  )}
++                </article>
++              </li>
++            );
++          })}
++        </ol>
++      )}
++    </section>
++  );
++}
++
+ function SettingsPanel({
+   status,
+   shows,
+@@ -2238,7 +2460,7 @@ function SettingsPanel({
+   overviewHeader: React.ReactNode;
+   overviewContent: React.ReactNode;
+ }) {
+-  const [activeTab, setActiveTab] = useState<'overview' | 'stats' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
++  const [activeTab, setActiveTab] = useState<'overview' | 'sync' | 'stats' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
+ 
+   const statsHeader = stats && stats.total_shows ? (() => {
+     const pct = stats.episodes_total
+@@ -2288,14 +2510,22 @@ function SettingsPanel({
+     <div className="settings-panel">
+       <div className="settings-sidebar">
+         <h3>settings</h3>
+-        <nav className="settings-nav">
+-          <button className={`nav-btn${activeTab === 'overview' ? ' active' : ''}`} onClick={() => setActiveTab('overview')}>overview</button>
+-          <button className={`nav-btn${activeTab === 'stats' ? ' active' : ''}`} onClick={() => setActiveTab('stats')}>stats</button>
+-          <button className={`nav-btn${activeTab === 'library' ? ' active' : ''}`} onClick={() => setActiveTab('library')}>library</button>
+-          <button className={`nav-btn${activeTab === 'add_show' ? ' active' : ''}`} onClick={() => setActiveTab('add_show')}>add show</button>
+-          <button className={`nav-btn${activeTab === 'next_round' ? ' active' : ''}`} onClick={() => setActiveTab('next_round')}>next round</button>
+-          <button className={`nav-btn${activeTab === 'general' ? ' active' : ''}`} onClick={() => setActiveTab('general')}>general</button>
+-          <button className={`nav-btn${activeTab === 'appearance' ? ' active' : ''}`} onClick={() => setActiveTab('appearance')}>appearance</button>
++        <nav className="settings-nav" aria-label="Settings sections">
++          <button aria-current={activeTab === 'overview' ? 'page' : undefined} className={`nav-btn${activeTab === 'overview' ? ' active' : ''}`} onClick={() => setActiveTab('overview')}>overview</button>
++          <button
++            type="button"
++            className={`nav-btn${activeTab === 'sync' ? ' active' : ''}`}
++            aria-current={activeTab === 'sync' ? 'page' : undefined}
++            onClick={() => setActiveTab('sync')}
++          >
++            sync log
++          </button>
++          <button aria-current={activeTab === 'stats' ? 'page' : undefined} className={`nav-btn${activeTab === 'stats' ? ' active' : ''}`} onClick={() => setActiveTab('stats')}>stats</button>
++          <button aria-current={activeTab === 'library' ? 'page' : undefined} className={`nav-btn${activeTab === 'library' ? ' active' : ''}`} onClick={() => setActiveTab('library')}>library</button>
++          <button aria-current={activeTab === 'add_show' ? 'page' : undefined} className={`nav-btn${activeTab === 'add_show' ? ' active' : ''}`} onClick={() => setActiveTab('add_show')}>add show</button>
++          <button aria-current={activeTab === 'next_round' ? 'page' : undefined} className={`nav-btn${activeTab === 'next_round' ? ' active' : ''}`} onClick={() => setActiveTab('next_round')}>next round</button>
++          <button aria-current={activeTab === 'general' ? 'page' : undefined} className={`nav-btn${activeTab === 'general' ? ' active' : ''}`} onClick={() => setActiveTab('general')}>general</button>
++          <button aria-current={activeTab === 'appearance' ? 'page' : undefined} className={`nav-btn${activeTab === 'appearance' ? ' active' : ''}`} onClick={() => setActiveTab('appearance')}>appearance</button>
+         </nav>
+       </div>
+ 
+@@ -2311,6 +2541,12 @@ function SettingsPanel({
+             </div>
+           )}
+ 
++        {activeTab === 'sync' && (
++          <div className="settings-tab sync-log-tab">
++            <SyncLogPanel status={status} />
++          </div>
++        )}
++
+         {activeTab === 'stats' && (
+           <div className="settings-tab">
+             <StatsPanel stats={stats} />
+diff --git a/desktop-rs/frontend/src/api.ts b/desktop-rs/frontend/src/api.ts
+index 89a1db1..4b29f31 100644
+--- a/desktop-rs/frontend/src/api.ts
++++ b/desktop-rs/frontend/src/api.ts
+@@ -72,6 +72,34 @@ export type SyncState = {
+   shared_db_path?: string | null;
+ };
+ 
++export type StartupSyncCounts = {
++  shows: number;
++  episodes: number;
++  history: number;
++  queue: number;
++  total: number;
++};
++
++export type StartupSyncEvent = {
++  seq: number;
++  at: string;
++  stage: string;
++  state: 'started' | 'succeeded' | 'skipped' | 'failed';
++  message: string;
++  duration_ms?: number | null;
++  counts?: StartupSyncCounts | null;
++};
++
++export type StartupSyncStatus = {
++  state: 'running' | 'succeeded' | 'degraded';
++  started_at: string;
++  finished_at?: string | null;
++  elapsed_ms?: number | null;
++  shared_db_path?: string | null;
++  playlists: string[];
++  events: StartupSyncEvent[];
++};
++
+ export type StatusAlert = {
+   level: 'danger' | 'warning' | 'info';
+   title: string;
+@@ -116,6 +144,7 @@ export type Status = {
+   last_advance?: AdvanceResult;
+   playback?: Playback;
+   sync?: SyncState;
++  startup_sync?: StartupSyncStatus;
+   file_sync?: FileSyncStatus;
+   alerts?: StatusAlert[];
+   error_kind?: 'round_unplayable' | string;
+diff --git a/desktop-rs/frontend/src/pinSync.ts b/desktop-rs/frontend/src/pinSync.ts
+new file mode 100644
+index 0000000..a49033b
+--- /dev/null
++++ b/desktop-rs/frontend/src/pinSync.ts
+@@ -0,0 +1,100 @@
++export type PinSyncSnapshot = Readonly<{
++  desired: boolean | null;
++  inFlight: boolean;
++  sent: boolean | null;
++}>;
++
++export type PinRequest = Readonly<{
++  generation: number;
++  value: boolean;
++}>;
++
++export type PinSyncSettleResult = Readonly<{
++  awaitAck: boolean;
++  pump: boolean;
++  rollback: boolean;
++}>;
++
++/**
++ * Serializes stay-on-top intents without mistaking an old host heartbeat for
++ * acknowledgement of a newer intent that has not been dispatched yet.
++ */
++export class PinSyncController {
++  private desired: boolean | null = null;
++  private inFlight = false;
++  private lastObserved: boolean | null = null;
++  private nextGeneration = 0;
++  private sent: PinRequest | null = null;
++
++  queue(desired: boolean): void {
++    this.desired = desired;
++  }
++
++  dispatch(): PinRequest | null {
++    if (this.inFlight || this.desired === null) return null;
++    this.sent = {
++      generation: ++this.nextGeneration,
++      value: this.desired,
++    };
++    this.inFlight = true;
++    return this.sent;
++  }
++
++  observe(observed: boolean): boolean | null {
++    this.lastObserved = observed;
++    if (this.desired === null) return observed;
++
++    // A host value acknowledges the latest intent only after that exact value
++    // has been sent. This guard is what preserves the queued second half of a
++    // rapid false -> true -> false double-click when an old false heartbeat
++    // arrives while the true request is still in flight.
++    if (this.sent?.value === this.desired && observed === this.desired) {
++      this.desired = null;
++      return observed;
++    }
++
++    return null;
++  }
++
++  settle(request: PinRequest, succeeded: boolean): PinSyncSettleResult {
++    if (!this.inFlight || this.sent?.generation !== request.generation) {
++      throw new Error('pin request settled out of order');
++    }
++
++    this.inFlight = false;
++    let rollback = false;
++    if (!succeeded && this.desired === request.value) {
++      this.desired = null;
++      rollback = true;
++    }
++
++    return {
++      awaitAck: succeeded && this.desired === request.value,
++      rollback,
++      pump: this.desired !== null && this.desired !== request.value,
++    };
++  }
++
++  expireAcknowledgement(request: PinRequest): boolean | null {
++    if (
++      this.inFlight ||
++      this.sent?.generation !== request.generation ||
++      this.desired !== request.value ||
++      this.lastObserved === null ||
++      this.lastObserved === request.value
++    ) {
++      return null;
++    }
++
++    this.desired = null;
++    return this.lastObserved;
++  }
++
++  snapshot(): PinSyncSnapshot {
++    return {
++      desired: this.desired,
++      inFlight: this.inFlight,
++      sent: this.sent?.value ?? null,
++    };
++  }
++}
+diff --git a/desktop-rs/frontend/test/pinSync.test.mjs b/desktop-rs/frontend/test/pinSync.test.mjs
+new file mode 100644
+index 0000000..1036e5e
+--- /dev/null
++++ b/desktop-rs/frontend/test/pinSync.test.mjs
+@@ -0,0 +1,97 @@
++import assert from 'node:assert/strict';
++import test from 'node:test';
++
++import {PinSyncController} from '../.test-dist/pinSync.js';
++
++test('a matching dispatched host value acknowledges the intent', () => {
++  const sync = new PinSyncController();
++  assert.equal(sync.observe(false), false);
++
++  sync.queue(true);
++  const request = sync.dispatch();
++  assert.equal(request.value, true);
++  assert.equal(sync.observe(false), null);
++  assert.equal(sync.observe(true), true);
++  assert.deepEqual(sync.settle(request, true), {awaitAck: false, pump: false, rollback: false});
++  assert.deepEqual(sync.snapshot(), {desired: null, inFlight: false, sent: true});
++});
++
++test('an old heartbeat cannot erase the queued half of a rapid double-click', () => {
++  const sync = new PinSyncController();
++  assert.equal(sync.observe(false), false);
++
++  sync.queue(true);
++  const pinRequest = sync.dispatch();
++  assert.equal(pinRequest.value, true);
++  sync.queue(false);
++
++  // This is the race: false is the latest desired value, but it is only queued.
++  // The heartbeat describes the old host state and must not acknowledge it.
++  assert.equal(sync.observe(false), null);
++  assert.deepEqual(sync.settle(pinRequest, true), {awaitAck: false, pump: true, rollback: false});
++
++  const unpinRequest = sync.dispatch();
++  assert.equal(unpinRequest.value, false);
++  assert.equal(sync.observe(true), null);
++  assert.equal(sync.observe(false), false);
++  assert.deepEqual(sync.settle(unpinRequest, true), {awaitAck: false, pump: false, rollback: false});
++  assert.deepEqual(sync.snapshot(), {desired: null, inFlight: false, sent: false});
++});
++
++test('a third click may supersede the queued opposite intent', () => {
++  const sync = new PinSyncController();
++  sync.queue(true);
++  const request = sync.dispatch();
++  assert.equal(request.value, true);
++  sync.queue(false);
++  sync.queue(true);
++
++  assert.equal(sync.observe(true), true);
++  assert.deepEqual(sync.settle(request, true), {awaitAck: false, pump: false, rollback: false});
++  assert.deepEqual(sync.snapshot(), {desired: null, inFlight: false, sent: true});
++});
++
++test('an acknowledgement timeout repairs a successfully returned lost command', () => {
++  const sync = new PinSyncController();
++  assert.equal(sync.observe(false), false);
++  sync.queue(true);
++  const request = sync.dispatch();
++
++  assert.deepEqual(sync.settle(request, true), {awaitAck: true, pump: false, rollback: false});
++  assert.equal(sync.observe(false), null);
++  assert.equal(sync.expireAcknowledgement(request), false);
++  assert.deepEqual(sync.snapshot(), {desired: null, inFlight: false, sent: true});
++});
++
++test('an old timeout cannot roll back a newer same-value generation', () => {
++  const sync = new PinSyncController();
++  assert.equal(sync.observe(false), false);
++  sync.queue(true);
++  const first = sync.dispatch();
++  assert.deepEqual(sync.settle(first, true), {awaitAck: true, pump: false, rollback: false});
++
++  sync.queue(false);
++  const unpin = sync.dispatch();
++  assert.deepEqual(sync.settle(unpin, true), {awaitAck: true, pump: false, rollback: false});
++  sync.queue(true);
++  const second = sync.dispatch();
++
++  assert.equal(sync.expireAcknowledgement(first), null);
++  assert.equal(second.value, true);
++});
++
++test('failure rolls back only when it affects the latest intent', () => {
++  const current = new PinSyncController();
++  current.queue(true);
++  const currentRequest = current.dispatch();
++  assert.equal(currentRequest.value, true);
++  assert.deepEqual(current.settle(currentRequest, false), {awaitAck: false, pump: false, rollback: true});
++
++  const superseded = new PinSyncController();
++  superseded.queue(true);
++  const supersededRequest = superseded.dispatch();
++  assert.equal(supersededRequest.value, true);
++  superseded.queue(false);
++  assert.deepEqual(superseded.settle(supersededRequest, false), {awaitAck: false, pump: true, rollback: false});
++  assert.equal(superseded.dispatch().value, false);
++});
+diff --git a/docs/adr/0001-ui-control-state-sync.md b/docs/adr/0001-ui-control-state-sync.md
+index bd3280d..6a3de22 100644
+--- a/docs/adr/0001-ui-control-state-sync.md
++++ b/docs/adr/0001-ui-control-state-sync.md
+@@ -65,13 +65,13 @@ References: [optimistic UI pattern](https://www.freecodecamp.org/news/how-to-use
+   idempotent (a request matching current state is a no-op); they do not flip
+   internal state.
+ - The pin / stay-on-top control now follows this pattern (`onTopSync` +
+-  `/stay-on-top {"on_top": bool}`). It needed one addition the heartbeat-backed
+-  controls don't: `window_on_top` is echoed **only on change**, so a missed
+-  reconcile cannot self-heal the way a missed pause/volume echo does. Pin
+-  therefore also (a) keeps one optimistic value driving both highlight and
+-  command direction, (b) rolls that value back to host truth on a failed
+-  command, and (c) gates the window drag handle on the host-confirmed value, not
+-  the optimistic one. See
++  `/stay-on-top {"on_top": bool}`). Because a missed shell-state frame can
++  disagree with the native caption/drag surface, the compositor re-echoes
++  `window_on_top` on its existing heartbeat and an idempotent no-op request
++  acknowledges the current value. Pin also (a) keeps one optimistic value
++  driving both highlight and command direction, (b) rolls that value back to
++  host truth on a failed command, and (c) leaves drag authorization on native
++  `is_on_top`, not optimistic or echoed browser state. See
+   [`desktop-shell.md` → Pin toggle: one click, one command](../feature-contracts/desktop-shell.md#pin-toggle-one-click-one-command).
+ 
+ ## Rejected alternative
+diff --git a/docs/feature-contracts/desktop-shell.md b/docs/feature-contracts/desktop-shell.md
+index 7c2a065..5ec97ad 100644
+--- a/docs/feature-contracts/desktop-shell.md
++++ b/docs/feature-contracts/desktop-shell.md
+@@ -41,11 +41,13 @@ a flag.
+ ## Pin toggle: one click, one command
+ 
+ `window_on_top` is harder than the other remote-state controls (pause, volume)
+-for one reason: **it is echoed only on change.** Pause and volume ride every mpv
+-heartbeat, so a missed reconcile self-heals on the next frame; `window_on_top` is
+-emitted only when `WM_SET_STAY_ON_TOP` actually flips `is_on_top`, so a stranded
+-optimistic value would *never* recover. ADR-0001's pattern is necessary but not
+-sufficient here. The additional invariants:
++because it controls which drag affordance exists. A missed reconcile can hide
++the native caption while leaving the overlay's surface drag disabled. ADR-0001's
++pattern is necessary but not sufficient here. The host therefore re-echoes its
++authoritative shell state on the compositor's existing approximately one-second
++heartbeat, and an idempotent no-op command also echoes the current value. A
++coalesced status frame self-heals without browser polling. The additional
++invariants:
+ 
+ 1. **One optimistic value for intent.** `pinned`/`onTopRef` (overlay) is the
+    single source for both the button highlight *and* the direction of the next
+@@ -56,15 +58,13 @@ sufficient here. The additional invariants:
+    resets the optimistic value to the host-confirmed `hostOnTopRef`. Otherwise
+    the next click derives the wrong direction and hits the host's idempotent
+    no-op — a silent dead toggle.
+-3. **The drag handle gates on host truth, never on intent.** Exactly one drag
+-   affordance must exist at all times: the native caption when not pinned, the
+-   overlay surface-drag when pinned — never zero, never both. Both the host
+-   (`nc_hit has_titlebar = !is_on_top`) and the overlay (`surfaceDragProps` gate,
+-   titlebar render condition) key off the *same* host-confirmed value
+-   (`status.window_on_top` / `hostOnTopRef`), so they can never disagree about
+-   whether a caption exists. A failed command that desynced intent from host
+-   truth must not be able to suppress the surface drag while the caption is also
+-   gone.
++3. **The host gates the drag mechanism on live truth, never browser intent.**
++   Exactly one effective drag affordance exists at all times: `nc_hit` exposes
++   the caption when native `is_on_top` is false; `WM_BEGIN_DRAG` authorizes the
++   overlay's surface gesture only when native `is_on_top` is true. The overlay
++   may optimistically render before an SSE echo, but stale browser state cannot
++   suppress both handles or enable both because authorization stays on the
++   window-owning thread.
+ 4. **The host re-asserts `is_on_top` after every transition that can change
+    Z-order.** Exiting fullscreen restores a pre-pin exstyle that lacks
+    `WS_EX_TOPMOST`, so the fullscreen-exit path re-applies `HWND_TOPMOST` from the
+@@ -72,6 +72,11 @@ sufficient here. The additional invariants:
+    aspect snap so the floating window keeps working resize borders. The
+    invariant: **whenever fullscreen/maximize changes, real Z-order and the
+    emitted `window_on_top` are reconciled back to `is_on_top`.**
++5. **Shell truth is repeated, not edge-triggered.** Every compositor heartbeat
++   projects `window_on_top` and `window_fullscreen`, including while playback is
++   paused. Re-sending an already-satisfied pin request also emits
++   `window_on_top`. The status stream may coalesce frames; any later projection
++   must still repair the overlay's titlebar and surface-drag gate.
+ 
+ ## Chrome geometry — one source of truth, DPI-correct
+ 
+@@ -167,6 +172,11 @@ hide disabled) while any of these hold:
+ - the pointer is down on the controls (scrubbing),
+ - the pointer is hovering the controls.
+ 
++The now-playing HUD and current queue marker are bound to the active round entry
++(`phase == "playing"`, `round`, `round_pos`), not to whether the playback clock
++is advancing. Pause and mute may annotate the label, but they do not clear the
++current episode or disable round controls such as previous, skip, and defer.
++
+ Real pointer movement reveals the bar and re-arms the idle timer; the pointer
+ leaving the window hides it. The control bar adapts to **window width**
+ (`compactViewport`), not to any window mode — a small window gets the compact
+diff --git a/docs/feature-contracts/desktop-status.md b/docs/feature-contracts/desktop-status.md
+index 06bcd2d..889e547 100644
+--- a/docs/feature-contracts/desktop-status.md
++++ b/docs/feature-contracts/desktop-status.md
+@@ -57,6 +57,53 @@ Each `round[]` item contains:
+ 
+ `pending` must equal the sum of `pending_breakdown`.
+ 
++## Startup Sync Timeline
++
++`startup_sync` is the retained, current-process account of the origin
++reconciliation started at launch. It is included in every `GET /status` and
++`GET /status/stream` snapshot so a frontend that connects after an early step
++still receives the complete timeline.
++
++- `state`: `running`, `succeeded`, or `degraded`. `degraded` means at least one
++  launch step failed (origin reconciliation or local file-cache preparation),
++  even when playback can continue from the usable local subset.
++- `started_at`: RFC 3339 timestamp for the launch reconciliation.
++- `finished_at`: RFC 3339 terminal timestamp, or `null` while running.
++- `elapsed_ms`: total terminal duration, or `null` while running. The frontend
++  derives a live elapsed value from `started_at`; the server does not poll just
++  to advance a clock.
++- `shared_db_path`: the configured durable-origin path.
++- `playlists`: playlists included in the reconciliation.
++- `events`: ordered structured progress records. Launch events already
++  published are retained; a later event never rewrites an earlier one. After
++  launch reaches a terminal state, later smart-moment pushes and manual syncs
++  are excluded from this launch-scoped trace.
++
++Each `events[]` record contains:
++
++- `seq`: monotonically increasing within this process.
++- `at`: RFC 3339 timestamp.
++- `stage`: a stable identifier such as `startup.plan`, `local-round.load`,
++  `origin.connect`, `origin.push`, `origin.pull`, `replica.merge`,
++  `origin.complete`, `file-cache.check`, or `startup.complete`.
++- `state`: `started`, `succeeded`, `skipped`, or `failed`.
++- `message`: human-readable statement of what the desktop is doing or learned.
++- `duration_ms`: completed-step duration, otherwise `null`.
++- `counts`: optional `shows`, `episodes`, `history`, `queue`, and `total`.
++  Whenever counts are present, `total` must equal the other four fields' sum.
++
++A potentially blocking origin operation publishes its `started` event before
++performing I/O and a terminal event afterward. This is the observability
++invariant that makes a cold or unreachable shared database distinguishable from
++local round loading and the media-file cache pass.
++
++`startup.complete` is server-generated and is always the final retained event.
++It is emitted only after both `origin.complete` and a terminal
++`local-round.load` event have arrived, regardless of which finishes first.
++Any startup-created round-queue push begins only after that local terminal
++event, so it is a later smart-moment operation and cannot leave an unmatched
++started event inside the frozen launch trace.
++
+ ## File Sync
+ 
+ `file_sync` describes the most recent round file-cache pass:
+diff --git a/docs/feature-contracts/round-and-advance.md b/docs/feature-contracts/round-and-advance.md
+index 0eab406..7b5dd7b 100644
+--- a/docs/feature-contracts/round-and-advance.md
++++ b/docs/feature-contracts/round-and-advance.md
+@@ -55,9 +55,41 @@ The skip marks the episode **watched** (a `watch_history` row is written; the sh
+ 
+ ## Failure modes
+ 
+-Offline-first: the runner plays entirely off the replica and never blocks on the network; sync is best-effort.
+-
+-- **Empty playlist (no active shows)**: `engine.next_round` returns `[]`; the runner treats it as drained and parks until shutdown.
++Offline-first: whenever a playable local round exists, the runner plays entirely
++off the replica and never blocks on the network; sync is best-effort. The only
++startup waits described below occur when no local round exists to play.
++
++### Local-first startup ordering
++
++When the replica contains library state, launch loads the saved local round and
++makes it playable without waiting for the durable origin. Push/pull
++reconciliation runs independently. A cold, sleeping, locked, or unreachable
++shared database therefore cannot delay local playback.
++
++The launch reconciliation preserves these invariants:
++
++- Remote I/O never occurs while holding the replica connection mutex. A push
++  snapshots dirty rows locally, releases the replica, performs origin I/O, then
++  acknowledges only rows whose `updated_at` still matches the snapshot. A local
++  mutation made during the push stays dirty for the next push.
++- A pull may merge durable state into the replica, but it never replaces the
++  runner's already-loaded in-memory round. Pulled queue changes become eligible
++  only when the runner next loads a round boundary.
++- Origin operations are serialized. Manual sync and smart-moment pushes cannot
++  race the launch reconciliation against the shared SQLite file.
++- If an established replica has no playable local round for the selected
++  playlists, the runner performs one origin reconciliation and retries local
++  selection before declaring the playlists drained. This is the only
++  established-replica startup path allowed to wait, because there is no local
++  media to start and a pull may supply it.
++- A genuinely empty first-install replica may wait for its initial origin seed,
++  because there is no local round to play. The startup sync timeline identifies
++  this case explicitly; it is not used for an established replica.
++- A queue created during first-install or drained-retry startup is not pushed
++  until `local-round.load` is terminal. Startup trace completion therefore
++  cannot retain an unmatched `origin.connect` or `origin.push` start event.
++
++- **Empty playlist (no active shows)**: `engine.next_round` returns `[]`; at launch the runner reconciles once when local library state exists, retries selection, then treats a still-empty result as drained and parks until shutdown.
+ - **Origin unreachable (network/server down)**: playback continues off the replica. `get_library` (pull) and `post_sync` (push) are best-effort — the `Syncer` flips its `online` flag on each attempt's success/failure (no polling), and queued local changes stay `dirty` until a later push lands.
+ - **Token expiry**: the apiclient refreshes once on a `401` (`oauth.ensure_token`) and retries in place; playback is unaffected.
+ - **Crash mid-round**: per-episode advances are already persisted to the replica (A1), so on restart the round is recomputed from that state and resumes at the next unwatched episode. Advances not yet pushed remain `dirty` and sync on the next push.

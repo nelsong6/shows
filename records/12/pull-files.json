@@ -1,0 +1,62 @@
+[
+  {
+    "additions": 2,
+    "blob_url": "https://github.com/nelsong6/shows/blob/9eebe40bb58a1db26635f625f72fd2e87e1734cf/README.md",
+    "changes": 3,
+    "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/README.md?ref=9eebe40bb58a1db26635f625f72fd2e87e1734cf",
+    "deletions": 1,
+    "filename": "README.md",
+    "patch": "@@ -24,9 +24,10 @@ The NAS also hosts immutable desktop builds and two explicit update channels:\n - `stable` for normal use\n - `dev` for testing a local development build on another computer\n \n-Publish a build from the repository root:\n+Publish from the repository root. `stable` takes the bundle CI attached to the latest GitHub release; `dev` builds locally:\n \n ```powershell\n+.\\scripts\\publish-shows-channel.ps1 -Channel stable\n .\\scripts\\publish-shows-channel.ps1 -Channel dev\n ```\n ",
+    "raw_url": "https://github.com/nelsong6/shows/raw/9eebe40bb58a1db26635f625f72fd2e87e1734cf/README.md",
+    "sha": "39d79dab11a9dc9bab475954c0f1283f5e539b15",
+    "status": "modified"
+  },
+  {
+    "additions": 3,
+    "blob_url": "https://github.com/nelsong6/shows/blob/9eebe40bb58a1db26635f625f72fd2e87e1734cf/docs%2Ffeature-contracts%2Fdesktop-distribution.md",
+    "changes": 4,
+    "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/docs%2Ffeature-contracts%2Fdesktop-distribution.md?ref=9eebe40bb58a1db26635f625f72fd2e87e1734cf",
+    "deletions": 1,
+    "filename": "docs/feature-contracts/desktop-distribution.md",
+    "patch": "@@ -12,7 +12,9 @@ without running an executable from the network share.\n   bundle into `versions`. Only afterward does it replace the channel manifest.\n - **P3. Explicit channels.** `stable` and `dev` have independent manifests.\n   Computers opt into one channel through their shortcut.\n-- **P4. Reproducible identity.** Stable builds use a source revision; dev builds\n+- **P4. Reproducible identity.** Stable publishes the bundle CI attached to a\n+  `desktop-\u003csha\u003e` GitHub release, versioned by that SHA, so the stable channel\n+  only ever carries a build CI produced from `main`. Dev builds are local and\n   add a publication timestamp so repeated builds of one revision remain\n   immutable.\n ",
+    "raw_url": "https://github.com/nelsong6/shows/raw/9eebe40bb58a1db26635f625f72fd2e87e1734cf/docs%2Ffeature-contracts%2Fdesktop-distribution.md",
+    "sha": "3b01198c9906ffd0aef95dde8f4e6c74052c28fd",
+    "status": "modified"
+  },
+  {
+    "additions": 11,
+    "blob_url": "https://github.com/nelsong6/shows/blob/9eebe40bb58a1db26635f625f72fd2e87e1734cf/docs%2Fnew-computer-setup.md",
+    "changes": 15,
+    "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/docs%2Fnew-computer-setup.md?ref=9eebe40bb58a1db26635f625f72fd2e87e1734cf",
+    "deletions": 4,
+    "filename": "docs/new-computer-setup.md",
+    "patch": "@@ -34,16 +34,23 @@ builds. The shortcut checks the channel manifest before every launch, verifies\n the bundle hashes, installs it into a new versioned local directory, retains the\n previous version for rollback, and starts the local executable.\n \n-## Publish a development build\n+## Publish a build\n \n-From the repository computer:\n+Advance the stable channel to CI's latest release (or name one with\n+`-Release desktop-\u003csha\u003e`); nothing is compiled locally:\n+\n+```powershell\n+.\\scripts\\publish-shows-channel.ps1 -Channel stable\n+```\n+\n+Publish a local development build to the dev channel:\n \n ```powershell\n .\\scripts\\publish-shows-channel.ps1 -Channel dev\n ```\n \n-Use `-Channel stable` to advance the stable NAS channel. A channel manifest is\n-replaced only after the complete versioned bundle has reached the NAS.\n+A channel manifest is replaced only after the complete versioned bundle has\n+reached the NAS.\n \n ## Database health check\n ",
+    "raw_url": "https://github.com/nelsong6/shows/raw/9eebe40bb58a1db26635f625f72fd2e87e1734cf/docs%2Fnew-computer-setup.md",
+    "sha": "94bd2da26a3c574961086f0008fe959b96aa313d",
+    "status": "modified"
+  },
+  {
+    "additions": 2,
+    "blob_url": "https://github.com/nelsong6/shows/blob/9eebe40bb58a1db26635f625f72fd2e87e1734cf/scripts%2Flaunch-shows.ps1",
+    "changes": 3,
+    "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/scripts%2Flaunch-shows.ps1?ref=9eebe40bb58a1db26635f625f72fd2e87e1734cf",
+    "deletions": 1,
+    "filename": "scripts/launch-shows.ps1",
+    "patch": "@@ -18,7 +18,8 @@ $state = if (Test-Path -LiteralPath $statePath) {\n \n function Save-State([object]$nextState) {\n   $temp = \"$statePath.$([guid]::NewGuid().ToString('N')).tmp\"\n-  $nextState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temp -Encoding utf8NoBOM\n+  # The shortcut runs Windows PowerShell 5.1, which has no utf8NoBOM encoding.\n+  [IO.File]::WriteAllText($temp, ($nextState | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))\n   Move-Item -Force -LiteralPath $temp -Destination $statePath\n }\n ",
+    "raw_url": "https://github.com/nelsong6/shows/raw/9eebe40bb58a1db26635f625f72fd2e87e1734cf/scripts%2Flaunch-shows.ps1",
+    "sha": "27ed96a641bd0d6672111a17c9ca5c3104318bc4",
+    "status": "modified"
+  },
+  {
+    "additions": 31,
+    "blob_url": "https://github.com/nelsong6/shows/blob/9eebe40bb58a1db26635f625f72fd2e87e1734cf/scripts%2Fpublish-shows-channel.ps1",
+    "changes": 45,
+    "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/scripts%2Fpublish-shows-channel.ps1?ref=9eebe40bb58a1db26635f625f72fd2e87e1734cf",
+    "deletions": 14,
+    "filename": "scripts/publish-shows-channel.ps1",
+    "patch": "@@ -3,31 +3,47 @@ param(\n   [string]$Channel = \"dev\",\n   [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),\n   [string]$NasRoot = \"S:\\shows-app\",\n+  [string]$Release,\n   [string]$LibmpvPath = \"D:\\Downloads\\shows\\libmpv-2.dll\",\n   [string]$Version,\n   [switch]$SkipBuild\n )\n \n $ErrorActionPreference = \"Stop\"\n \n-if (-not $Version) {\n-  $sha = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()\n-  if ($LASTEXITCODE -ne 0 -or -not $sha) { throw \"Could not determine git revision\" }\n-  $Version = if ($Channel -eq \"dev\") {\n-    \"$sha-$(Get-Date -Format 'yyyyMMddHHmmss')\"\n-  } else {\n-    $sha\n+$launcher = Join-Path $PSScriptRoot \"launch-shows.ps1\"\n+$installer = Join-Path $PSScriptRoot \"install-shows-launcher.ps1\"\n+$download = $null\n+\n+if ($Channel -eq \"stable\") {\n+  # Stable is the bundle CI built and released, never a local build.\n+  if ($Version -or $SkipBuild) { throw \"-Version and -SkipBuild apply to dev; stable publishes a GitHub release\" }\n+  if (-not $Release) {\n+    $Release = gh release view --repo nelsong6/shows --json tagName --jq .tagName\n+    if ($LASTEXITCODE -ne 0 -or -not $Release) { throw \"Could not determine the latest release\" }\n+  }\n+  if ($Release -notmatch '^desktop-([0-9a-f]+)$') { throw \"Not a desktop release tag: $Release\" }\n+  $Version = $Matches[1]\n+\n+  $download = Join-Path ([IO.Path]::GetTempPath()) \"shows-release-$([guid]::NewGuid().ToString('N'))\"\n+  gh release download $Release --repo nelsong6/shows --pattern shows-desktop-windows-amd64.zip --dir $download\n+  if ($LASTEXITCODE -ne 0) { throw \"Could not download release $Release\" }\n+  Expand-Archive -LiteralPath (Join-Path $download \"shows-desktop-windows-amd64.zip\") -DestinationPath (Join-Path $download \"bundle\")\n+  $exe = Join-Path $download \"bundle\\shows-desktop.exe\"\n+  $LibmpvPath = Join-Path $download \"bundle\\libmpv-2.dll\"\n+} else {\n+  if (-not $Version) {\n+    $sha = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()\n+    if ($LASTEXITCODE -ne 0 -or -not $sha) { throw \"Could not determine git revision\" }\n+    $Version = \"$sha-$(Get-Date -Format 'yyyyMMddHHmmss')\"\n   }\n+  $workspace = Join-Path $RepoRoot \"desktop-rs\"\n+  $frontend = Join-Path $workspace \"frontend\"\n+  $exe = Join-Path $workspace \"target\\release\\shows-desktop.exe\"\n }\n if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw \"Invalid version: $Version\" }\n \n-$workspace = Join-Path $RepoRoot \"desktop-rs\"\n-$frontend = Join-Path $workspace \"frontend\"\n-$exe = Join-Path $workspace \"target\\release\\shows-desktop.exe\"\n-$launcher = Join-Path $PSScriptRoot \"launch-shows.ps1\"\n-$installer = Join-Path $PSScriptRoot \"install-shows-launcher.ps1\"\n-\n-if (-not $SkipBuild) {\n+if ($Channel -eq \"dev\" -and -not $SkipBuild) {\n   Push-Location $frontend\n   try { npm run build; if ($LASTEXITCODE -ne 0) { throw \"Frontend build failed\" } }\n   finally { Pop-Location }\n@@ -100,6 +116,7 @@ try {\n   Move-Item -Force -LiteralPath $installerTemp -Destination (Join-Path $NasRoot \"install-shows-launcher.ps1\")\n } finally {\n   if (Test-Path -LiteralPath $stage) { Remove-Item -Recurse -Force -LiteralPath $stage }\n+  if ($download) { Remove-Item -Recurse -Force -LiteralPath $download }\n }\n \n Write-Host \"Published shows $Version to $Channel at $NasRoot\"",
+    "raw_url": "https://github.com/nelsong6/shows/raw/9eebe40bb58a1db26635f625f72fd2e87e1734cf/scripts%2Fpublish-shows-channel.ps1",
+    "sha": "f241ec7754ad1f4e2e7f42ef018423cf2537ca13",
+    "status": "modified"
+  }
+]

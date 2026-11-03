@@ -1,0 +1,170 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/d7f246ab501b180c2e380d703e2035f5fed6dc3a/comments",
+    "commit": {
+      "author": {
+        "date": "2026-11-03T16:58:13Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-11-03T16:58:13Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Add terminal Shows remote over existing SSH (SHOWS-1)",
+      "tree": {
+        "sha": "5587135b150edd2ba854013a44c16c3a45ba5c51",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/5587135b150edd2ba854013a44c16c3a45ba5c51"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+    "node_id": "C_kwDOS5KECdoAKGQ3ZjI0NmFiNTAxYjE4MGMyZTM4MGQ3MDNlMjAzNWY1ZmVkNmRjM2E",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/a06b1378e3f061aebdba0a76c8b3241e1247cd87",
+        "sha": "a06b1378e3f061aebdba0a76c8b3241e1247cd87",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/a06b1378e3f061aebdba0a76c8b3241e1247cd87"
+      }
+    ],
+    "sha": "d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/d7f246ab501b180c2e380d703e2035f5fed6dc3a"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e/comments",
+    "commit": {
+      "author": {
+        "date": "2026-11-03T17:03:14Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-11-03T17:03:14Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Launch the installed agent with native protocol pipes",
+      "tree": {
+        "sha": "84839c0a30b656dfb843e55df27ce83fea45cf17",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/84839c0a30b656dfb843e55df27ce83fea45cf17"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+    "node_id": "C_kwDOS5KECdoAKDlkMzI2YjUzZDk2YjMxNDViMGUxZjFiYjhjZTNmYTcxNGYxZWM0NmU",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+        "sha": "d7f246ab501b180c2e380d703e2035f5fed6dc3a",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/d7f246ab501b180c2e380d703e2035f5fed6dc3a"
+      }
+    ],
+    "sha": "9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/a591436def68343bf68e21267ac9fc94e959cc81/comments",
+    "commit": {
+      "author": {
+        "date": "2026-11-03T17:04:19Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-11-03T17:04:19Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Install the remote command on the existing home PC PATH",
+      "tree": {
+        "sha": "a66511669114423bc56a45d279f3f7e673718f38",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/a66511669114423bc56a45d279f3f7e673718f38"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/a591436def68343bf68e21267ac9fc94e959cc81",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/a591436def68343bf68e21267ac9fc94e959cc81",
+    "node_id": "C_kwDOS5KECdoAKGE1OTE0MzZkZWY2ODM0M2JmNjhlMjEyNjdhYzlmYzk0ZTk1OWNjODE",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+        "sha": "9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/9d326b53d96b3145b0e1f1bb8ce3fa714f1ec46e"
+      }
+    ],
+    "sha": "a591436def68343bf68e21267ac9fc94e959cc81",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/a591436def68343bf68e21267ac9fc94e959cc81"
+  },
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/cfb900e04aa4b943c1b8c9e4ae8736bb245ac8e5/comments",
+    "commit": {
+      "author": {
+        "date": "2026-11-03T17:06:19Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-11-03T17:06:19Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Keep remote JSON output separate from update diagnostics",
+      "tree": {
+        "sha": "dcc11b02acd4e0c0779afd884590625589a25e04",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/dcc11b02acd4e0c0779afd884590625589a25e04"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/cfb900e04aa4b943c1b8c9e4ae8736bb245ac8e5",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/cfb900e04aa4b943c1b8c9e4ae8736bb245ac8e5",
+    "node_id": "C_kwDOS5KECdoAKGNmYjkwMGUwNGFhNGI5NDNjMWI4YzllNGFlODczNmJiMjQ1YWM4ZTU",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/a591436def68343bf68e21267ac9fc94e959cc81",
+        "sha": "a591436def68343bf68e21267ac9fc94e959cc81",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/a591436def68343bf68e21267ac9fc94e959cc81"
+      }
+    ],
+    "sha": "cfb900e04aa4b943c1b8c9e4ae8736bb245ac8e5",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/cfb900e04aa4b943c1b8c9e4ae8736bb245ac8e5"
+  }
+]

@@ -1,0 +1,277 @@
+[
+  {
+    "author": {
+      "date": "2026-06-14T18:58:03Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-14T21:11:24Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/2278b3b0a6182e61e6dd4d9a9392cb83f7e0550f",
+    "message": "Use native mini pointer state for control hiding",
+    "node_id": "C_kwDOS5KECdoAKDIyNzhiM2IwYTYxODJlNjFlNmRkNGQ5YTkzOTJjYjgzZjdlMDU1MGY",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/a2682db82eb6eab089ce8456d4c97ef4a966c119",
+        "sha": "a2682db82eb6eab089ce8456d4c97ef4a966c119",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/a2682db82eb6eab089ce8456d4c97ef4a966c119"
+      }
+    ],
+    "sha": "2278b3b0a6182e61e6dd4d9a9392cb83f7e0550f",
+    "tree": {
+      "sha": "804c46ac4a948ef7eb05085120f4f67f16fdb58c",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/804c46ac4a948ef7eb05085120f4f67f16fdb58c"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/2278b3b0a6182e61e6dd4d9a9392cb83f7e0550f",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-06-14T20:35:51Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-14T21:11:24Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/2aebe98594f1dc1cd44cfd2245a8a0db7a3cb9ea",
+    "message": "Remember episode track selections",
+    "node_id": "C_kwDOS5KECdoAKDJhZWJlOTg1OTRmMWRjMWNkNDRjZmQyMjQ1YThhMGRiN2EzY2I5ZWE",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/2278b3b0a6182e61e6dd4d9a9392cb83f7e0550f",
+        "sha": "2278b3b0a6182e61e6dd4d9a9392cb83f7e0550f",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/2278b3b0a6182e61e6dd4d9a9392cb83f7e0550f"
+      }
+    ],
+    "sha": "2aebe98594f1dc1cd44cfd2245a8a0db7a3cb9ea",
+    "tree": {
+      "sha": "3e30cf81d439b41b7da03727b8a75d04d8f130ba",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/3e30cf81d439b41b7da03727b8a75d04d8f130ba"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/2aebe98594f1dc1cd44cfd2245a8a0db7a3cb9ea",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-06-16T05:17:44Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-16T05:17:44Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/8e10b5c29cda5e79cac5a02ef319d17ae3f67dd7",
+    "message": "Use compact controls in mini player",
+    "node_id": "C_kwDOS5KECdoAKDhlMTBiNWMyOWNkYTVlNzljYWM1YTAyZWYzMTlkMTdhZTNmNjdkZDc",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/2aebe98594f1dc1cd44cfd2245a8a0db7a3cb9ea",
+        "sha": "2aebe98594f1dc1cd44cfd2245a8a0db7a3cb9ea",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/2aebe98594f1dc1cd44cfd2245a8a0db7a3cb9ea"
+      }
+    ],
+    "sha": "8e10b5c29cda5e79cac5a02ef319d17ae3f67dd7",
+    "tree": {
+      "sha": "a52f18809ca4873d694ca379b026805acbf95bdd",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/a52f18809ca4873d694ca379b026805acbf95bdd"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/8e10b5c29cda5e79cac5a02ef319d17ae3f67dd7",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-06-18T02:15:58Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-18T02:15:58Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/7eaced9e06d1bae937f7b6b68d42cbaef62dfea5",
+    "message": "docs: add desktop-shell contract; update status fields\n\nDocument the window-shell invariants (chrome geometry single source of\ntruth, hit-test map, single-owner control visibility, stay-on-top, render\npolicy) and replace window_pip/mini_pointer_inside with window_on_top in\nthe status contract.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+    "node_id": "C_kwDOS5KECdoAKDdlYWNlZDllMDZkMWJhZTkzN2Y3YjZiNjhkNDJjYmFlZjYyZGZlYTU",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/8e10b5c29cda5e79cac5a02ef319d17ae3f67dd7",
+        "sha": "8e10b5c29cda5e79cac5a02ef319d17ae3f67dd7",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/8e10b5c29cda5e79cac5a02ef319d17ae3f67dd7"
+      }
+    ],
+    "sha": "7eaced9e06d1bae937f7b6b68d42cbaef62dfea5",
+    "tree": {
+      "sha": "a44445f77563af0daf372cf886669144de434e33",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/a44445f77563af0daf372cf886669144de434e33"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/7eaced9e06d1bae937f7b6b68d42cbaef62dfea5",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "author": {
+      "date": "2026-06-18T02:15:58Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "committer": {
+      "date": "2026-06-18T02:15:58Z",
+      "email": "fullnelsongrip@gmail.com",
+      "name": "Nelson"
+    },
+    "event": "committed",
+    "html_url": "https://github.com/nelsong6/shows/commit/1ef44998ae516c3a1b3987ef5b01906ee42cdd33",
+    "message": "desktop: rework window shell — DPI hit-testing, stay-on-top, single-owner hover\n\n- DPI-correct titlebar hit-testing: titlebar height (32), button-cluster\n  width (138) and resize border (6) are defined once in logical px and\n  scaled by window DPI, so the draggable caption and button zones match\n  the rendered overlay at every scale. Hit-testing is a pure nc_hit() with\n  unit tests at 96/120/144/192 DPI, replacing the flat 32/140 that\n  dead-zoned drag above 100% scale.\n- Delete the mini-player/PiP mode end to end (window_pip,\n  mini_pointer_inside, /pip, the native-frame swap, PiP rect math, the\n  mini-controls\u003c-\u003ePiP coupling) and replace it with a pure topmost Z-order\n  stay-on-top toggle (window_on_top, /stay-on-top, i / pin button) that\n  keeps the existing chrome and the single control bar. The compact control\n  layout now follows window width, not a window mode.\n- Collapse control-bar visibility into one owner: a single idle timer and\n  visible state with explicit keep-open inputs (settings, scrubbing,\n  hover), removing the native pointer-inside signal, the visibility-cap\n  timer, the parked-hit-test state, and the document-leave effect.\n- Factor the triplicated swapchain/visual/overlay relayout into one\n  relayout() helper.\n\nPer the migration policy the old path is removed, not flagged; a test fails\nif window_pip/mini_pointer_inside reappear, and the install smoke script\ndrives /stay-on-top. Idle-GPU present-on-frame is deferred (it regressed\nfirst paint in WebView2 visual-hosting) and documented as such.\n\nCo-Authored-By: Claude Opus 4.8 \u003cnoreply@anthropic.com\u003e",
+    "node_id": "C_kwDOS5KECdoAKDFlZjQ0OTk4YWU1MTZjM2ExYjM5ODdlZjViMDE5MDZlZTQyY2RkMzM",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/7eaced9e06d1bae937f7b6b68d42cbaef62dfea5",
+        "sha": "7eaced9e06d1bae937f7b6b68d42cbaef62dfea5",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/commits/7eaced9e06d1bae937f7b6b68d42cbaef62dfea5"
+      }
+    ],
+    "sha": "1ef44998ae516c3a1b3987ef5b01906ee42cdd33",
+    "tree": {
+      "sha": "b9f0f29ddf4002ab4d957737f8a44ecd6f721d1b",
+      "url": "https://api.github.com/repos/nelsong6/shows/git/trees/b9f0f29ddf4002ab4d957737f8a44ecd6f721d1b"
+    },
+    "url": "https://api.github.com/repos/nelsong6/shows/git/commits/1ef44998ae516c3a1b3987ef5b01906ee42cdd33",
+    "verification": {
+      "payload": null,
+      "reason": "unsigned",
+      "signature": null,
+      "verified": false,
+      "verified_at": null
+    }
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": "1b0d17278a41e79f47dd7f3c791776135a5a8696",
+    "commit_url": "https://api.github.com/repos/nelsong6/shows/commits/1b0d17278a41e79f47dd7f3c791776135a5a8696",
+    "created_at": "2026-06-18T02:16:49Z",
+    "event": "merged",
+    "id": 26889819929,
+    "node_id": "ME_lADOS5KECc8AAAABF3XZ2M8AAAAGQsIXGQ",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/26889819929"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": null,
+    "commit_url": null,
+    "created_at": "2026-06-18T02:16:50Z",
+    "event": "closed",
+    "id": 26889819952,
+    "intent": null,
+    "node_id": "CE_lADOS5KECc8AAAABF3XZ2M8AAAAGQsIXMA",
+    "performed_via_github_app": null,
+    "state_reason": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/26889819952"
+  },
+  {
+    "actor": {
+      "avatar_url": "https://avatars.githubusercontent.com/u/18473267?v=4",
+      "events_url": "https://api.github.com/users/nelsong6/events{/privacy}",
+      "followers_url": "https://api.github.com/users/nelsong6/followers",
+      "following_url": "https://api.github.com/users/nelsong6/following{/other_user}",
+      "gists_url": "https://api.github.com/users/nelsong6/gists{/gist_id}",
+      "gravatar_id": "",
+      "html_url": "https://github.com/nelsong6",
+      "id": 18473267,
+      "login": "nelsong6",
+      "node_id": "MDQ6VXNlcjE4NDczMjY3",
+      "organizations_url": "https://api.github.com/users/nelsong6/orgs",
+      "received_events_url": "https://api.github.com/users/nelsong6/received_events",
+      "repos_url": "https://api.github.com/users/nelsong6/repos",
+      "site_admin": false,
+      "starred_url": "https://api.github.com/users/nelsong6/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/nelsong6/subscriptions",
+      "type": "User",
+      "url": "https://api.github.com/users/nelsong6",
+      "user_view_type": "public"
+    },
+    "commit_id": null,
+    "commit_url": null,
+    "created_at": "2026-06-22T06:36:53Z",
+    "event": "head_ref_deleted",
+    "id": 27026626467,
+    "node_id": "HRDE_lADOS5KECc8AAAABF3XZ2M8AAAAGSumXow",
+    "performed_via_github_app": null,
+    "url": "https://api.github.com/repos/nelsong6/shows/issues/events/27026626467"
+  }
+]

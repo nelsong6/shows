@@ -1,0 +1,44 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/ad58c4966c020e3dda839535d36d9e59978e3b3c/comments",
+    "commit": {
+      "author": {
+        "date": "2026-07-03T06:59:50Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-07-03T06:59:50Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Keep now playing visible when muted",
+      "tree": {
+        "sha": "a195dc32f685ec570f7acf9844a761118b937a54",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/a195dc32f685ec570f7acf9844a761118b937a54"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/ad58c4966c020e3dda839535d36d9e59978e3b3c",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/ad58c4966c020e3dda839535d36d9e59978e3b3c",
+    "node_id": "C_kwDOS5KECdoAKGFkNThjNDk2NmMwMjBlM2RkYTgzOTUzNWQzNmQ5ZTU5OTc4ZTNiM2M",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/f71b705d883965eb91bf4d6399d51471223bc302",
+        "sha": "f71b705d883965eb91bf4d6399d51471223bc302",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/f71b705d883965eb91bf4d6399d51471223bc302"
+      }
+    ],
+    "sha": "ad58c4966c020e3dda839535d36d9e59978e3b3c",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/ad58c4966c020e3dda839535d36d9e59978e3b3c"
+  }
+]

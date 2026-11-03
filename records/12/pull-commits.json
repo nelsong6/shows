@@ -1,0 +1,44 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/9eebe40bb58a1db26635f625f72fd2e87e1734cf/comments",
+    "commit": {
+      "author": {
+        "date": "2026-10-25T23:06:56Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-10-25T23:06:56Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Publish the stable channel from CI's GitHub release\n\nThe stable NAS channel had never been published: the publisher compiled\nlocally, and the launcher it installs failed under Windows PowerShell 5.1.\nStable now takes the bundle CI attached to a desktop-\u003csha\u003e release; dev\nstill builds locally. The launcher writes its state without utf8NoBOM.",
+      "tree": {
+        "sha": "8b91b74247eb4b700b2c71526eb575e95ade8420",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/8b91b74247eb4b700b2c71526eb575e95ade8420"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/9eebe40bb58a1db26635f625f72fd2e87e1734cf",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/9eebe40bb58a1db26635f625f72fd2e87e1734cf",
+    "node_id": "C_kwDOS5KECdoAKDllZWJlNDBiYjU4YTFkYjI2NjM1ZjYyNWY3MmZkMmU4N2UxNzM0Y2Y",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/fdc502cd7a302ef0a320c87d9e07a42c6ef4aaac",
+        "sha": "fdc502cd7a302ef0a320c87d9e07a42c6ef4aaac",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/fdc502cd7a302ef0a320c87d9e07a42c6ef4aaac"
+      }
+    ],
+    "sha": "9eebe40bb58a1db26635f625f72fd2e87e1734cf",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/9eebe40bb58a1db26635f625f72fd2e87e1734cf"
+  }
+]

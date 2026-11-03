@@ -1,0 +1,151 @@
+diff --git a/README.md b/README.md
+index 522203e..39d79da 100644
+--- a/README.md
++++ b/README.md
+@@ -24,9 +24,10 @@ The NAS also hosts immutable desktop builds and two explicit update channels:
+ - `stable` for normal use
+ - `dev` for testing a local development build on another computer
+ 
+-Publish a build from the repository root:
++Publish from the repository root. `stable` takes the bundle CI attached to the latest GitHub release; `dev` builds locally:
+ 
+ ```powershell
++.\scripts\publish-shows-channel.ps1 -Channel stable
+ .\scripts\publish-shows-channel.ps1 -Channel dev
+ ```
+ 
+diff --git a/docs/feature-contracts/desktop-distribution.md b/docs/feature-contracts/desktop-distribution.md
+index 65fa3be..3b01198 100644
+--- a/docs/feature-contracts/desktop-distribution.md
++++ b/docs/feature-contracts/desktop-distribution.md
+@@ -12,7 +12,9 @@ without running an executable from the network share.
+   bundle into `versions`. Only afterward does it replace the channel manifest.
+ - **P3. Explicit channels.** `stable` and `dev` have independent manifests.
+   Computers opt into one channel through their shortcut.
+-- **P4. Reproducible identity.** Stable builds use a source revision; dev builds
++- **P4. Reproducible identity.** Stable publishes the bundle CI attached to a
++  `desktop-<sha>` GitHub release, versioned by that SHA, so the stable channel
++  only ever carries a build CI produced from `main`. Dev builds are local and
+   add a publication timestamp so repeated builds of one revision remain
+   immutable.
+ 
+diff --git a/docs/new-computer-setup.md b/docs/new-computer-setup.md
+index 093cc41..94bd2da 100644
+--- a/docs/new-computer-setup.md
++++ b/docs/new-computer-setup.md
+@@ -34,16 +34,23 @@ builds. The shortcut checks the channel manifest before every launch, verifies
+ the bundle hashes, installs it into a new versioned local directory, retains the
+ previous version for rollback, and starts the local executable.
+ 
+-## Publish a development build
++## Publish a build
+ 
+-From the repository computer:
++Advance the stable channel to CI's latest release (or name one with
++`-Release desktop-<sha>`); nothing is compiled locally:
++
++```powershell
++.\scripts\publish-shows-channel.ps1 -Channel stable
++```
++
++Publish a local development build to the dev channel:
+ 
+ ```powershell
+ .\scripts\publish-shows-channel.ps1 -Channel dev
+ ```
+ 
+-Use `-Channel stable` to advance the stable NAS channel. A channel manifest is
+-replaced only after the complete versioned bundle has reached the NAS.
++A channel manifest is replaced only after the complete versioned bundle has
++reached the NAS.
+ 
+ ## Database health check
+ 
+diff --git a/scripts/launch-shows.ps1 b/scripts/launch-shows.ps1
+index 7b0372f..27ed96a 100644
+--- a/scripts/launch-shows.ps1
++++ b/scripts/launch-shows.ps1
+@@ -18,7 +18,8 @@ $state = if (Test-Path -LiteralPath $statePath) {
+ 
+ function Save-State([object]$nextState) {
+   $temp = "$statePath.$([guid]::NewGuid().ToString('N')).tmp"
+-  $nextState | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temp -Encoding utf8NoBOM
++  # The shortcut runs Windows PowerShell 5.1, which has no utf8NoBOM encoding.
++  [IO.File]::WriteAllText($temp, ($nextState | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding $false))
+   Move-Item -Force -LiteralPath $temp -Destination $statePath
+ }
+ 
+diff --git a/scripts/publish-shows-channel.ps1 b/scripts/publish-shows-channel.ps1
+index d037431..f241ec7 100644
+--- a/scripts/publish-shows-channel.ps1
++++ b/scripts/publish-shows-channel.ps1
+@@ -3,6 +3,7 @@ param(
+   [string]$Channel = "dev",
+   [string]$RepoRoot = (Split-Path -Parent $PSScriptRoot),
+   [string]$NasRoot = "S:\shows-app",
++  [string]$Release,
+   [string]$LibmpvPath = "D:\Downloads\shows\libmpv-2.dll",
+   [string]$Version,
+   [switch]$SkipBuild
+@@ -10,24 +11,39 @@ param(
+ 
+ $ErrorActionPreference = "Stop"
+ 
+-if (-not $Version) {
+-  $sha = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()
+-  if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "Could not determine git revision" }
+-  $Version = if ($Channel -eq "dev") {
+-    "$sha-$(Get-Date -Format 'yyyyMMddHHmmss')"
+-  } else {
+-    $sha
++$launcher = Join-Path $PSScriptRoot "launch-shows.ps1"
++$installer = Join-Path $PSScriptRoot "install-shows-launcher.ps1"
++$download = $null
++
++if ($Channel -eq "stable") {
++  # Stable is the bundle CI built and released, never a local build.
++  if ($Version -or $SkipBuild) { throw "-Version and -SkipBuild apply to dev; stable publishes a GitHub release" }
++  if (-not $Release) {
++    $Release = gh release view --repo nelsong6/shows --json tagName --jq .tagName
++    if ($LASTEXITCODE -ne 0 -or -not $Release) { throw "Could not determine the latest release" }
++  }
++  if ($Release -notmatch '^desktop-([0-9a-f]+)$') { throw "Not a desktop release tag: $Release" }
++  $Version = $Matches[1]
++
++  $download = Join-Path ([IO.Path]::GetTempPath()) "shows-release-$([guid]::NewGuid().ToString('N'))"
++  gh release download $Release --repo nelsong6/shows --pattern shows-desktop-windows-amd64.zip --dir $download
++  if ($LASTEXITCODE -ne 0) { throw "Could not download release $Release" }
++  Expand-Archive -LiteralPath (Join-Path $download "shows-desktop-windows-amd64.zip") -DestinationPath (Join-Path $download "bundle")
++  $exe = Join-Path $download "bundle\shows-desktop.exe"
++  $LibmpvPath = Join-Path $download "bundle\libmpv-2.dll"
++} else {
++  if (-not $Version) {
++    $sha = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()
++    if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "Could not determine git revision" }
++    $Version = "$sha-$(Get-Date -Format 'yyyyMMddHHmmss')"
+   }
++  $workspace = Join-Path $RepoRoot "desktop-rs"
++  $frontend = Join-Path $workspace "frontend"
++  $exe = Join-Path $workspace "target\release\shows-desktop.exe"
+ }
+ if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid version: $Version" }
+ 
+-$workspace = Join-Path $RepoRoot "desktop-rs"
+-$frontend = Join-Path $workspace "frontend"
+-$exe = Join-Path $workspace "target\release\shows-desktop.exe"
+-$launcher = Join-Path $PSScriptRoot "launch-shows.ps1"
+-$installer = Join-Path $PSScriptRoot "install-shows-launcher.ps1"
+-
+-if (-not $SkipBuild) {
++if ($Channel -eq "dev" -and -not $SkipBuild) {
+   Push-Location $frontend
+   try { npm run build; if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" } }
+   finally { Pop-Location }
+@@ -100,6 +116,7 @@ try {
+   Move-Item -Force -LiteralPath $installerTemp -Destination (Join-Path $NasRoot "install-shows-launcher.ps1")
+ } finally {
+   if (Test-Path -LiteralPath $stage) { Remove-Item -Recurse -Force -LiteralPath $stage }
++  if ($download) { Remove-Item -Recurse -Force -LiteralPath $download }
+ }
+ 
+ Write-Host "Published shows $Version to $Channel at $NasRoot"
