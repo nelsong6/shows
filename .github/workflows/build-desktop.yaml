@@ -181,6 +181,7 @@ jobs:
 
       - name: Sign and verify home executables and runtime
         if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
+        timeout-minutes: 3
         shell: pwsh
         env:
           AT_TERMINAL_PFX: ${{ secrets.AT_TERMINAL_PFX }}
