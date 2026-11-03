@@ -11,7 +11,9 @@ use serde_json::Value;
 use shows_control::{Command, Frame};
 
 use crate::{
-    clock, current, text,
+    clock, current,
+    picker::{self, Choice},
+    text,
     transport::{REQUEST_TIMEOUT, Session},
 };
 
@@ -218,11 +220,85 @@ fn draw(frame: &mut TerminalFrame, model: &Model, target: &str) {
             .style(Style::default().fg(color)),
         areas[3],
     );
-    frame.render_widget(Paragraph::new("Space play/pause · s play · p pause · n skip (marks watched) · b previous\nd defer · ←→ seek 10s · +/- volume · r reconnect · q quit")
+    frame.render_widget(Paragraph::new("/ commands · Space play/pause · n skip (marks watched) · b previous\nd defer · ←→ seek 10s · +/- volume · r reconnect · q quit")
         .wrap(Wrap { trim: true }), areas[4]);
 }
 
-pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Result<(), String> {
+fn palette(model: &Model) -> Result<Option<String>, String> {
+    let mut choices = vec![
+        Choice {
+            id: "switch".into(),
+            name: "Change instance".into(),
+            description: "Choose another running Shows player".into(),
+        },
+        Choice {
+            id: "reconnect".into(),
+            name: "Reconnect".into(),
+            description: "Connect again without replaying commands".into(),
+        },
+        Choice {
+            id: "quit".into(),
+            name: "Quit remote".into(),
+            description: "Leave TV playback running".into(),
+        },
+    ];
+    if model.ready() {
+        for (id, name) in [
+            ("play", "Play"),
+            ("pause", "Pause"),
+            ("skip", "Next (mark watched)"),
+            ("previous", "Previous"),
+            ("defer", "Defer (unwatched)"),
+            ("back", "Seek back 10 seconds"),
+            ("forward", "Seek forward 10 seconds"),
+            ("quieter", "Volume down 5"),
+            ("louder", "Volume up 5"),
+        ] {
+            choices.push(Choice {
+                id: id.into(),
+                name: name.into(),
+                description: "Control the selected instance".into(),
+            });
+        }
+        for (index, episode) in model.status["round"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            choices.push(Choice {
+                id: format!("show:{index}"),
+                name: format!("Play {}", text(&episode["show_name"])),
+                description: "Choose from this instance's current round".into(),
+            });
+        }
+    }
+    picker::select("Shows remote — commands", &choices)
+}
+
+fn palette_command(model: &Model, action: &str) -> Option<Command> {
+    let key = match action {
+        "play" => KeyCode::Char('s'),
+        "pause" => KeyCode::Char('p'),
+        "skip" => KeyCode::Char('n'),
+        "previous" => KeyCode::Char('b'),
+        "defer" => KeyCode::Char('d'),
+        "back" => KeyCode::Left,
+        "forward" => KeyCode::Right,
+        "quieter" => KeyCode::Char('-'),
+        "louder" => KeyCode::Char('+'),
+        _ => {
+            let index = action.strip_prefix("show:")?.parse::<usize>().ok()?;
+            return Some(Command::PlayShow {
+                show_id: model.status["round"][index]["show_id"].as_str()?.to_owned(),
+            });
+        }
+    };
+    model.control(key)
+}
+
+/// True returns to instance selection; false quits the remote.
+pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Result<bool, String> {
     let id = session.send(Command::Watch {})?;
     let mut model = Model::connecting(id);
     let mut connection = Some(session);
@@ -269,9 +345,47 @@ pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Re
             if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
                 || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
             {
-                return Ok(());
+                return Ok(false);
             }
-            match key.code {
+            let mut code = key.code;
+            let mut selected_command = None;
+            if code == KeyCode::Char('/') {
+                ratatui::restore();
+                let selected = palette(&model);
+                terminal = ratatui::try_init().map_err(|e| e.to_string())?;
+                terminal.clear().map_err(|e| e.to_string())?;
+                // A player may disconnect or change while fzt owns the terminal.
+                let mut lost = false;
+                if let Some(session) = connection.as_ref() {
+                    while let Ok(frame) = session.events.try_recv() {
+                        last_activity = Instant::now();
+                        lost |= matches!(&frame, Frame::Disconnected { .. });
+                        model.receive(frame);
+                    }
+                }
+                if lost {
+                    connection.take();
+                }
+                if model.connected && last_activity.elapsed() > Duration::from_secs(65) {
+                    model.disconnect("No status or heartbeat from Shows for 65 seconds".into());
+                    connection.take();
+                }
+                match selected {
+                    Ok(Some(action)) if action == "switch" => return Ok(true),
+                    Ok(Some(action)) if action == "quit" => return Ok(false),
+                    Ok(Some(action)) if action == "reconnect" => {
+                        model.disconnect("Reconnecting".into());
+                        code = KeyCode::Char('r');
+                    }
+                    Ok(Some(action)) => selected_command = palette_command(&model, &action),
+                    Ok(None) => continue,
+                    Err(message) => {
+                        model.notice = message;
+                        continue;
+                    }
+                }
+            }
+            match code {
                 KeyCode::Down => {
                     model.selected = (model.selected + 1).min(model.round_len().saturating_sub(1))
                 }
@@ -291,7 +405,7 @@ pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Re
                     }
                 }
                 _ if model.ready() => {
-                    if let Some(command) = model.control(key.code) {
+                    if let Some(command) = selected_command.or_else(|| model.control(code)) {
                         match connection
                             .as_mut()
                             .ok_or("connection unavailable")
@@ -317,6 +431,26 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
+
+    #[test]
+    fn palette_actions_use_target_show_ids_and_existing_explicit_commands() {
+        let mut model = Model::connecting(1);
+        model.status = json!({"round":[{"show_id":"stable-show-id"}],"playback":{"volume":80}});
+        assert_eq!(
+            palette_command(&model, "show:0"),
+            Some(Command::PlayShow {
+                show_id: "stable-show-id".into()
+            })
+        );
+        assert_eq!(palette_command(&model, "pause"), Some(Command::Pause {}));
+        assert_eq!(
+            palette_command(&model, "back"),
+            Some(Command::Seek { seconds: -10.0 })
+        );
+        assert_eq!(palette_command(&model, "switch"), None);
+        assert_eq!(palette_command(&model, "quit"), None);
+        assert_eq!(palette_command(&model, "show:100"), None);
+    }
 
     #[test]
     fn disconnected_and_waiting_states_disable_controls_without_optimistic_playback() {

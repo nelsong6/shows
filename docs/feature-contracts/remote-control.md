@@ -7,6 +7,12 @@ round. The target owns playback and all authoritative NAS transactions.
 
 ## Transport and identity
 
+- **T0. Choose an instance.** Opening the app without a target checks the shared
+  home machine inventory and displays an fzt instance picker. It includes this
+  PC, explains unavailable computers, supports refresh, and never starts a player.
+  Explicit CLI targets skip discovery; one-shot commands never silently choose
+  a computer. The at-menu entry launches the generic app without a target.
+
 - **T1. HTTP stays local.** The desktop listens on `127.0.0.1:45831`.
   `SHOWS_CONTROL_PORT` may select another nonzero port for isolated tests or a
   configured installation; desktop and agent must agree. The native client
@@ -29,6 +35,13 @@ round. The target owns playback and all authoritative NAS transactions.
   library import, filesystem browsing, or shell/window actions.
 
 ## Playback and acknowledgement
+
+- **C0. Discoverable actions.** `/` opens the fzt command palette, advertised on
+  screen. It provides playback and current-round show selection when controls
+  are available, plus reconnect, change instance, and quit. Cancel executes
+  nothing. Switching closes the previous agent, leaves its player unchanged,
+  and returns to instance selection. Status queued while the palette is open
+  is consumed before another playback command is accepted.
 
 - **C1. Existing round semantics.** Skip, previous, defer and show navigation use
   the overlay's runner. [round-and-advance.md](round-and-advance.md) invariants

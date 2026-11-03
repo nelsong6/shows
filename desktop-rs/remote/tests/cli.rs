@@ -97,6 +97,16 @@ fn scripts_get_a_clear_error_instead_of_entering_raw_terminal_mode() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("needs a terminal"));
 }
 
+#[test]
+fn one_shot_commands_never_pick_an_implicit_machine() {
+    let output = Command::new(env!("CARGO_BIN_EXE_shows-remote"))
+        .args(["status", "--json"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Commands require a target"));
+}
+
 #[cfg(windows)]
 #[test]
 fn installed_windows_agent_inherits_protocol_pipes_through_the_remote_entry_point() {

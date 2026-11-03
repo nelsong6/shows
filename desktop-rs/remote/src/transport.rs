@@ -33,11 +33,25 @@ pub struct Session {
 
 impl Session {
     pub fn connect(host: &str, channel: &str, local: bool) -> Result<Self, String> {
+        Self::connect_inner(host, channel, local, true)
+    }
+
+    pub fn connect_native(host: &str, channel: &str, local: bool) -> Result<Self, String> {
+        Self::connect_inner(host, channel, local, false)
+    }
+
+    fn connect_inner(
+        host: &str,
+        channel: &str,
+        local: bool,
+        allow_development: bool,
+    ) -> Result<Self, String> {
         if !valid_host(host) {
             return Err("target must be a computer hostname or SSH host alias".into());
         }
-        let development_agent =
-            cfg!(debug_assertions) && std::env::var("SHOWS_REMOTE_DEV_AGENT").as_deref() == Ok("1");
+        let development_agent = allow_development
+            && cfg!(debug_assertions)
+            && std::env::var("SHOWS_REMOTE_DEV_AGENT").as_deref() == Ok("1");
         let mut command = if local || development_agent {
             let mut cmd = ProcessCommand::new(std::env::current_exe().map_err(|e| e.to_string())?);
             cmd.arg("--agent");

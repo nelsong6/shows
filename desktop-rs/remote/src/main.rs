@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod agent;
+mod discovery;
+mod picker;
 mod ui;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -20,11 +22,10 @@ enum Channel {
 #[command(
     version = version(),
     about = "Control a running Shows desktop over your existing SSH connection.",
-    after_help = "Examples:\n  shows-remote upstairspc\n  shows-remote upstairspc play\n  shows-remote upstairspc play \"The Simpsons\"\n  shows-remote upstairspc status --json\n\nNo command opens the interactive remote. The target must already have Shows open."
+    after_help = "Examples:\n  shows-remote\n  shows-remote upstairspc play\n  shows-remote upstairspc play \"The Simpsons\"\n  shows-remote upstairspc status --json\n\nNo arguments opens the instance picker. The target must already have Shows open."
 )]
 struct Args {
-    #[arg(default_value = "upstairspc")]
-    target: String,
+    target: Option<String>,
     #[arg(long, value_enum, default_value = "stable", global = true)]
     channel: Channel,
     #[arg(
@@ -88,9 +89,41 @@ fn run() -> Result<(), String> {
         Channel::Stable => "stable",
         Channel::Dev => "dev",
     };
-    let mut session = Session::connect(&args.target, channel, args.local)?;
+    if args.command.is_none() {
+        let mut target = args.target.map(|host| discovery::Target {
+            host,
+            local: args.local,
+        });
+        if args.local && target.is_none() {
+            target = Some(discovery::Target {
+                host: "local".into(),
+                local: true,
+            });
+        }
+        loop {
+            let explicit = target.is_some();
+            let selected = match target.take() {
+                Some(target) => Some(target),
+                None => discovery::choose(channel)?,
+            };
+            let Some(selected) = selected else {
+                return Ok(());
+            };
+            let session = if explicit {
+                Session::connect(&selected.host, channel, selected.local)
+            } else {
+                Session::connect_native(&selected.host, channel, selected.local)
+            }?;
+            if !ui::run(session, &selected.host, channel, selected.local)? {
+                return Ok(());
+            }
+        }
+    }
+    let target = args.target.as_deref().or(if args.local { Some("local") } else { None })
+        .ok_or("Commands require a target: shows-remote <computer> status. Run shows-remote with no arguments to choose an instance.")?;
+    let mut session = Session::connect(target, channel, args.local)?;
     let Some(action) = args.command else {
-        return ui::run(session, &args.target, channel, args.local);
+        unreachable!();
     };
     let command = match action {
         Action::Status => Command::Status {},
@@ -114,14 +147,7 @@ fn run() -> Result<(), String> {
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?
         );
     } else {
-        println!(
-            "{}",
-            if args.local {
-                "Local Shows"
-            } else {
-                &args.target
-            }
-        );
+        println!("{}", if args.local { "Local Shows" } else { target });
         match command {
             Command::Status {} => print_status(&result),
             Command::Queue {} => {
