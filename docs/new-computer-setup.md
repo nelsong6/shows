@@ -28,7 +28,7 @@ If `SHOWS_LOCAL_WATCHING_DIR` is set, it overrides `D:\Downloads\Watching`.
 After a channel has been published to `S:\shows-app`, run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File `
+pwsh -ExecutionPolicy Bypass -File `
   S:\shows-app\install-shows-launcher.ps1 `
   -Channel stable
 ```
@@ -72,3 +72,15 @@ On a healthy round, `file_sync.cached` should match the current round size and
 `missing` / `failed` should be zero after the first copy pass. If the app reports
 missing files, verify the source path under `S:\Group-Nelson` and use the round
 repair controls only for genuinely bad current-round entries.
+
+## Development setup
+
+PowerShell 7, Rust, Node, devctl and an installed Shows bundle are required.
+Install the development command from the default-branch checkout:
+
+```powershell
+.\scripts\install-shows-launcher.ps1 -DevelopmentRepo D:\repos\shows
+```
+
+`shows-dev` selects the current Shows worktree when invoked inside one. See
+[Developing Shows](development.md) for previews, warm builds and one-step shipping.

@@ -40,3 +40,14 @@ without running an executable from the network share.
   with a `shows-remote.cmd` entry point.
   Version selection also writes a native `agents/<channel>.cmd` entry point
   so SSH can start the installed agent with stdin/stdout preserved.
+
+## Automated updates
+
+`publish-shows-channel.ps1 -WaitForRelease -InstallTargets local,upstairspc`
+waits for the exact CI release of main before publication, then updates the
+named PCs through existing SSH. An existing publication is reused only after
+its files match the downloaded artifact and it is still the selected channel.
+The installer uses PowerShell 7; no Windows PowerShell 5.1 launcher is retained.
+A running desktop closes through its resume-saving control, restarts in the
+interactive user session and regains its pause state. A closed app stays closed.
+See [development-lifecycle.md](development-lifecycle.md).

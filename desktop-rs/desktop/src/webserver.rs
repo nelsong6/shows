@@ -6,7 +6,7 @@
 //! `/library/*`.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
@@ -20,9 +20,17 @@ use shows_core::scan;
 
 use crate::player::Player;
 
+#[cfg(not(debug_assertions))]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../frontend/dist"]
 struct Asset;
+
+fn embedded_asset(path: &str) -> Option<Vec<u8>> {
+    #[cfg(not(debug_assertions))]
+    { Asset::get(path).map(|file| file.data.into_owned()) }
+    #[cfg(debug_assertions)]
+    { let _ = path; None }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowAction {
@@ -223,7 +231,6 @@ type FullscreenCb = Box<dyn Fn() + Send + Sync>;
 type StayOnTopCb = Box<dyn Fn(bool) + Send + Sync>;
 
 pub struct ControlServer {
-    dist_dir: Option<PathBuf>,
     playlists: Vec<String>,
     replica: Arc<Replica>,
     status: Mutex<serde_json::Map<String, Value>>,
@@ -238,7 +245,6 @@ pub struct ControlServer {
 
 impl ControlServer {
     pub fn new(
-        dist_dir: Option<PathBuf>,
         replica: Arc<Replica>,
         playlists: Vec<String>,
     ) -> Arc<ControlServer> {
@@ -255,7 +261,6 @@ impl ControlServer {
         status.insert("window_fullscreen".into(), json!(false));
         status.insert("window_on_top".into(), json!(false));
         Arc::new(ControlServer {
-            dist_dir,
             playlists,
             replica,
             status: Mutex::new(status),
@@ -313,13 +318,7 @@ impl ControlServer {
     }
 
     pub fn index_html(&self) -> Vec<u8> {
-        if let Some(ref dist_dir) = self.dist_dir {
-            std::fs::read(dist_dir.join("index.html")).unwrap_or_default()
-        } else {
-            Asset::get("index.html")
-                .map(|file| file.data.into_owned())
-                .unwrap_or_default()
-        }
+        embedded_asset("index.html").unwrap_or_default()
     }
 
     pub fn start(self: &Arc<Self>) -> u16 {
@@ -1093,20 +1092,8 @@ impl ControlServer {
 
     fn static_file(&self, rel: &str) -> Option<(Vec<u8>, String)> {
         let rel = rel.trim_start_matches('/');
-        if let Some(ref dist_dir) = self.dist_dir {
-            let full = dist_dir.join(rel).canonicalize().ok()?;
-            let dist = dist_dir.canonicalize().ok()?;
-            if !full.starts_with(&dist) {
-                return None; // traversal guard
-            }
-            let data = std::fs::read(&full).ok()?;
-            Some((data, content_type(&full)))
-        } else {
-            let file = Asset::get(rel)?;
-            let data = file.data.into_owned();
-            let ctype = content_type(Path::new(rel));
-            Some((data, ctype))
-        }
+        let data = embedded_asset(rel)?;
+        Some((data, content_type(Path::new(rel))))
     }
 }
 
@@ -1494,7 +1481,7 @@ mod tests {
 
     #[test]
     fn native_remote_reports_unavailable_player_without_mutating_shared_state() {
-        let control = ControlServer::new(None, Arc::new(Replica::new(":memory:")), vec!["nelson".into()]);
+        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec!["nelson".into()]);
         let revision = control.replica.revision();
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();
@@ -1514,7 +1501,7 @@ mod tests {
     fn remote_rejects_browser_requests_before_applying_controls() {
         use std::io::Write;
         for headers in ["Content-Type: text/plain\r\n", "Content-Type: application/json\r\nOrigin: https://example.com\r\n"] {
-            let control = ControlServer::new(None, Arc::new(Replica::new(":memory:")), vec![]);
+            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
             let listener = Server::http("127.0.0.1:0").unwrap();
             let address = listener.server_addr().to_string();
             let worker = std::thread::spawn(move || {
@@ -1590,9 +1577,7 @@ mod tests {
 
     #[test]
     fn identical_shell_state_is_rebroadcast_as_an_acknowledgement() {
-        let server = ControlServer::new(
-            None,
-            Arc::new(Replica::new(":memory:")),
+        let server = ControlServer::new(Arc::new(Replica::new(":memory:")),
             vec!["nelson".to_string()],
         );
 
@@ -1619,9 +1604,7 @@ mod tests {
 
     #[test]
     fn initial_status_snapshot_has_frontend_contract_fields() {
-        let server = ControlServer::new(
-            None,
-            Arc::new(Replica::new(":memory:")),
+        let server = ControlServer::new(Arc::new(Replica::new(":memory:")),
             vec!["nelson".to_string()],
         );
         let value = server.status_json();

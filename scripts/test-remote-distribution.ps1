@@ -32,6 +32,7 @@ try {
     $installed = Join-Path $install ('versions\smoke\' + $file.name)
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash.ToLowerInvariant() -ne $file.sha256) { throw 'Installed hash differs from manifest' }
   }
+  & (Join-Path $RepoRoot 'scripts\publish-shows-channel.ps1') -Channel dev -RepoRoot (Join-Path $fixture 'repo') -NasRoot $nas -LibmpvPath $runtime -Version smoke -SkipBuild
   Write-Host 'Remote distribution smoke passed: complete manifest, verified install, argument forwarding and exit status'
 } finally {
   $resolved = [IO.Path]::GetFullPath($fixture)

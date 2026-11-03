@@ -2,6 +2,28 @@ use super::*;
 use std::io::Cursor;
 use tiny_http::{Header, Response, Server};
 
+#[test]
+fn live_overlay_is_explicit_and_cannot_replace_release_assets() {
+    assert_eq!(
+        overlay_url(45831, None, false).unwrap(),
+        "http://127.0.0.1:45831/"
+    );
+    assert!(overlay_url(45831, Some("http://127.0.0.1:5173/"), false).is_err());
+    assert!(overlay_url(45831, None, true).is_err());
+    assert_eq!(
+        overlay_url(45831, Some("http://127.0.0.1:5173/"), true).unwrap(),
+        "http://127.0.0.1:5173/"
+    );
+    for url in [
+        "https://example.com/",
+        "http://upstairspc/",
+        "javascript:alert(1)",
+        "http://user@localhost/",
+    ] {
+        assert!(overlay_url(45831, Some(url), true).is_err());
+    }
+}
+
 fn fixture(replies: Vec<(&'static str, u16, Value)>) -> (String, std::thread::JoinHandle<()>) {
     let server = Server::http("127.0.0.1:0").unwrap();
     let address = server.server_addr().to_string();
