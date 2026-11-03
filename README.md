@@ -4,6 +4,7 @@ Source: https://github.com/nelsong6/shows
 
 Raw records retain source identities, authors, timestamps, issue events, timelines, conversation comments, reviews and inline comments. Each pull request also includes its full diff, commit and file metadata. `pull-objects.bundle` retains the original base and head Git objects. Existing native Forgejo records are unchanged.
 
+- [Pull request #18](records/18/issue.json) ([source](https://github.com/nelsong6/shows/issues/18))
 - [Pull request #17](records/17/issue.json) ([source](https://github.com/nelsong6/shows/issues/17))
 - [Pull request #16](records/16/issue.json) ([source](https://github.com/nelsong6/shows/issues/16))
 - [Pull request #15](records/15/issue.json) ([source](https://github.com/nelsong6/shows/issues/15))

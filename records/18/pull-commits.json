@@ -1,0 +1,44 @@
+[
+  {
+    "author": null,
+    "comments_url": "https://api.github.com/repos/nelsong6/shows/commits/5801dff4d5c5d290fa6056c00090eaa661bdd45f/comments",
+    "commit": {
+      "author": {
+        "date": "2026-11-03T19:00:01Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "comment_count": 0,
+      "committer": {
+        "date": "2026-11-03T19:00:01Z",
+        "email": "fullnelsongrip@gmail.com",
+        "name": "Nelson"
+      },
+      "message": "Keep release signing unattended on Windows CI",
+      "tree": {
+        "sha": "7f95a2d2155e3c9da65dafa92436f5ee60a45b98",
+        "url": "https://api.github.com/repos/nelsong6/shows/git/trees/7f95a2d2155e3c9da65dafa92436f5ee60a45b98"
+      },
+      "url": "https://api.github.com/repos/nelsong6/shows/git/commits/5801dff4d5c5d290fa6056c00090eaa661bdd45f",
+      "verification": {
+        "payload": null,
+        "reason": "unsigned",
+        "signature": null,
+        "verified": false,
+        "verified_at": null
+      }
+    },
+    "committer": null,
+    "html_url": "https://github.com/nelsong6/shows/commit/5801dff4d5c5d290fa6056c00090eaa661bdd45f",
+    "node_id": "C_kwDOS5KECdoAKDU4MDFkZmY0ZDVjNWQyOTBmYTYwNTZjMDAwOTBlYWE2NjFiZGQ0NWY",
+    "parents": [
+      {
+        "html_url": "https://github.com/nelsong6/shows/commit/11a658e1816b42ee5725e21de0524da17a8ad2e4",
+        "sha": "11a658e1816b42ee5725e21de0524da17a8ad2e4",
+        "url": "https://api.github.com/repos/nelsong6/shows/commits/11a658e1816b42ee5725e21de0524da17a8ad2e4"
+      }
+    ],
+    "sha": "5801dff4d5c5d290fa6056c00090eaa661bdd45f",
+    "url": "https://api.github.com/repos/nelsong6/shows/commits/5801dff4d5c5d290fa6056c00090eaa661bdd45f"
+  }
+]

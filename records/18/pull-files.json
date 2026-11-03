@@ -1,0 +1,26 @@
+[
+  {
+    "additions": 1,
+    "blob_url": "https://github.com/nelsong6/shows/blob/5801dff4d5c5d290fa6056c00090eaa661bdd45f/.github%2Fworkflows%2Fbuild-desktop.yaml",
+    "changes": 1,
+    "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/.github%2Fworkflows%2Fbuild-desktop.yaml?ref=5801dff4d5c5d290fa6056c00090eaa661bdd45f",
+    "deletions": 0,
+    "filename": ".github/workflows/build-desktop.yaml",
+    "patch": "@@ -181,6 +181,7 @@ jobs:\n \n       - name: Sign and verify home executables and runtime\n         if: steps.changes.outputs.skip != 'true' \u0026\u0026 github.event_name != 'pull_request'\n+        timeout-minutes: 3\n         shell: pwsh\n         env:\n           AT_TERMINAL_PFX: ${{ secrets.AT_TERMINAL_PFX }}",
+    "raw_url": "https://github.com/nelsong6/shows/raw/5801dff4d5c5d290fa6056c00090eaa661bdd45f/.github%2Fworkflows%2Fbuild-desktop.yaml",
+    "sha": "849a0cd50d2e33c548cb15834a04363b22fa27ed",
+    "status": "modified"
+  },
+  {
+    "additions": 6,
+    "blob_url": "https://github.com/nelsong6/shows/blob/5801dff4d5c5d290fa6056c00090eaa661bdd45f/scripts%2Fsign-shows-bundle.ps1",
+    "changes": 8,
+    "contents_url": "https://api.github.com/repos/nelsong6/shows/contents/scripts%2Fsign-shows-bundle.ps1?ref=5801dff4d5c5d290fa6056c00090eaa661bdd45f",
+    "deletions": 2,
+    "filename": "scripts/sign-shows-bundle.ps1",
+    "patch": "@@ -8,18 +8,22 @@ $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(\n   [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)\n try {\n   if ($certificate.Thumbprint -ne $expected -or -not $certificate.HasPrivateKey) { throw 'Unexpected home signing certificate' }\n-  if ($env:CI -eq 'true') {\n+  if ($env:GITHUB_ACTIONS -eq 'true') {\n     # The hosted runner starts without the public trust installed on home PCs.\n     # Only the already pinned public identity is added; its private key stays ephemeral.\n+    # CurrentUser\\Root opens an interactive confirmation dialog. The elevated,\n+    # disposable hosted runner uses LocalMachine so this step stays unattended.\n     $public = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))\n     foreach ($name in @('Root','TrustedPeople')) {\n-      $store = [Security.Cryptography.X509Certificates.X509Store]::new($name, 'CurrentUser')\n+      Write-Host \"Trusting the pinned public certificate in LocalMachine\\$name\"\n+      $store = [Security.Cryptography.X509Certificates.X509Store]::new($name, 'LocalMachine')\n       try { $store.Open('ReadWrite'); $store.Add($public) } finally { $store.Close() }\n     }\n     $public.Dispose()\n   }\n   foreach ($name in @('shows-desktop.exe','shows-remote.exe','libmpv-2.dll')) {\n     $file = Join-Path $BundleDirectory $name\n+    Write-Host \"Signing $name\"\n     $signature = Set-AuthenticodeSignature -FilePath $file -Certificate $certificate -HashAlgorithm SHA256\n     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $expected) { throw \"Signing verification failed for $name`: $($signature.Status)\" }\n     Write-Host \"Signed and verified $name\"",
+    "raw_url": "https://github.com/nelsong6/shows/raw/5801dff4d5c5d290fa6056c00090eaa661bdd45f/scripts%2Fsign-shows-bundle.ps1",
+    "sha": "35b594f6f74bc177ffe437931396c52fcfbb0618",
+    "status": "modified"
+  }
+]

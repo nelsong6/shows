@@ -1,0 +1,41 @@
+diff --git a/.github/workflows/build-desktop.yaml b/.github/workflows/build-desktop.yaml
+index 22e034d..849a0cd 100644
+--- a/.github/workflows/build-desktop.yaml
++++ b/.github/workflows/build-desktop.yaml
+@@ -181,6 +181,7 @@ jobs:
+ 
+       - name: Sign and verify home executables and runtime
+         if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
++        timeout-minutes: 3
+         shell: pwsh
+         env:
+           AT_TERMINAL_PFX: ${{ secrets.AT_TERMINAL_PFX }}
+diff --git a/scripts/sign-shows-bundle.ps1 b/scripts/sign-shows-bundle.ps1
+index 1b0bfc0..35b594f 100644
+--- a/scripts/sign-shows-bundle.ps1
++++ b/scripts/sign-shows-bundle.ps1
+@@ -8,18 +8,22 @@ $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
+   [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet)
+ try {
+   if ($certificate.Thumbprint -ne $expected -or -not $certificate.HasPrivateKey) { throw 'Unexpected home signing certificate' }
+-  if ($env:CI -eq 'true') {
++  if ($env:GITHUB_ACTIONS -eq 'true') {
+     # The hosted runner starts without the public trust installed on home PCs.
+     # Only the already pinned public identity is added; its private key stays ephemeral.
++    # CurrentUser\Root opens an interactive confirmation dialog. The elevated,
++    # disposable hosted runner uses LocalMachine so this step stays unattended.
+     $public = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificate.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+     foreach ($name in @('Root','TrustedPeople')) {
+-      $store = [Security.Cryptography.X509Certificates.X509Store]::new($name, 'CurrentUser')
++      Write-Host "Trusting the pinned public certificate in LocalMachine\$name"
++      $store = [Security.Cryptography.X509Certificates.X509Store]::new($name, 'LocalMachine')
+       try { $store.Open('ReadWrite'); $store.Add($public) } finally { $store.Close() }
+     }
+     $public.Dispose()
+   }
+   foreach ($name in @('shows-desktop.exe','shows-remote.exe','libmpv-2.dll')) {
+     $file = Join-Path $BundleDirectory $name
++    Write-Host "Signing $name"
+     $signature = Set-AuthenticodeSignature -FilePath $file -Certificate $certificate -HashAlgorithm SHA256
+     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $expected) { throw "Signing verification failed for $name`: $($signature.Status)" }
+     Write-Host "Signed and verified $name"
