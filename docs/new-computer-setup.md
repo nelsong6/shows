@@ -38,6 +38,10 @@ builds. The shortcut checks the channel manifest before every launch, verifies
 the bundle hashes, installs it into a new versioned local directory, retains the
 previous version for rollback, and starts the local executable.
 
+The installer also installs the `shows-remote` terminal command. After updating
+both PCs, `shows-remote upstairspc` controls the already running upstairs instance
+over SSH. See [Shows Remote](shows-remote.md).
+
 ## Publish a build
 
 Advance the stable channel to CI's latest release (or name one with

@@ -30,6 +30,7 @@ if ($Channel -eq "stable") {
   if ($LASTEXITCODE -ne 0) { throw "Could not download release $Release" }
   Expand-Archive -LiteralPath (Join-Path $download "shows-desktop-windows-amd64.zip") -DestinationPath (Join-Path $download "bundle")
   $exe = Join-Path $download "bundle\shows-desktop.exe"
+  $remoteExe = Join-Path $download "bundle\shows-remote.exe"
   $LibmpvPath = Join-Path $download "bundle\libmpv-2.dll"
 } else {
   if (-not $Version) {
@@ -40,6 +41,7 @@ if ($Channel -eq "stable") {
   $workspace = Join-Path $RepoRoot "desktop-rs"
   $frontend = Join-Path $workspace "frontend"
   $exe = Join-Path $workspace "target\release\shows-desktop.exe"
+  $remoteExe = Join-Path $workspace "target\release\shows-remote.exe"
 }
 if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid version: $Version" }
 
@@ -52,7 +54,7 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
   try {
     $env:SHOWS_BUILD_SHA = $Version
     $env:SHOWS_UPDATE_CHANNEL = $Channel
-    cargo build --release -p shows-desktop
+    cargo build --release -p shows-desktop -p shows-remote
     if ($LASTEXITCODE -ne 0) { throw "Desktop build failed" }
   } finally {
     Remove-Item Env:SHOWS_BUILD_SHA -ErrorAction SilentlyContinue
@@ -61,7 +63,7 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
   }
 }
 
-foreach ($required in @($exe, $LibmpvPath, $launcher, $installer)) {
+foreach ($required in @($exe, $remoteExe, $LibmpvPath, $launcher, $installer)) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing required file: $required" }
 }
 
@@ -77,10 +79,11 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 
 try {
   Copy-Item -LiteralPath $exe -Destination (Join-Path $stage "shows-desktop.exe")
+  Copy-Item -LiteralPath $remoteExe -Destination (Join-Path $stage "shows-remote.exe")
   Copy-Item -LiteralPath $LibmpvPath -Destination (Join-Path $stage "libmpv-2.dll")
 
   $files = @()
-  foreach ($name in @("shows-desktop.exe", "libmpv-2.dll")) {
+  foreach ($name in @("shows-desktop.exe", "shows-remote.exe", "libmpv-2.dll")) {
     $path = Join-Path $stage $name
     $files += [ordered]@{
       name = $name

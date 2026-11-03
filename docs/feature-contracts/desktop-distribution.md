@@ -8,7 +8,7 @@ without running an executable from the network share.
 - **P1. Immutable versions.** A version is published once under
   `shows-app/versions/<version>` and is never overwritten.
 - **P2. Complete before visible.** The publisher stages the executable and
-  libmpv runtime, records their SHA-256 hashes and lengths, then moves the whole
+  terminal companion and libmpv runtime, records their SHA-256 hashes and lengths, then moves the whole
   bundle into `versions`. Only afterward does it replace the channel manifest.
 - **P3. Explicit channels.** `stable` and `dev` have independent manifests.
   Computers opt into one channel through their shortcut.
@@ -33,3 +33,10 @@ without running an executable from the network share.
   the previous version directory is not deleted during an update.
 - **I6. Local execution.** The selected executable starts from its local version
   directory so video startup does not depend on executing binaries over SMB.
+- **I7. Terminal companion.** Every new bundle includes `shows-remote.exe`.
+  `launch-shows.ps1 -App remote` attaches it to the caller's stdin/stdout/stderr,
+  forwards arguments and exit status, and never starts the desktop. The installer
+  copies the launcher locally and adds `%USERPROFILE%\bin` to user PATH
+  with a `shows-remote.cmd` entry point.
+  Version selection also writes a native `agents/<channel>.cmd` entry point
+  so SSH can start the installed agent with stdin/stdout preserved.

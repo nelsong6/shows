@@ -1,0 +1,289 @@
+//! The loopback control contract shared by the desktop and terminal companion.
+#![forbid(unsafe_code)]
+
+use std::io::{BufRead, BufReader, Read};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+pub const CONTROL_ADDR: &str = "127.0.0.1:45831";
+pub const PROTOCOL_VERSION: u32 = 1;
+pub const MAX_FRAME: u64 = 1024 * 1024;
+
+pub fn control_addr() -> Result<String, String> {
+    match std::env::var("SHOWS_CONTROL_PORT") {
+        Ok(port) => {
+            let port: u16 = port
+                .parse()
+                .map_err(|_| "SHOWS_CONTROL_PORT must be a port from 1 to 65535")?;
+            if port == 0 {
+                return Err("SHOWS_CONTROL_PORT cannot be zero".into());
+            }
+            Ok(format!("127.0.0.1:{port}"))
+        }
+        Err(std::env::VarError::NotPresent) => Ok(CONTROL_ADDR.into()),
+        Err(_) => Err("SHOWS_CONTROL_PORT is not valid Unicode".into()),
+    }
+}
+
+pub fn playback_ready(status: &Value) -> bool {
+    let Some(pos) = status["round_pos"].as_u64() else {
+        return false;
+    };
+    status["phase"] == "playing"
+        && status["playback"]["time_pos"].is_number()
+        && status["round"][pos as usize]["episode_id"].is_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Command {
+    Status {},
+    Queue {},
+    Watch {},
+    Play {},
+    Pause {},
+    Skip {},
+    Previous {},
+    Defer {},
+    Seek { seconds: f64 },
+    Volume { level: f64 },
+    PlayShow { show_id: String },
+}
+
+impl Command {
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Seek { seconds } if !seconds.is_finite() || seconds.abs() > 86400.0 => {
+                Err("seek must be a finite number between -86400 and 86400 seconds".into())
+            }
+            Self::Volume { level } if !level.is_finite() || !(0.0..=130.0).contains(level) => {
+                Err("volume must be between 0 and 130".into())
+            }
+            Self::PlayShow { show_id } if show_id.is_empty() || show_id.len() > 256 => {
+                Err("show_id must contain 1 to 256 bytes".into())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Request {
+    pub id: u64,
+    pub command: Command,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Frame {
+    Reply {
+        id: u64,
+        result: Result<Value, String>,
+    },
+    Status {
+        status: Value,
+    },
+    Disconnected {
+        message: String,
+    },
+    Heartbeat,
+}
+
+/// A bounded line reader for both SSH messages and SSE fields.
+pub fn read_line(reader: &mut impl BufRead) -> Result<Option<String>, String> {
+    let mut line = String::new();
+    let n = reader
+        .take(MAX_FRAME + 1)
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    if n as u64 > MAX_FRAME {
+        return Err("control message exceeds 1 MiB".into());
+    }
+    if n == 0 { Ok(None) } else { Ok(Some(line)) }
+}
+
+#[derive(Clone)]
+pub struct Client {
+    base: String,
+    agent: ureq::Agent,
+}
+
+impl Client {
+    pub fn connect() -> Result<Self, String> {
+        Self::connect_to(&control_addr()?)
+    }
+
+    pub fn connect_to(address: &str) -> Result<Self, String> {
+        let address: std::net::SocketAddr = address
+            .parse()
+            .map_err(|_| "control address must be a loopback socket address")?;
+        if !address.ip().is_loopback() {
+            return Err("control HTTP connections must stay on loopback".into());
+        }
+        let client = Self {
+            base: format!("http://{address}"),
+            agent: ureq::Agent::config_builder()
+                .proxy(None)
+                .max_redirects(0)
+                .http_status_as_error(false)
+                .timeout_global(Some(Duration::from_secs(8)))
+                .build()
+                .into(),
+        };
+        let info = client.get("/remote/info").map_err(|e| {
+            format!("Shows is not available on this PC. Open the current Shows release first. {e}")
+        })?;
+        if info["application"] != "shows-desktop" || info["protocol"] != PROTOCOL_VERSION {
+            return Err("This listener is not a compatible Shows desktop. Update Shows and shows-remote together.".into());
+        }
+        Ok(client)
+    }
+
+    fn decode(&self, mut response: ureq::http::Response<ureq::Body>) -> Result<Value, String> {
+        let code = response.status();
+        let body = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_FRAME)
+            .read_to_string()
+            .map_err(|e| e.to_string())?;
+        let value: Value =
+            serde_json::from_str(&body).map_err(|e| format!("invalid Shows response: {e}"))?;
+        if !code.is_success() || value.get("ok") == Some(&json!(false)) {
+            return Err(value["message"]
+                .as_str()
+                .unwrap_or("Shows rejected the request")
+                .to_string());
+        }
+        Ok(value)
+    }
+
+    fn get(&self, path: &str) -> Result<Value, String> {
+        let response = self
+            .agent
+            .get(format!("{}{path}", self.base))
+            .call()
+            .map_err(|e| e.to_string())?;
+        self.decode(response)
+    }
+
+    pub fn execute(&self, command: &Command) -> Result<Value, String> {
+        command.validate()?;
+        match command {
+            Command::Status {} => self.get("/status"),
+            Command::Queue {} => Ok(self.get("/status")?["round"].clone()),
+            Command::Watch {} => Err("watch requires a status stream".into()),
+            _ => {
+                let response = self
+                    .agent
+                    .post(format!("{}/remote/control", self.base))
+                    .header("Content-Type", "application/json")
+                    .send(serde_json::to_vec(command).map_err(|e| e.to_string())?)
+                    .map_err(|e| {
+                        format!("Control outcome is unknown; check status before retrying. {e}")
+                    })?;
+                self.decode(response)
+            }
+        }
+    }
+
+    pub fn watch(
+        &self,
+        mut on_frame: impl FnMut(Frame) -> Result<(), String>,
+    ) -> Result<(), String> {
+        // A body timeout would cap the entire SSE lifetime. The controller
+        // instead watches activity, including the desktop's 30-second comments.
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .proxy(None)
+            .max_redirects(0)
+            .timeout_connect(Some(Duration::from_secs(8)))
+            .timeout_recv_response(Some(Duration::from_secs(8)))
+            .build()
+            .into();
+        let response = agent
+            .get(format!("{}/status/stream", self.base))
+            .call()
+            .map_err(|e| e.to_string())?;
+        let mut reader = BufReader::new(response.into_body().into_reader());
+        let mut event = String::new();
+        let mut data = String::new();
+        let mut last_heartbeat = std::time::Instant::now();
+        while let Some(line) = read_line(&mut reader)? {
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                if event == "status" && !data.is_empty() {
+                    on_frame(Frame::Status {
+                        status: serde_json::from_str(&data)
+                            .map_err(|e| format!("invalid status event: {e}"))?,
+                    })?;
+                }
+                event.clear();
+                data.clear();
+            } else if line.starts_with(':') && last_heartbeat.elapsed() >= Duration::from_secs(10) {
+                on_frame(Frame::Heartbeat)?;
+                last_heartbeat = std::time::Instant::now();
+            } else if let Some(value) = line.strip_prefix("event:") {
+                event = value.trim().to_string();
+            } else if let Some(value) = line.strip_prefix("data:") {
+                if !data.is_empty() {
+                    data.push('\n');
+                }
+                data.push_str(value.strip_prefix(' ').unwrap_or(value));
+                if data.len() as u64 > MAX_FRAME {
+                    return Err("status event exceeds 1 MiB".into());
+                }
+            }
+        }
+        Err("Shows closed its status stream; reconnect to the running instance".into())
+    }
+}
+
+/// Resolve a user-entered show against the target's current round only.
+pub fn resolve_show(status: &Value, query: &str) -> Result<String, String> {
+    if query.trim().is_empty() {
+        return Err("show name cannot be empty".into());
+    }
+    let round = status["round"]
+        .as_array()
+        .ok_or("The target has no active round")?;
+    let exact: Vec<_> = round
+        .iter()
+        .filter(|entry| {
+            entry["show_id"].as_str() == Some(query)
+                || entry["show_name"]
+                    .as_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(query))
+        })
+        .collect();
+    let matches = if exact.is_empty() {
+        let query = query.to_lowercase();
+        round
+            .iter()
+            .filter(|entry| {
+                entry["show_name"]
+                    .as_str()
+                    .is_some_and(|n| n.to_lowercase().contains(&query))
+            })
+            .collect()
+    } else {
+        exact
+    };
+    match matches.as_slice() {
+        [entry] => entry["show_id"]
+            .as_str()
+            .map(String::from)
+            .ok_or("Show has no ID".into()),
+        [] => Err(format!(
+            "No show matching {query:?} in the target's current round. Use queue to list it."
+        )),
+        _ => Err(format!(
+            "{query:?} matches several shows; use the full name or show ID."
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests;

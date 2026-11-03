@@ -1,10 +1,15 @@
+[CmdletBinding(PositionalBinding = $false)]
 param(
   [ValidateSet("stable", "dev")]
   [string]$Channel = "stable",
   [string]$NasRoot = "S:\shows-app",
   [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "shows"),
   [switch]$NoUpdate,
-  [switch]$Wait
+  [switch]$Wait,
+  [ValidateSet("desktop", "remote")]
+  [string]$App = "desktop",
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$RemoteArgs
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,7 +33,7 @@ function Install-Version([object]$manifest) {
   if ($manifest.channel -ne $Channel) { throw "Channel manifest is for $($manifest.channel), expected $Channel" }
   if ($manifest.version -notmatch '^[A-Za-z0-9._-]+$') { throw "Unsafe version in manifest" }
   $fileNames = @($manifest.files | ForEach-Object { $_.name })
-  foreach ($required in @("shows-desktop.exe", "libmpv-2.dll")) {
+  foreach ($required in @("shows-desktop.exe", "shows-remote.exe", "libmpv-2.dll")) {
     if ($required -notin $fileNames) { throw "Manifest is missing $required" }
   }
 
@@ -80,14 +85,31 @@ if (-not $NoUpdate) {
     }
   } catch {
     if (-not $selectedVersion) { throw }
-    Write-Warning "Update failed; starting installed version $selectedVersion. $($_.Exception.Message)"
+    $updateMessage = "Update failed; starting installed version $selectedVersion. $($_.Exception.Message)"
+    if ($App -eq "remote") { [Console]::Error.WriteLine($updateMessage) }
+    else { Write-Warning $updateMessage }
   }
 }
 
 if (-not $selectedVersion) { throw "No installed shows version and updates are disabled or unavailable" }
+if ($selectedVersion -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid installed version' }
 $selectedDir = Join-Path $versions $selectedVersion
-$exe = Join-Path $selectedDir "shows-desktop.exe"
+$exe = Join-Path $selectedDir "shows-$App.exe"
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Installed executable is missing: $exe" }
+
+$agents = Join-Path $InstallRoot 'agents'
+New-Item -ItemType Directory -Force -Path $agents | Out-Null
+$agentTemp = Join-Path $agents "$Channel.$([guid]::NewGuid().ToString('N')).tmp"
+$agentCommand = '@"%~dp0..\versions\' + $selectedVersion + '\shows-remote.exe" --agent' + "`r`n"
+[IO.File]::WriteAllText($agentTemp, $agentCommand, (New-Object Text.UTF8Encoding $false))
+Move-Item -Force -LiteralPath $agentTemp -Destination (Join-Path $agents "$Channel.cmd")
+
+if ($App -eq "remote") {
+  [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+  $OutputEncoding = [Console]::OutputEncoding
+  & $exe @RemoteArgs
+  exit $LASTEXITCODE
+}
 
 $process = Start-Process -FilePath $exe -WorkingDirectory $selectedDir -PassThru
 if ($Wait) { $process.WaitForExit(); exit $process.ExitCode }
