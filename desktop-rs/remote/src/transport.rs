@@ -3,7 +3,6 @@ use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::Value;
 use shows_control::{Command, Frame, Request, read_line};
 
@@ -18,24 +17,11 @@ pub fn valid_host(host: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'.')
 }
 
-pub fn remote_script(channel: &str) -> String {
-    // No host, show name, or user-supplied command is interpolated into a shell.
-    // channel is a clap ValueEnum; commands travel as JSON on SSH's stdin.
-    format!(
-        r#"$ErrorActionPreference = 'Stop'
-try {{
-  [Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
-  [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
-  $OutputEncoding = [Console]::OutputEncoding
-  $root = Join-Path $env:LOCALAPPDATA 'shows'
-  $state = Get-Content -Raw -LiteralPath (Join-Path $root 'launcher-state-{channel}.json') | ConvertFrom-Json
-  if ($state.current -notmatch '^[A-Za-z0-9._-]+$') {{ throw 'Invalid Shows install state' }}
-  $exe = Join-Path $root ('versions\' + $state.current + '\shows-remote.exe')
-  if (-not (Test-Path -LiteralPath $exe)) {{ throw 'Install the current Shows release on this PC; shows-remote.exe is missing' }}
-  & $exe --agent
-  exit $LASTEXITCODE
-}} catch {{ [Console]::Error.WriteLine($_.Exception.Message); exit 1 }}"#
-    )
+pub fn remote_command(channel: &str) -> String {
+    assert!(matches!(channel, "stable" | "dev"));
+    // The verified installer writes this one-line native entry point. Neither
+    // JSON commands nor show names enter the remote command line.
+    format!(r#""%LOCALAPPDATA%\shows\agents\{channel}.cmd""#)
 }
 
 pub struct Session {
@@ -55,8 +41,6 @@ impl Session {
             cmd.arg("--agent");
             cmd
         } else {
-            let script = remote_script(channel);
-            let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
             let mut cmd = ProcessCommand::new("ssh.exe");
             cmd.args([
                 "-T",
@@ -71,11 +55,7 @@ impl Session {
                 "-o",
                 "ServerAliveCountMax=2",
                 host,
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-EncodedCommand",
-                &STANDARD.encode(bytes),
+                &remote_command(channel),
             ]);
             cmd
         };

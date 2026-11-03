@@ -26,6 +26,8 @@ try {
   if ($LASTEXITCODE -eq 0 -or "$output" -notmatch 'needs a terminal') { throw "Terminal launcher lost failure exit status or arguments: $output" }
   $state = Get-Content -Raw -LiteralPath (Join-Path $install 'launcher-state-dev.json') | ConvertFrom-Json
   if ($state.current -ne 'smoke') { throw 'Verified version was not selected' }
+  $agent = Get-Content -Raw -LiteralPath (Join-Path $install 'agents\dev.cmd')
+  if ($agent -notmatch 'versions\\smoke\\shows-remote.exe') { throw 'Native SSH entry point does not select the verified version' }
   foreach ($file in $manifest.files) {
     $installed = Join-Path $install ('versions\smoke\' + $file.name)
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash.ToLowerInvariant() -ne $file.sha256) { throw 'Installed hash differs from manifest' }
@@ -36,3 +38,4 @@ try {
   if (-not $resolved.StartsWith($tempBase, [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $resolved) -notlike 'shows-remote-test-*') { throw 'Unsafe test cleanup path' }
   Remove-Item -LiteralPath $resolved -Recurse -Force
 }
+$global:LASTEXITCODE = 0

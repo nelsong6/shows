@@ -1646,12 +1646,12 @@ dependencies = [
 name = "shows-remote"
 version = "0.1.0"
 dependencies = [
- "base64",
  "clap",
  "crossterm",
  "ratatui",
  "serde_json",
  "shows-control",
+ "tempfile",
  "tiny_http",
 ]
 

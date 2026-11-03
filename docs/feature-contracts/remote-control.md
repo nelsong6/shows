@@ -16,9 +16,11 @@ round. The target owns playback and all authoritative NAS transactions.
   hostnames or SSH aliases, containing letters, digits, dots and hyphens, starting
   with a letter or digit. Shows issues no credentials.
 - **T3. Commands are data.** The validated channel selects a fixed remote startup
-  script. Commands travel as bounded JSON lines on SSH stdin, never interpolated
-  shell text. The agent runs from the target's verified versioned install,
-  selected by `launcher-state-<channel>.json` without contacting the NAS.
+  native entry point. Commands travel as bounded JSON lines on SSH stdin, never
+  interpolated shell text. After verifying a version, the launcher writes
+  `agents/<channel>.cmd` beside `launcher-state-<channel>.json`, selecting that
+  version's executable. SSH starts it directly without a PowerShell pipeline
+  or NAS access, preserving protocol stdin/stdout and Unicode.
 - **T4. Identity precedes controls.** `GET /remote/info` must identify
   `shows-desktop` and protocol 1. A missing, stopped, or different listener fails
   explicitly. Every new connection checks identity.

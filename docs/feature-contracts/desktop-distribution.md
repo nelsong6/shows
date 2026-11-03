@@ -38,3 +38,5 @@ without running an executable from the network share.
   forwards arguments and exit status, and never starts the desktop. The installer
   copies the launcher locally and adds `%LOCALAPPDATA%\shows\bin` to user PATH
   with a `shows-remote.cmd` entry point.
+  Version selection also writes a native `agents/<channel>.cmd` entry point
+  so SSH can start the installed agent with stdin/stdout preserved.

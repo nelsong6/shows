@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
 
 mod agent;
-mod transport;
 mod ui;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::Value;
 use shows_control::{Command, resolve_show};
+use shows_remote::transport;
 use std::io::IsTerminal;
 use transport::Session;
 

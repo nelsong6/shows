@@ -90,11 +90,21 @@ if (-not $NoUpdate) {
 }
 
 if (-not $selectedVersion) { throw "No installed shows version and updates are disabled or unavailable" }
+if ($selectedVersion -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid installed version' }
 $selectedDir = Join-Path $versions $selectedVersion
 $exe = Join-Path $selectedDir "shows-$App.exe"
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Installed executable is missing: $exe" }
 
+$agents = Join-Path $InstallRoot 'agents'
+New-Item -ItemType Directory -Force -Path $agents | Out-Null
+$agentTemp = Join-Path $agents "$Channel.$([guid]::NewGuid().ToString('N')).tmp"
+$agentCommand = '@"%~dp0..\versions\' + $selectedVersion + '\shows-remote.exe" --agent' + "`r`n"
+[IO.File]::WriteAllText($agentTemp, $agentCommand, (New-Object Text.UTF8Encoding $false))
+Move-Item -Force -LiteralPath $agentTemp -Destination (Join-Path $agents "$Channel.cmd")
+
 if ($App -eq "remote") {
+  [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
+  $OutputEncoding = [Console]::OutputEncoding
   & $exe @RemoteArgs
   exit $LASTEXITCODE
 }
