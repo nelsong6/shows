@@ -37,10 +37,15 @@ without running an executable from the network share.
 - **I6. Local execution.** The selected executable starts from its local version
   directory so video startup does not depend on executing binaries over SMB.
 - **I7. Terminal companion.** Every new bundle includes `shows-remote.exe`.
-  `launch-shows.ps1 -App remote` attaches it to the caller's stdin/stdout/stderr,
-  forwards arguments and exit status, and never starts the desktop. The installer
-  copies the launcher locally and adds `%USERPROFILE%\bin` to user PATH
-  with a `shows-remote.cmd` entry point.
+  Installation verifies the bundle and exposes it at
+  `%LOCALAPPDATA%\shows\channels\<channel>` through a version junction. The
+  at-menu entry starts `shows-remote.exe` there directly as an OS process, with
+  no shell or batch launcher. The installer adds that directory to user PATH
+  and removes the old shell entry point. Interactive startup sets the window
+  title to `Shows remote`; agent protocol and one-shot output contain no title
+  escape sequences. Setup/updates maintain the native pointer; ordinary remote
+  startup performs no installation or PowerShell invocation. Updates switch
+  only junctions, retaining immutable version directories and running binaries.
   Version selection also writes a native `agents/<channel>.cmd` entry point
   so SSH can start the installed agent with stdin/stdout preserved.
 

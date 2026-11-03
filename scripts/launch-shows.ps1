@@ -6,10 +6,7 @@ param(
   [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA "shows"),
   [switch]$NoUpdate,
   [switch]$Wait,
-  [ValidateSet("desktop", "remote")]
-  [string]$App = "desktop",
-  [Parameter(ValueFromRemainingArguments = $true)]
-  [string[]]$RemoteArgs
+  [switch]$InstallOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,15 +82,14 @@ if (-not $NoUpdate) {
   } catch {
     if (-not $selectedVersion) { throw }
     $updateMessage = "Update failed; starting installed version $selectedVersion. $($_.Exception.Message)"
-    if ($App -eq "remote") { [Console]::Error.WriteLine($updateMessage) }
-    else { Write-Warning $updateMessage }
+    Write-Warning $updateMessage
   }
 }
 
 if (-not $selectedVersion) { throw "No installed shows version and updates are disabled or unavailable" }
 if ($selectedVersion -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid installed version' }
 $selectedDir = Join-Path $versions $selectedVersion
-$exe = Join-Path $selectedDir "shows-$App.exe"
+$exe = Join-Path $selectedDir "shows-desktop.exe"
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Installed executable is missing: $exe" }
 
 $agents = Join-Path $InstallRoot 'agents'
@@ -103,12 +99,34 @@ $agentCommand = '@"%~dp0..\versions\' + $selectedVersion + '\shows-remote.exe" -
 [IO.File]::WriteAllText($agentTemp, $agentCommand, (New-Object Text.UTF8Encoding $false))
 Move-Item -Force -LiteralPath $agentTemp -Destination (Join-Path $agents "$Channel.cmd")
 
-if ($App -eq "remote") {
-  [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
-  $OutputEncoding = [Console]::OutputEncoding
-  & $exe @RemoteArgs
-  exit $LASTEXITCODE
+# Expose the verified version as a native entry point, following the home tools'
+# version/current junction model. Never remove a real directory or its contents.
+$channels = [IO.Path]::GetFullPath((Join-Path $InstallRoot 'channels'))
+New-Item -ItemType Directory -Force -Path $channels | Out-Null
+$entry = Join-Path $channels $Channel
+$next = $entry + '.next'
+$previous = $entry + '.previous'
+foreach ($path in @($entry, $next, $previous)) {
+  if (-not ([IO.Path]::GetFullPath($path)).StartsWith($channels + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe native entry path' }
+  $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+  if ($item -and $item.LinkType -ne 'Junction') { throw "Refusing to replace non-junction $path" }
 }
+if (Test-Path -LiteralPath $previous) {
+  if (-not (Test-Path -LiteralPath $entry)) { [IO.Directory]::Move($previous, $entry) }
+  else { [IO.Directory]::Delete($previous) }
+}
+if (Test-Path -LiteralPath $next) { [IO.Directory]::Delete($next) }
+$existing = Get-Item -LiteralPath $entry -Force -ErrorAction SilentlyContinue
+if (-not $existing -or [IO.Path]::GetFullPath([string]$existing.Target) -ne [IO.Path]::GetFullPath($selectedDir)) {
+  New-Item -ItemType Junction -Path $next -Target $selectedDir | Out-Null
+  try {
+    if ($existing) { [IO.Directory]::Move($entry, $previous) }
+    try { [IO.Directory]::Move($next, $entry) }
+    catch { if (Test-Path -LiteralPath $previous) { [IO.Directory]::Move($previous, $entry) }; throw }
+    if (Test-Path -LiteralPath $previous) { [IO.Directory]::Delete($previous) }
+  } finally { if (Test-Path -LiteralPath $next) { [IO.Directory]::Delete($next) } }
+}
+if ($InstallOnly) { return }
 
 $process = Start-Process -FilePath $exe -WorkingDirectory $selectedDir -PassThru
 if ($Wait) { $process.WaitForExit(); exit $process.ExitCode }

@@ -92,6 +92,8 @@ fn run() -> Result<(), String> {
         Channel::Dev => "dev",
     };
     if args.command.is_none() {
+        crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle("Shows remote"))
+            .map_err(|e| format!("Could not set the Shows remote window title: {e}"))?;
         let mut target = args.target.map(|host| discovery::Target {
             host,
             local: args.local,

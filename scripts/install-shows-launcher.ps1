@@ -16,13 +16,15 @@ New-Item -ItemType Directory -Force -Path $installRoot, $bin | Out-Null
 $localLauncher = Join-Path $installRoot "launch-shows.ps1"
 Copy-Item -LiteralPath $launcher -Destination $localLauncher -Force
 $powerShell = (Get-Command pwsh.exe -ErrorAction Stop).Source
-$remoteCommand = '@"' + $powerShell + '" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "' + $localLauncher + '" -Channel ' + $Channel + ' -NasRoot "' + $NasRoot + '" -App remote %*'
-[IO.File]::WriteAllText((Join-Path $bin "shows-remote.cmd"), $remoteCommand + "`r`n", [Text.Encoding]::ASCII)
+& $localLauncher -Channel $Channel -NasRoot $NasRoot -InstallOnly
+$nativeBin = Join-Path $installRoot "channels\$Channel"
+$oldCommand = Join-Path $bin 'shows-remote.cmd'
+if (Test-Path -LiteralPath $oldCommand -PathType Leaf) { Remove-Item -LiteralPath $oldCommand -Force }
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($bin -notin ($userPath -split ';')) {
-  [Environment]::SetEnvironmentVariable("Path", ($bin + ';' + $userPath), "User")
+if ($nativeBin -notin ($userPath -split ';')) {
+  [Environment]::SetEnvironmentVariable("Path", ($nativeBin + ';' + $userPath), "User")
 }
-if ($bin -notin ($env:Path -split ';')) { $env:Path = $bin + ';' + $env:Path }
+if ($nativeBin -notin ($env:Path -split ';')) { $env:Path = $nativeBin + ';' + $env:Path }
 
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($ShortcutPath)
@@ -33,7 +35,7 @@ $shortcut.IconLocation = "shell32.dll,137"
 $shortcut.Save()
 
 Write-Host "Installed $Channel Shows launcher at $ShortcutPath"
-Write-Host "Installed shows-remote terminal command at $bin"
+Write-Host "Installed native shows-remote at $nativeBin"
 if ($DevelopmentRepo) {
   $developmentScript = Join-Path ([IO.Path]::GetFullPath($DevelopmentRepo)) 'scripts\dev-shows.ps1'
   if (-not (Test-Path -LiteralPath $developmentScript)) { throw "Development entry point is missing: $developmentScript" }

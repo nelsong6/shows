@@ -1,7 +1,8 @@
 # Shows Remote
 
 Control Shows on the other TV from a terminal. The target must already have
-Shows open; the remote never starts a local player.
+Shows open; the remote never starts a local player. The menu invokes its installed
+binary directly and the app sets its own window title to **Shows remote**.
 
 ```powershell
 shows-remote
@@ -43,8 +44,12 @@ command may already have applied; inspect status before retrying.
 
 Publish the CI release using `scripts/publish-shows-channel.ps1 -Channel stable`
 and use the existing launcher to install it on both PCs. Run
-`scripts/install-shows-launcher.ps1` to install the terminal command. It adds
-`%USERPROFILE%\bin` to user PATH (already on PATH on the home PCs).
+`scripts/install-shows-launcher.ps1` to install the terminal command. It verifies
+and installs the selected bundle, exposes a native version junction under
+`%LOCALAPPDATA%\shows\channels\stable`, and adds it to user PATH. Setup and update
+scripts maintain this path; opening the remote runs the binary directly with
+no PowerShell or batch wrapper. Publishing with installation targets updates
+the selected version; the remote does not check for updates on every opening.
 The instance picker and command palette use the managed fzt executable at
 `%ProgramFiles%\at-home\fzt\current\fzt.exe`, installed by home-sync. A missing
 fzt installation explains how to install it and fails explicitly.
