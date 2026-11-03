@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths:
       - desktop-rs/**
+      - scripts/**
       - .github/workflows/build-desktop.yaml
   # No paths filter on PRs: keep the status check reporting, and
   # short-circuit inside when nothing relevant changed.
@@ -28,6 +29,9 @@ jobs:
   build:
     name: Package shows-desktop for Windows
     runs-on: windows-latest
+    env:
+      SHOWS_BUILD_SHA: ${{ github.sha }}
+      SHOWS_UPDATE_CHANNEL: stable
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,8 +65,13 @@ jobs:
           # HEAD — instead of a freshly shallow-fetched origin/main, which can
           # land past the merge base when main advances during the PR.
           changed="$(git diff --name-only "$BASE_SHA"...HEAD)"
+          if printf '%s\n' "$changed" | grep -qE '^(desktop-rs/(core|control|desktop|remote)/|desktop-rs/Cargo|scripts/|\.github/workflows/)'; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "$changed"
-          if printf '%s\n' "$changed" | grep -qE '^(desktop-rs/|\.github/workflows/build-desktop\.yaml$)'; then
+          if printf '%s\n' "$changed" | grep -qE '^(desktop-rs/|scripts/|\.github/workflows/build-desktop\.yaml$)'; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
           else
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -70,11 +79,11 @@ jobs:
           fi
 
       - name: Setup Rust (stable MSVC)
-        if: steps.changes.outputs.skip != 'true'
+        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'pull_request' || steps.changes.outputs.rust == 'true')
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo target
-        if: steps.changes.outputs.skip != 'true'
+        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'pull_request' || steps.changes.outputs.rust == 'true')
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop-rs
@@ -99,7 +108,7 @@ jobs:
       # Rust dynamic loader (libloading) picks it up at runtime. Bump the
       # cache key when libmpv bumps.
       - name: Cache libmpv runtime
-        if: steps.changes.outputs.skip != 'true'
+        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
         id: libmpv-cache
         uses: actions/cache@v4
         with:
@@ -107,7 +116,7 @@ jobs:
           key: libmpv-windows-20250420-3600c71
 
       - name: Fetch libmpv (cold cache only)
-        if: steps.changes.outputs.skip != 'true' && steps.libmpv-cache.outputs.cache-hit != 'true'
+        if: steps.changes.outputs.skip != 'true' && steps.libmpv-cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
@@ -120,13 +129,18 @@ jobs:
           7z x /tmp/libmpv.7z -odesktop-rs/desktop/third_party/libmpv -y
           test -f desktop-rs/desktop/third_party/libmpv/libmpv-2.dll
 
-      - name: cargo test (shows-core)
-        if: steps.changes.outputs.skip != 'true'
+      - name: cargo test (workspace)
+        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'pull_request' || steps.changes.outputs.rust == 'true')
         working-directory: desktop-rs
-        run: cargo test -p shows-core --release
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq 'pull_request') {
+            cargo test --workspace --locked
+          } else {
+            cargo test --workspace --release --locked
+          }
 
       - name: cargo build --release
-        if: steps.changes.outputs.skip != 'true'
+        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
         working-directory: desktop-rs
         # `SHOWS_BUILD_SHA` is read at compile time by `core/src/update.rs`
         # via `option_env!`. With it set, the running app can compare its
@@ -137,22 +151,44 @@ jobs:
         env:
           SHOWS_BUILD_SHA: ${{ github.sha }}
           SHOWS_UPDATE_CHANNEL: stable
-        run: cargo build --release -p shows-desktop
+        run: cargo build --release -p shows-desktop -p shows-remote --locked
 
-      # Stage the bundle: shows-desktop.exe + libmpv-2.dll
+      - name: Verify terminal channel installation
+        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'pull_request' || steps.changes.outputs.rust == 'true')
+        shell: pwsh
+        run: |
+          $buildProfile = if ($env:GITHUB_EVENT_NAME -eq 'pull_request') { 'debug' } else { 'release' }
+          ./scripts/test-remote-distribution.ps1 -RemoteExe "desktop-rs/target/$buildProfile/shows-remote.exe"
+          foreach ($file in Get-ChildItem scripts/*.ps1) {
+            $tokens = $null; $parseErrors = $null
+            [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors) { throw ($parseErrors | Out-String) }
+          }
+
+      # Stage the bundle: desktop, terminal remote, and libmpv runtime.
       - name: Stage release bundle
-        if: steps.changes.outputs.skip != 'true'
+        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
         shell: pwsh
         run: |
           $out = "desktop-rs/dist/shows-desktop"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           Copy-Item desktop-rs/target/release/shows-desktop.exe "$out/" -Force
+          Copy-Item desktop-rs/target/release/shows-remote.exe "$out/" -Force
           Copy-Item desktop-rs/desktop/third_party/libmpv/libmpv-2.dll "$out/" -Force
           if (-not (Test-Path "$out/shows-desktop.exe")) { throw "build failed: shows-desktop.exe missing" }
+          if (-not (Test-Path "$out/shows-remote.exe"))  { throw "build failed: shows-remote.exe missing" }
           if (-not (Test-Path "$out/libmpv-2.dll"))     { throw "bundle missing libmpv-2.dll" }
 
+      - name: Sign and verify home executables and runtime
+        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          AT_TERMINAL_PFX: ${{ secrets.AT_TERMINAL_PFX }}
+          AT_TERMINAL_PFX_PASSWORD: ${{ secrets.AT_TERMINAL_PFX_PASSWORD }}
+        run: ./scripts/sign-shows-bundle.ps1 -BundleDirectory desktop-rs/dist/shows-desktop
+
       - name: Zip bundle
-        if: steps.changes.outputs.skip != 'true'
+        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
         shell: pwsh
         working-directory: desktop-rs
         run: Compress-Archive -Path dist/shows-desktop/* -DestinationPath dist/shows-desktop-windows-amd64.zip -Force
@@ -160,7 +196,7 @@ jobs:
       # PR + dispatch: upload the zip for download/debugging. Push-to-main
       # distributes via the Release below.
       - name: Upload workflow artifact
-        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'push' || github.ref != 'refs/heads/main')
+        if: steps.changes.outputs.skip != 'true' && (github.event_name != 'push' || github.ref != 'refs/heads/main') && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: shows-desktop-${{ github.sha }}

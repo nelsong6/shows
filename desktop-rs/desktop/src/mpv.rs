@@ -155,6 +155,8 @@ impl Handle {
         h.set_option("vo", "libmpv");
         h.set_option("force-window", "no");
         h.set_option("idle", "yes");
+        #[cfg(debug_assertions)]
+        h.set_option("pause", "yes");
         h.set_option("keep-open", "no");
         h.set_option("hwdec", "no");
         let r = unsafe { (h.api.initialize)(h.ctx) };
@@ -187,6 +189,22 @@ impl Handle {
             (self.api.free)(p as *mut c_void);
             Some(s)
         }
+    }
+
+    pub fn set_property_checked(&self, name: &str, value: &str) -> Result<(), String> {
+        let name = CString::new(name).map_err(|e| e.to_string())?;
+        let value = CString::new(value).map_err(|e| e.to_string())?;
+        let result = unsafe { (self.api.set_property_string)(self.ctx, name.as_ptr(), value.as_ptr()) };
+        if result < 0 { Err(format!("mpv rejected property update ({result})")) } else { Ok(()) }
+    }
+
+    pub fn command_checked(&self, args: &[&str]) -> Result<(), String> {
+        let strings: Vec<CString> = args.iter().map(|s| CString::new(*s)).collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+        let mut pointers: Vec<*const c_char> = strings.iter().map(|s| s.as_ptr()).collect();
+        pointers.push(std::ptr::null());
+        let result = unsafe { (self.api.command)(self.ctx, pointers.as_ptr()) };
+        if result < 0 { Err(format!("mpv rejected command ({result})")) } else { Ok(()) }
     }
 
     /// Run an mpv command given as a NULL-terminated argument list.

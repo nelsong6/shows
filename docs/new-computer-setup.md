@@ -28,7 +28,7 @@ If `SHOWS_LOCAL_WATCHING_DIR` is set, it overrides `D:\Downloads\Watching`.
 After a channel has been published to `S:\shows-app`, run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File `
+pwsh -ExecutionPolicy Bypass -File `
   S:\shows-app\install-shows-launcher.ps1 `
   -Channel stable
 ```
@@ -37,6 +37,10 @@ Use `-Channel dev` on computers that should follow locally published development
 builds. The shortcut checks the channel manifest before every launch, verifies
 the bundle hashes, installs it into a new versioned local directory, retains the
 previous version for rollback, and starts the local executable.
+
+The installer also installs the `shows-remote` terminal command. After updating
+both PCs, `shows-remote upstairspc` controls the already running upstairs instance
+over SSH. See [Shows Remote](shows-remote.md).
 
 ## Publish a build
 
@@ -68,3 +72,15 @@ On a healthy round, `file_sync.cached` should match the current round size and
 `missing` / `failed` should be zero after the first copy pass. If the app reports
 missing files, verify the source path under `S:\Group-Nelson` and use the round
 repair controls only for genuinely bad current-round entries.
+
+## Development setup
+
+PowerShell 7, Rust, Node, devctl and an installed Shows bundle are required.
+Install the development command from the default-branch checkout:
+
+```powershell
+.\scripts\install-shows-launcher.ps1 -DevelopmentRepo D:\repos\shows
+```
+
+`shows-dev` selects the current Shows worktree when invoked inside one. See
+[Developing Shows](development.md) for previews, warm builds and one-step shipping.

@@ -1,0 +1,34 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop-tests:
+    name: desktop pure-logic tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-rs
+
+      # `shows-core` is `#![forbid(unsafe_code)]` and Win32/libmpv-free, so the
+      # 73-test suite (ordering / roundlogic / scan / update / engine / replica
+      # / apiclient / oauth / sync / runner / model) runs fine on Linux. This
+      # is the cheap per-PR sanity check; the Windows-only shell goes through
+      # `build-desktop.yaml`.
+      - name: Test engine, control protocol and terminal remote
+        working-directory: desktop-rs
+        run: cargo test -p shows-core -p shows-control -p shows-remote --locked

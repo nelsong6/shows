@@ -6,7 +6,9 @@ param(
   [string]$Release,
   [string]$LibmpvPath = "D:\Downloads\shows\libmpv-2.dll",
   [string]$Version,
-  [switch]$SkipBuild
+  [switch]$SkipBuild,
+  [switch]$WaitForRelease,
+  [string[]]$InstallTargets = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,20 +19,59 @@ $download = $null
 
 if ($Channel -eq "stable") {
   # Stable is the bundle CI built and released, never a local build.
-  if ($Version -or $SkipBuild) { throw "-Version and -SkipBuild apply to dev; stable publishes a GitHub release" }
-  if (-not $Release) {
-    $Release = gh release view --repo nelsong6/shows --json tagName --jq .tagName
-    if ($LASTEXITCODE -ne 0 -or -not $Release) { throw "Could not determine the latest release" }
+  if ($Version -or $SkipBuild) { throw "-Version and -SkipBuild apply to dev; stable publishes a Forgejo release" }
+  $previousPrompt = $env:GIT_TERMINAL_PROMPT
+  $previousInteractive = $env:GCM_INTERACTIVE
+  try {
+    $env:GIT_TERMINAL_PROMPT = '0'
+    $env:GCM_INTERACTIVE = 'Never'
+    $credential = "protocol=https`nhost=forgejo.romaine.life`n`n" | git -c credential.interactive=never credential fill
+    if ($LASTEXITCODE) { throw 'No stored Forgejo Git credential is available' }
+    $password = $credential | Where-Object { $_.StartsWith('password=') } | Select-Object -First 1
+    if (-not $password -or $password.Length -le 9) { throw 'No stored Forgejo Git credential is available' }
+    $releaseHeaders = @{ Authorization = 'token ' + $password.Substring(9) }
+  } finally {
+    $env:GIT_TERMINAL_PROMPT = $previousPrompt
+    $env:GCM_INTERACTIVE = $previousInteractive
   }
+  $repoApi = 'https://forgejo.romaine.life/api/v1/repos/nelsong6/shows'
+  $releaseApi = "$repoApi/releases"
+  if ($WaitForRelease) {
+    if (-not $Release) {
+      $releaseSha = (Invoke-RestMethod "$repoApi/branches/main" -Headers $releaseHeaders).commit.id
+      if ($releaseSha -notmatch '^[0-9a-f]{40}$') { throw 'Could not identify main for release publication' }
+      $Release = 'desktop-' + $releaseSha.Substring(0,7)
+    }
+    $deadline = (Get-Date).AddMinutes(20)
+    while ($true) {
+      $published = Invoke-RestMethod "$releaseApi/tags/$([Uri]::EscapeDataString($Release))" -Headers $releaseHeaders -SkipHttpErrorCheck -StatusCodeVariable releaseStatus
+      if ($releaseStatus -eq 200 -and -not $published.draft -and ($published.assets | Where-Object { $_.name -eq 'shows-desktop-windows-amd64.zip' -and $_.size -gt 0 })) { break }
+      if ($releaseStatus -notin @(200,404)) { throw "Release lookup failed with HTTP $releaseStatus" }
+      if ((Get-Date) -gt $deadline) { throw "Timed out waiting for $Release" }
+      if ($releaseSha) {
+        $checks = Invoke-RestMethod "$repoApi/commits/$releaseSha/status" -Headers $releaseHeaders
+        $build = $checks.statuses | Where-Object { $_.context -like 'Build Desktop / *' -and $_.status -in @('failure','error') } | Select-Object -First 1
+        if ($build) { throw "Release build ended with $($build.status): $($build.target_url)" }
+      }
+      Write-Host "Waiting for CI release $Release"
+      Start-Sleep -Seconds 10
+    }
+  }
+  $releasePath = if ($Release) { 'tags/' + [Uri]::EscapeDataString($Release) } else { 'latest' }
+  $metadata = Invoke-RestMethod "$releaseApi/$releasePath" -Headers $releaseHeaders
+  $Release = $metadata.tag_name
   if ($Release -notmatch '^desktop-([0-9a-f]+)$') { throw "Not a desktop release tag: $Release" }
   $Version = $Matches[1]
 
   $download = Join-Path ([IO.Path]::GetTempPath()) "shows-release-$([guid]::NewGuid().ToString('N'))"
-  gh release download $Release --repo nelsong6/shows --pattern shows-desktop-windows-amd64.zip --dir $download
-  if ($LASTEXITCODE -ne 0) { throw "Could not download release $Release" }
+  New-Item -ItemType Directory -Path $download | Out-Null
+  $asset = @($metadata.assets | Where-Object name -eq 'shows-desktop-windows-amd64.zip')
+  if ($asset.Count -ne 1) { throw "Release $Release must contain one shows-desktop-windows-amd64.zip" }
+  Invoke-WebRequest $asset[0].browser_download_url -Headers $releaseHeaders -OutFile (Join-Path $download 'shows-desktop-windows-amd64.zip')
   Expand-Archive -LiteralPath (Join-Path $download "shows-desktop-windows-amd64.zip") -DestinationPath (Join-Path $download "bundle")
   $exe = Join-Path $download "bundle\shows-desktop.exe"
   $LibmpvPath = Join-Path $download "bundle\libmpv-2.dll"
+  $remoteExe = Join-Path $download "bundle\shows-remote.exe"
 } else {
   if (-not $Version) {
     $sha = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()
@@ -40,6 +81,7 @@ if ($Channel -eq "stable") {
   $workspace = Join-Path $RepoRoot "desktop-rs"
   $frontend = Join-Path $workspace "frontend"
   $exe = Join-Path $workspace "target\release\shows-desktop.exe"
+  $remoteExe = Join-Path $workspace "target\release\shows-remote.exe"
 }
 if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid version: $Version" }
 
@@ -52,7 +94,7 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
   try {
     $env:SHOWS_BUILD_SHA = $Version
     $env:SHOWS_UPDATE_CHANNEL = $Channel
-    cargo build --release -p shows-desktop
+    cargo build --release -p shows-desktop -p shows-remote
     if ($LASTEXITCODE -ne 0) { throw "Desktop build failed" }
   } finally {
     Remove-Item Env:SHOWS_BUILD_SHA -ErrorAction SilentlyContinue
@@ -61,7 +103,7 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
   }
 }
 
-foreach ($required in @($exe, $LibmpvPath, $launcher, $installer)) {
+foreach ($required in @($exe, $remoteExe, $LibmpvPath, $launcher, $installer)) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing required file: $required" }
 }
 
@@ -72,15 +114,41 @@ New-Item -ItemType Directory -Force -Path $versions, $channels, $stagingRoot | O
 
 $stage = Join-Path $stagingRoot ([guid]::NewGuid().ToString("N"))
 $destination = Join-Path $versions $Version
-if (Test-Path -LiteralPath $destination) { throw "Version already published: $destination" }
+if (Test-Path -LiteralPath $destination) {
+  $existing = Get-Content -Raw -LiteralPath (Join-Path $destination 'manifest.json') | ConvertFrom-Json
+  $sources = @{'shows-desktop.exe'=$exe; 'shows-remote.exe'=$remoteExe; 'libmpv-2.dll'=$LibmpvPath}
+  if (@($existing.files).Count -ne 3) { throw 'Previously published version has an incomplete manifest' }
+  foreach ($name in $sources.Keys) {
+    $file = @($existing.files | Where-Object name -eq $name)
+    if ($file.Count -ne 1) { throw "Previously published version is missing $name" }
+    $installed = Join-Path $destination $file.name
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash.ToLowerInvariant() -ne $file.sha256) { throw "Previously published version is damaged: $installed" }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $sources[$name]).Hash.ToLowerInvariant() -ne $file.sha256) { throw "Release content differs from the immutable publication: $name" }
+  }
+  $current = Get-Content -Raw -LiteralPath (Join-Path $channels "$Channel.json") | ConvertFrom-Json
+  if ($current.version -ne $Version) { throw 'Version exists but is not the selected channel; refusing to change an existing publication' }
+  foreach ($target in $InstallTargets) {
+    $installNasRoot = $NasRoot
+    if ($installNasRoot -like 'S:\*') { $installNasRoot = Join-Path (Get-PSDrive S).DisplayRoot $installNasRoot.Substring(3) }
+    & (Join-Path $PSScriptRoot 'install-shows-update.ps1') -Target $target -Channel $Channel -NasRoot $installNasRoot
+  }
+  if ($download) {
+    $resolvedDownload = [IO.Path]::GetFullPath($download)
+    if (-not $resolvedDownload.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase) -or (Split-Path -Leaf $resolvedDownload) -notlike 'shows-release-*') { throw 'Unsafe release cleanup path' }
+    Remove-Item -Recurse -Force -LiteralPath $resolvedDownload
+  }
+  Write-Host "Shows $Version is already verified on $Channel"
+  return
+}
 New-Item -ItemType Directory -Path $stage | Out-Null
 
 try {
   Copy-Item -LiteralPath $exe -Destination (Join-Path $stage "shows-desktop.exe")
+  Copy-Item -LiteralPath $remoteExe -Destination (Join-Path $stage "shows-remote.exe")
   Copy-Item -LiteralPath $LibmpvPath -Destination (Join-Path $stage "libmpv-2.dll")
 
   $files = @()
-  foreach ($name in @("shows-desktop.exe", "libmpv-2.dll")) {
+  foreach ($name in @("shows-desktop.exe", "shows-remote.exe", "libmpv-2.dll")) {
     $path = Join-Path $stage $name
     $files += [ordered]@{
       name = $name
@@ -120,3 +188,8 @@ try {
 }
 
 Write-Host "Published shows $Version to $Channel at $NasRoot"
+foreach ($target in $InstallTargets) {
+  $installNasRoot = $NasRoot
+  if ($installNasRoot -like 'S:\*') { $installNasRoot = Join-Path (Get-PSDrive S).DisplayRoot $installNasRoot.Substring(3) }
+  & (Join-Path $PSScriptRoot 'install-shows-update.ps1') -Target $target -Channel $Channel -NasRoot $installNasRoot
+}

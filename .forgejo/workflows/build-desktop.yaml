@@ -1,0 +1,156 @@
+name: Build Desktop
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Package shows-desktop for Windows
+    runs-on: windows-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; . ([scriptblock]::Create([IO.File]::ReadAllText('{0}'))); if (Test-Path variable:LASTEXITCODE) { exit $LASTEXITCODE }"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        run: |
+          rustup update stable --no-self-update
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - uses: https://github.com/actions/cache@v4
+        with:
+          path: desktop-rs/target
+          key: shows-windows-rust-target-v1-${{ hashFiles('desktop-rs/Cargo.lock') }}
+
+      - uses: https://github.com/actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: desktop-rs/frontend/package-lock.json
+
+      - name: Build React overlay
+        working-directory: desktop-rs/frontend
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Cache libmpv runtime
+        id: libmpv
+        uses: https://github.com/actions/cache@v4
+        with:
+          path: desktop-rs/desktop/third_party/libmpv
+          key: libmpv-windows-20250420-3600c71
+
+      - name: Fetch libmpv
+        if: steps.libmpv.outputs.cache-hit != 'true'
+        run: |
+          $file = 'mpv-dev-x86_64-20250420-git-3600c71.7z'
+          $archive = Join-Path $env:RUNNER_TEMP $file
+          curl.exe -fSL --proto '=https' --proto-redir '=https' "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/$file" -o $archive
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash -ne 'C13F26BDCA62E5E52990DBC82920E05734D7922889ACC48C38B8A1C5DA6B8F9C') { throw 'libmpv archive checksum mismatch' }
+          New-Item -ItemType Directory -Force desktop-rs/desktop/third_party/libmpv | Out-Null
+          # Use the installed binary directly: this runner's Scoop shim names a missing current target.
+          $sevenZipVersion = Get-ChildItem "$env:USERPROFILE/scoop/apps/7zip" -Directory | Where-Object Name -Match '^\d+(\.\d+)+$' | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $sevenZipVersion) { throw 'No installed 7-Zip version is available' }
+          $sevenZip = Join-Path $sevenZipVersion.FullName '7z.exe'
+          & $sevenZip x $archive -odesktop-rs/desktop/third_party/libmpv -y
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not (Test-Path desktop-rs/desktop/third_party/libmpv/libmpv-2.dll)) { throw 'libmpv-2.dll missing' }
+
+      - name: Test workspace
+        working-directory: desktop-rs
+        run: |
+          cargo test --workspace --release --locked
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Build desktop
+        working-directory: desktop-rs
+        run: |
+          $env:SHOWS_BUILD_SHA = (git rev-parse --short=7 HEAD).Trim()
+          $env:SHOWS_UPDATE_CHANNEL = 'stable'
+          cargo build --release --locked -p shows-desktop -p shows-remote
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Verify terminal channel installation
+        run: |
+          ./scripts/test-remote-distribution.ps1
+          foreach ($file in Get-ChildItem scripts/*.ps1) {
+            $tokens = $null; $parseErrors = $null
+            [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors) { throw ($parseErrors | Out-String) }
+          }
+
+      - name: Package bundle
+        run: |
+          $out = 'desktop-rs/dist/shows-desktop'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item desktop-rs/target/release/shows-desktop.exe "$out/"
+          Copy-Item desktop-rs/target/release/shows-remote.exe "$out/"
+          Copy-Item desktop-rs/desktop/third_party/libmpv/libmpv-2.dll "$out/"
+
+
+      - name: Sign and verify home executables and runtime
+        env:
+          AT_TERMINAL_PFX: ${{ secrets.AT_TERMINAL_PFX }}
+          AT_TERMINAL_PFX_PASSWORD: ${{ secrets.AT_TERMINAL_PFX_PASSWORD }}
+        run: ./scripts/sign-shows-bundle.ps1 -BundleDirectory desktop-rs/dist/shows-desktop
+
+      - name: Zip signed bundle
+        run: Compress-Archive -Path desktop-rs/dist/shows-desktop/* -DestinationPath desktop-rs/dist/shows-desktop-windows-amd64.zip -Force
+
+      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: shows-desktop-${{ github.sha }}
+          path: desktop-rs/dist/shows-desktop-windows-amd64.zip
+          if-no-files-found: error
+
+      - name: Publish Forgejo release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $api = "$env:GITHUB_SERVER_URL/api/v1/repos/$env:GITHUB_REPOSITORY"
+          $headers = @{ Authorization = "token $env:TOKEN" }
+          $sha = (git rev-parse HEAD).Trim()
+          $short = (git rev-parse --short=7 HEAD).Trim()
+          $tag = "desktop-$short"
+          $tagged = Invoke-RestMethod "$api/tags/$tag" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable tagStatus
+          if ($tagStatus -eq 200 -and $tagged.commit.sha -ne $sha) { throw 'Desktop tag already names another commit' }
+          if ($tagStatus -ne 200 -and $tagStatus -ne 404) { throw "Tag lookup returned $tagStatus" }
+          $existing = Invoke-RestMethod "$api/releases/tags/$tag" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable status
+          if ($status -eq 200 -and -not $existing.draft -and ($existing.assets | Where-Object name -eq 'shows-desktop-windows-amd64.zip')) {
+            Write-Host "Already released $tag"
+            exit 0
+          }
+          if ($status -ne 404 -and $status -ne 200) { throw "Release lookup returned $status" }
+          if ($status -eq 200) { $release = $existing } else {
+            $release = Invoke-RestMethod -Method Post "$api/releases" -Headers $headers -ContentType 'application/json' -Body (@{
+              tag_name = $tag; target_commitish = $sha; name = "shows-desktop @ $short"
+              body = "Signed Windows desktop built from $sha. Download the ZIP, unpack, and run shows-desktop.exe."
+              draft = $true
+            } | ConvertTo-Json)
+          }
+          foreach ($asset in @($release.assets)) {
+            Invoke-RestMethod -Method Delete "$api/releases/$($release.id)/assets/$($asset.id)" -Headers $headers | Out-Null
+          }
+          $zip = Get-Item desktop-rs/dist/shows-desktop-windows-amd64.zip
+          Invoke-RestMethod -Method Post "$api/releases/$($release.id)/assets?name=$($zip.Name)" -Headers $headers -Form @{attachment = $zip} | Out-Null
+          Invoke-RestMethod -Method Patch "$api/releases/$($release.id)" -Headers $headers -ContentType 'application/json' -Body '{"draft":false}' | Out-Null

@@ -8,15 +8,18 @@ without running an executable from the network share.
 - **P1. Immutable versions.** A version is published once under
   `shows-app/versions/<version>` and is never overwritten.
 - **P2. Complete before visible.** The publisher stages the executable and
-  libmpv runtime, records their SHA-256 hashes and lengths, then moves the whole
+  terminal companion and libmpv runtime, records their SHA-256 hashes and lengths, then moves the whole
   bundle into `versions`. Only afterward does it replace the channel manifest.
 - **P3. Explicit channels.** `stable` and `dev` have independent manifests.
   Computers opt into one channel through their shortcut.
 - **P4. Reproducible identity.** Stable publishes the bundle CI attached to a
-  `desktop-<sha>` GitHub release, versioned by that SHA, so the stable channel
+  `desktop-<sha>` Forgejo release, versioned by that SHA, so the stable channel
   only ever carries a build CI produced from `main`. Dev builds are local and
   add a publication timestamp so repeated builds of one revision remain
   immutable.
+- **P5. Signed Windows binaries.** CI signs both executables and libmpv with the
+  existing home code-signing identity, verifies Authenticode and its pinned
+  thumbprint, then archives the signed files. Manifests hash the signed bytes.
 
 ## Installation invariants
 
@@ -33,3 +36,21 @@ without running an executable from the network share.
   the previous version directory is not deleted during an update.
 - **I6. Local execution.** The selected executable starts from its local version
   directory so video startup does not depend on executing binaries over SMB.
+- **I7. Terminal companion.** Every new bundle includes `shows-remote.exe`.
+  `launch-shows.ps1 -App remote` attaches it to the caller's stdin/stdout/stderr,
+  forwards arguments and exit status, and never starts the desktop. The installer
+  copies the launcher locally and adds `%USERPROFILE%\bin` to user PATH
+  with a `shows-remote.cmd` entry point.
+  Version selection also writes a native `agents/<channel>.cmd` entry point
+  so SSH can start the installed agent with stdin/stdout preserved.
+
+## Automated updates
+
+`publish-shows-channel.ps1 -WaitForRelease -InstallTargets local,upstairspc`
+waits for the exact CI release of main before publication, then updates the
+named PCs through existing SSH. An existing publication is reused only after
+its files match the downloaded artifact and it is still the selected channel.
+The installer uses PowerShell 7; no Windows PowerShell 5.1 launcher is retained.
+A running desktop closes through its resume-saving control, restarts in the
+interactive user session and regains its pause state. A closed app stays closed.
+See [development-lifecycle.md](development-lifecycle.md).

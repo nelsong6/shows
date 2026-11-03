@@ -1,14 +1,25 @@
-//! Best-effort "is a newer build out?" check, run once at launch.
+//! Best-effort "is a newer build out?" check for stable builds.
 //!
-//! The repo is public, so GitHub's releases API needs no auth. This never
-//! raises into playback: any problem (offline, rate-limited, or a dev/source
-//! run with no embedded SHA) just yields `None` and the overlay shows no banner.
+//! Forgejo requires a stored Git credential even for public release metadata.
+//! Authentication never prompts. Missing credentials, offline requests, and
+//! dev/source builds without an embedded SHA simply yield `None`.
 //!
 //! The build SHA is stamped in at compile time via the `SHOWS_BUILD_SHA` env var
-//! (set by `.github/workflows/build-desktop.yaml`); a dev `cargo build` has none,
+//! (set by `.forgejo/workflows/build-desktop.yaml`); a dev `cargo build` has none,
 //! so it's treated as "version unknown" and skips the check.
 
-const RELEASES_LATEST: &str = "https://api.github.com/repos/nelsong6/shows/releases/latest";
+use std::io::Write;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+const RELEASES_LATEST: &str =
+    "https://forgejo.romaine.life/api/v1/repos/nelsong6/shows/releases/latest";
 const TAG_PREFIX: &str = "desktop-"; // release tags are desktop-<short-sha>
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,7 +56,7 @@ pub fn compare(current: &str, tag: &str, url: &str) -> Option<UpdateInfo> {
     }
 }
 
-/// Compare this build to GitHub's latest release. `None` on a dev build, when
+/// Compare this build to Forgejo's latest release. `None` on a dev build, when
 /// offline/rate-limited, or when already up to date.
 pub fn check() -> Option<UpdateInfo> {
     if current_channel() != "stable" {
@@ -59,9 +70,11 @@ pub fn check() -> Option<UpdateInfo> {
 /// Fetch the latest release's `(tag_name, html_url)`. `None` on any failure —
 /// this is best-effort and must never surface an error into playback.
 fn fetch_latest_release() -> Option<(String, String)> {
+    let token = forgejo_token()?;
     let mut resp = ureq::get(RELEASES_LATEST)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "shows-desktop") // GitHub's API requires a User-Agent
+        .header("Accept", "application/json")
+        .header("User-Agent", "shows-desktop")
+        .header("Authorization", &format!("token {token}"))
         .call()
         .ok()?;
     let body = resp.body_mut().read_to_string().ok()?;
@@ -73,6 +86,81 @@ fn fetch_latest_release() -> Option<(String, String)> {
         .unwrap_or("")
         .to_string();
     Some((tag, url))
+}
+
+fn forgejo_token() -> Option<String> {
+    let mut command = Command::new("git");
+    command
+        .args(["-c", "credential.interactive=never", "credential", "fill"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().ok()?;
+    let written = child.stdin.take().is_some_and(|mut input| {
+        input
+            .write_all(b"protocol=https\nhost=forgejo.romaine.life\n\n")
+            .is_ok()
+    });
+    if !written {
+        stop_credential_query(&mut child);
+        return None;
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                stop_credential_query(&mut child);
+                return None;
+            }
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("password="))
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+fn stop_credential_query(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(test)]

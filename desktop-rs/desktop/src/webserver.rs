@@ -6,7 +6,7 @@
 //! `/library/*`.
 
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
@@ -20,9 +20,17 @@ use shows_core::scan;
 
 use crate::player::Player;
 
+#[cfg(not(debug_assertions))]
 #[derive(rust_embed::RustEmbed)]
 #[folder = "../frontend/dist"]
 struct Asset;
+
+fn embedded_asset(path: &str) -> Option<Vec<u8>> {
+    #[cfg(not(debug_assertions))]
+    { Asset::get(path).map(|file| file.data.into_owned()) }
+    #[cfg(debug_assertions)]
+    { let _ = path; None }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowAction {
@@ -223,7 +231,6 @@ type FullscreenCb = Box<dyn Fn() + Send + Sync>;
 type StayOnTopCb = Box<dyn Fn(bool) + Send + Sync>;
 
 pub struct ControlServer {
-    dist_dir: Option<PathBuf>,
     playlists: Vec<String>,
     replica: Arc<Replica>,
     status: Mutex<serde_json::Map<String, Value>>,
@@ -238,7 +245,6 @@ pub struct ControlServer {
 
 impl ControlServer {
     pub fn new(
-        dist_dir: Option<PathBuf>,
         replica: Arc<Replica>,
         playlists: Vec<String>,
     ) -> Arc<ControlServer> {
@@ -255,7 +261,6 @@ impl ControlServer {
         status.insert("window_fullscreen".into(), json!(false));
         status.insert("window_on_top".into(), json!(false));
         Arc::new(ControlServer {
-            dist_dir,
             playlists,
             replica,
             status: Mutex::new(status),
@@ -313,17 +318,12 @@ impl ControlServer {
     }
 
     pub fn index_html(&self) -> Vec<u8> {
-        if let Some(ref dist_dir) = self.dist_dir {
-            std::fs::read(dist_dir.join("index.html")).unwrap_or_default()
-        } else {
-            Asset::get("index.html")
-                .map(|file| file.data.into_owned())
-                .unwrap_or_default()
-        }
+        embedded_asset("index.html").unwrap_or_default()
     }
 
     pub fn start(self: &Arc<Self>) -> u16 {
-        let server = Server::http("127.0.0.1:0").expect("bind control server");
+        let address = shows_control::control_addr().expect("invalid Shows control port");
+        let server = Server::http(&address).expect("bind Shows loopback control server");
         let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
         let this = self.clone();
         std::thread::Builder::new()
@@ -353,6 +353,13 @@ impl ControlServer {
                 respond(request, 200, self.index_html(), "text/html; charset=utf-8")
             }
             (Method::Get, "/status") => respond_json(request, 200, &self.status_json()),
+            (Method::Get, "/remote/info") => respond_json(request, 200, &json!({
+                "application": "shows-desktop",
+                "protocol": shows_control::PROTOCOL_VERSION,
+                "build": option_env!("SHOWS_BUILD_SHA").unwrap_or("source"),
+                "computer": std::env::var("COMPUTERNAME").unwrap_or_default(),
+                "pid": std::process::id(),
+            })),
             (Method::Get, "/status/stream") => self.status_stream(request),
             (Method::Get, "/shows") => {
                 let v = json!(self.replica.overlay_shows(&self.playlists));
@@ -390,6 +397,7 @@ impl ControlServer {
 
     fn handle_post(self: &Arc<Self>, mut request: Request, path: &str, _url: &str) {
         match path {
+            "/remote/control" => self.remote_control(request),
             "/pause" => {
                 let mut did_explicit = false;
                 if let Some(query) = request.url().split('?').nth(1) {
@@ -686,6 +694,60 @@ impl ControlServer {
             "/library/detect-new-episodes" => self.library_detect_new_episodes(request),
             "/library/show-details" => self.library_show_details(request),
             _ => respond(request, 404, b"not found".to_vec(), "text/plain"),
+        }
+    }
+
+    fn remote_control(&self, mut request: Request) {
+        use shows_control::Command;
+        if request.headers().iter().any(|h| h.field.equiv("Origin")) ||
+            !request.headers().iter().any(|h| h.field.equiv("Content-Type") && h.value.as_str() == "application/json") {
+            return respond_json(request, 403, &json!({"ok": false, "message": "remote controls require a native JSON client"}));
+        }
+        let mut body = Vec::new();
+        if request.as_reader().take(shows_control::MAX_FRAME + 1).read_to_end(&mut body).is_err() || body.len() as u64 > shows_control::MAX_FRAME {
+            return respond_json(request, 413, &json!({"ok": false, "message": "control body unreadable or larger than 1 MiB"}));
+        }
+        let command: Command = match serde_json::from_slice(&body) {
+            Ok(command) => command,
+            Err(e) => return respond_json(request, 400, &json!({"ok": false, "message": e.to_string()})),
+        };
+        if let Err(message) = command.validate() {
+            return respond_json(request, 400, &json!({"ok": false, "message": message}));
+        }
+        let status = self.status_json();
+        if !shows_control::playback_ready(&status) {
+            return respond_json(request, 503, &json!({"ok": false, "message": "Shows has no playable episode loaded; check status"}));
+        }
+        log::info!("remote control: {command:?}");
+        match command {
+            Command::Skip {} => self.respond_runner_outcome(request, |r| r.skip()),
+            Command::Previous {} => self.respond_runner_outcome(request, |r| r.previous()),
+            Command::Defer {} => self.respond_runner_outcome(request, |r| r.defer()),
+            Command::PlayShow { show_id } => self.respond_runner_outcome(request, |r| r.play_show(&show_id)),
+            Command::Play {} | Command::Pause {} | Command::Seek { .. } | Command::Volume { .. } => {
+                let result = {
+                    let player = self.player.lock().unwrap();
+                    match player.as_ref() {
+                        Some(p) => match command {
+                            Command::Play {} => p.set_pause_confirmed(false),
+                            Command::Pause {} => p.set_pause_confirmed(true),
+                            Command::Seek { seconds } => p.seek_confirmed(seconds),
+                            Command::Volume { level } => p.set_volume_confirmed(level),
+                            _ => unreachable!(),
+                        },
+                        None => Err("player is unavailable".into()),
+                    }
+                };
+                match result {
+                    Ok(()) => {
+                        if let Command::Volume { level } = command { self.replica.set_volume(level); }
+                        self.notify();
+                        respond_control_ok(request, "control_applied", "control applied by the target player");
+                    }
+                    Err(message) => respond_json(request, 503, &json!({"ok": false, "message": message})),
+                }
+            }
+            _ => respond_json(request, 400, &json!({"ok": false, "message": "use the status and stream endpoints for reads"})),
         }
     }
 
@@ -1030,20 +1092,8 @@ impl ControlServer {
 
     fn static_file(&self, rel: &str) -> Option<(Vec<u8>, String)> {
         let rel = rel.trim_start_matches('/');
-        if let Some(ref dist_dir) = self.dist_dir {
-            let full = dist_dir.join(rel).canonicalize().ok()?;
-            let dist = dist_dir.canonicalize().ok()?;
-            if !full.starts_with(&dist) {
-                return None; // traversal guard
-            }
-            let data = std::fs::read(&full).ok()?;
-            Some((data, content_type(&full)))
-        } else {
-            let file = Asset::get(rel)?;
-            let data = file.data.into_owned();
-            let ctype = content_type(Path::new(rel));
-            Some((data, ctype))
-        }
+        let data = embedded_asset(rel)?;
+        Some((data, content_type(Path::new(rel))))
     }
 }
 
@@ -1430,6 +1480,45 @@ mod tests {
     use std::io::Read;
 
     #[test]
+    fn native_remote_reports_unavailable_player_without_mutating_shared_state() {
+        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec!["nelson".into()]);
+        let revision = control.replica.revision();
+        let listener = Server::http("127.0.0.1:0").unwrap();
+        let address = listener.server_addr().to_string();
+        let copy = control.clone();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..2 {
+                copy.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+            }
+        });
+        let client = shows_control::Client::connect_to(&address).unwrap();
+        assert!(client.execute(&shows_control::Command::Play {}).unwrap_err().contains("no playable episode"));
+        worker.join().unwrap();
+        assert_eq!(control.replica.revision(), revision);
+    }
+
+    #[test]
+    fn remote_rejects_browser_requests_before_applying_controls() {
+        use std::io::Write;
+        for headers in ["Content-Type: text/plain\r\n", "Content-Type: application/json\r\nOrigin: https://example.com\r\n"] {
+            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+            let listener = Server::http("127.0.0.1:0").unwrap();
+            let address = listener.server_addr().to_string();
+            let worker = std::thread::spawn(move || {
+                control.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+            });
+            let mut socket = std::net::TcpStream::connect(address).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let body = r#"{"action":"skip"}"#;
+            write!(socket, "POST /remote/control HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 403"));
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
     fn sse_frame_names_status_event_with_json_payload() {
         let frame = sse_frame(7, "status", &json!({"phase": "playing", "round_pos": 2}));
 
@@ -1488,9 +1577,7 @@ mod tests {
 
     #[test]
     fn identical_shell_state_is_rebroadcast_as_an_acknowledgement() {
-        let server = ControlServer::new(
-            None,
-            Arc::new(Replica::new(":memory:")),
+        let server = ControlServer::new(Arc::new(Replica::new(":memory:")),
             vec!["nelson".to_string()],
         );
 
@@ -1517,9 +1604,7 @@ mod tests {
 
     #[test]
     fn initial_status_snapshot_has_frontend_contract_fields() {
-        let server = ControlServer::new(
-            None,
-            Arc::new(Replica::new(":memory:")),
+        let server = ControlServer::new(Arc::new(Replica::new(":memory:")),
             vec!["nelson".to_string()],
         );
         let value = server.status_json();
