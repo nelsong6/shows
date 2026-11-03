@@ -85,7 +85,9 @@ if (-not $NoUpdate) {
     }
   } catch {
     if (-not $selectedVersion) { throw }
-    Write-Warning "Update failed; starting installed version $selectedVersion. $($_.Exception.Message)"
+    $updateMessage = "Update failed; starting installed version $selectedVersion. $($_.Exception.Message)"
+    if ($App -eq "remote") { [Console]::Error.WriteLine($updateMessage) }
+    else { Write-Warning $updateMessage }
   }
 }
 
