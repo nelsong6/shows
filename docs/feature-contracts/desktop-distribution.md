@@ -17,6 +17,9 @@ without running an executable from the network share.
   only ever carries a build CI produced from `main`. Dev builds are local and
   add a publication timestamp so repeated builds of one revision remain
   immutable.
+- **P5. Signed Windows binaries.** CI signs both executables and libmpv with the
+  existing home code-signing identity, verifies Authenticode and its pinned
+  thumbprint, then archives the signed files. Manifests hash the signed bytes.
 
 ## Installation invariants
 

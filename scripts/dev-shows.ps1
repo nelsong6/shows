@@ -2,7 +2,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [Parameter(Position=0)][ValidateSet('ui','desktop','remote','test','stop','status','ship')][string]$Mode = 'ui',
-  [string]$Target = 'upstairspc',
+  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$')][string]$Target = 'upstairspc',
   [string]$Name = 'shows-preview',
   [string]$RepoRoot,
   [Parameter(ValueFromRemainingArguments=$true)][string[]]$RemoteArgs
@@ -48,12 +48,18 @@ if ($Mode -eq 'ui') {
     $info = Invoke-RestMethod 'http://127.0.0.1:45831/remote/info' -TimeoutSec 2
     if ($info.application -ne 'shows-desktop' -or $info.protocol -ne 1) { throw 'Open the current Shows desktop on this PC first' }
   } else {
-    $statePath = Join-Path $env:LOCALAPPDATA 'shows\launcher-state-stable.json'
-    $installed = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
-    if ($installed.current -notmatch '^[A-Za-z0-9._-]+$') { throw 'Invalid installed Shows version' }
-    $client = Join-Path $env:LOCALAPPDATA ('shows\versions\' + $installed.current + '\shows-remote.exe')
-    & $client $Target status --json | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Open Shows on $Target before starting its live preview" }
+    $controlPort = if ($env:SHOWS_CONTROL_PORT) { [uint16]::Parse($env:SHOWS_CONTROL_PORT) } else { 45831 }
+    if ($controlPort -eq 0) { throw 'Invalid control port' }
+    $start = [Diagnostics.ProcessStartInfo]::new('ssh.exe')
+    $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    foreach ($argument in @('-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8',$Target,'curl.exe','--fail','--silent','--show-error','--max-time','3',"http://127.0.0.1:$controlPort/remote/info")) { $start.ArgumentList.Add($argument) }
+    $probe = [Diagnostics.Process]::Start($start)
+    $output = $probe.StandardOutput.ReadToEndAsync(); $errors = $probe.StandardError.ReadToEndAsync()
+    if (-not $probe.WaitForExit(12000)) { $probe.Kill($true); throw "Shows preflight on $Target timed out" }
+    if ($probe.ExitCode -ne 0) { throw "Open Shows on $Target before previewing it: $($errors.GetAwaiter().GetResult())" }
+    $info = $output.GetAwaiter().GetResult() | ConvertFrom-Json
+    if ($info.application -ne 'shows-desktop' -or $info.protocol -ne 1) { throw 'Target is not the current Shows desktop' }
   }
 }
 if ($Mode -eq 'desktop' -and (Get-Process -Name shows-desktop -ErrorAction SilentlyContinue)) {
@@ -66,7 +72,8 @@ if ($Mode -eq 'desktop' -and (Get-Process -Name shows-desktop -ErrorAction Silen
   if ($LASTEXITCODE -ne 0) { throw 'Could not stop the owned native preview before rebuilding' }
 }
 $previousEnvironment = @{}
-foreach ($variable in @('CARGO_TARGET_DIR','SHOWS_DEV_TARGET','SHOWS_DEV_DESKTOP_EXE')) { $previousEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable, 'Process') }
+foreach ($variable in @('CARGO_TARGET_DIR','SHOWS_DEV_TARGET','SHOWS_DEV_DESKTOP_EXE','SHOWS_CONTROL_PORT','SHOWS_REMOTE_DEV_AGENT')) { $previousEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable, 'Process') }
+$ownedRemotePreview = $null
 try {
 [Environment]::SetEnvironmentVariable('SHOWS_DEV_DESKTOP_EXE', $null, 'Process')
 if ($Mode -in @('remote','desktop','test')) {
@@ -79,6 +86,22 @@ if ($Mode -in @('remote','desktop','test')) {
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   Write-Host ("Incremental {0} build: {1:N2}s" -f $package, $started.Elapsed.TotalSeconds)
   if ($Mode -eq 'remote') {
+    if ($Target -ne 'local') {
+      $bridgeName = $Name + '-remote'
+      $bridge = & devctl.exe list $bridgeName -Json | ConvertFrom-Json
+      $bridge = @($bridge)[0]
+      if ($bridge.status -in @('stopped','failed')) { $bridge = $null }
+      if (-not $bridge.port) {
+        & $PSCommandPath ui -Target $Target -Name $bridgeName -RepoRoot $RepoRoot
+        if ($LASTEXITCODE -ne 0) { throw 'Could not start the tracked remote development bridge' }
+        $ownedRemotePreview = $bridgeName
+        $bridge = @(& devctl.exe list $bridgeName -Json | ConvertFrom-Json)[0]
+      }
+      $health = Invoke-RestMethod "http://127.0.0.1:$($bridge.port)/__devctl/health" -TimeoutSec 2
+      if ($health.target -ne $Target -or [IO.Path]::GetFullPath($health.repo_dir) -ne [IO.Path]::GetFullPath($workspace)) { throw 'The named preview belongs to another target or worktree' }
+      $env:SHOWS_CONTROL_PORT = [string]$bridge.port
+    }
+    $env:SHOWS_REMOTE_DEV_AGENT = '1'
     & (Join-Path $cache 'debug\shows-remote.exe') $Target @RemoteArgs
     exit $LASTEXITCODE
   }
@@ -103,5 +126,6 @@ $env:SHOWS_DEV_TARGET = $Target
 & devctl.exe up frontend -Name $Name -Cwd $frontend -Project shows
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally {
+  if ($ownedRemotePreview) { & devctl.exe stop $ownedRemotePreview | Out-Null }
   foreach ($variable in $previousEnvironment.Keys) { [Environment]::SetEnvironmentVariable($variable, $previousEnvironment[$variable], 'Process') }
 }

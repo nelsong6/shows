@@ -38,7 +38,12 @@ authoritative; no separate tunnel or dev-server process is left untracked.
 ## Rust and terminal edits
 
 `remote` compiles only `shows-remote` and its dependencies in debug mode, then
-runs the requested command or interactive terminal. `desktop` builds the native
+runs the requested command or interactive terminal. It runs the newly compiled
+agent locally through a tracked SSH preview bridge, so agent changes can be
+tried immediately without installing another TV executable. A bridge started by
+the command stops when that command exits; an existing matching preview is
+reused. Release clients continue to use the target's installed agent.
+`desktop` builds the native
 shell and starts it under the tracked Vite environment. Native previews start
 paused and use the real local engine/cache; the first media cache pass may take
 time. Use `ui` for menu work against a player whose files are already cached.

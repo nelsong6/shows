@@ -179,6 +179,14 @@ jobs:
           if (-not (Test-Path "$out/shows-remote.exe"))  { throw "build failed: shows-remote.exe missing" }
           if (-not (Test-Path "$out/libmpv-2.dll"))     { throw "bundle missing libmpv-2.dll" }
 
+      - name: Sign and verify home executables and runtime
+        if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
+        shell: pwsh
+        env:
+          AT_TERMINAL_PFX: ${{ secrets.AT_TERMINAL_PFX }}
+          AT_TERMINAL_PFX_PASSWORD: ${{ secrets.AT_TERMINAL_PFX_PASSWORD }}
+        run: ./scripts/sign-shows-bundle.ps1 -BundleDirectory desktop-rs/dist/shows-desktop
+
       - name: Zip bundle
         if: steps.changes.outputs.skip != 'true' && github.event_name != 'pull_request'
         shell: pwsh
