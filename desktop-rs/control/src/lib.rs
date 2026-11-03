@@ -11,6 +11,25 @@ pub const CONTROL_ADDR: &str = "127.0.0.1:45831";
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME: u64 = 1024 * 1024;
 
+pub fn overlay_url(port: u16, development: Option<&str>, debug: bool) -> Result<String, String> {
+    match (debug, development) {
+        (false, None) => Ok(format!("http://127.0.0.1:{port}/")),
+        (false, Some(_)) => Err("SHOWS_DEV_URL is supported only by debug builds".into()),
+        (true, None) => Err("Start the live overlay with scripts/dev-shows.ps1 desktop".into()),
+        (true, Some(value)) => {
+            let uri: ureq::http::Uri = value.parse().map_err(|_| "invalid SHOWS_DEV_URL")?;
+            let local = matches!(uri.host(), Some("localhost" | "127.0.0.1" | "[::1]"));
+            if uri.scheme_str() != Some("http")
+                || !local
+                || uri.authority().is_some_and(|a| a.as_str().contains('@'))
+            {
+                return Err("SHOWS_DEV_URL must be an HTTP loopback URL".into());
+            }
+            Ok(value.to_string())
+        }
+    }
+}
+
 pub fn control_addr() -> Result<String, String> {
     match std::env::var("SHOWS_CONTROL_PORT") {
         Ok(port) => {
@@ -200,7 +219,6 @@ impl Client {
             .proxy(None)
             .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(8)))
-            .timeout_recv_response(Some(Duration::from_secs(8)))
             .build()
             .into();
         let response = agent

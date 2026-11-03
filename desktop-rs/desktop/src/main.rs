@@ -124,19 +124,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     log::info!("opening authoritative database at {shared_db_path}");
     let replica = Arc::new(Replica::try_new(&shared_db_path)?);
 
-    // Control server serves the React overlay + the control surface. Picking
-    // a dist dir: explicit env override > in-tree source dir (dev) > embedded (release).
-    let dist_dir = std::env::var("SHOWS_DIST_DIR")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            if cfg!(debug_assertions) {
-                Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../frontend/dist"))
-            } else {
-                None
-            }
-        });
-    let server = ControlServer::new(dist_dir, replica.clone(), playlists.clone());
+    // Releases embed the overlay. Debug builds use the tracked Vite server.
+    let server = ControlServer::new(replica.clone(), playlists.clone());
     server.push_raw(serde_json::json!({
         "database": {
             "path": shared_db_path,
@@ -145,7 +134,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     }));
     let port = server.start();
-    let overlay_url = format!("http://127.0.0.1:{port}/");
+    let development_url = std::env::var("SHOWS_DEV_URL").ok();
+    let overlay_url = shows_control::overlay_url(port, development_url.as_deref(), cfg!(debug_assertions)).map_err(to_err)?;
     log::info!("control server on {overlay_url}");
 
     // mpv + player + compositor. The render context (created in the compositor)

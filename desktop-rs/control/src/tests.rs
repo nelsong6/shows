@@ -2,6 +2,28 @@ use super::*;
 use std::io::Cursor;
 use tiny_http::{Header, Response, Server};
 
+#[test]
+fn live_overlay_is_explicit_and_cannot_replace_release_assets() {
+    assert_eq!(
+        overlay_url(45831, None, false).unwrap(),
+        "http://127.0.0.1:45831/"
+    );
+    assert!(overlay_url(45831, Some("http://127.0.0.1:5173/"), false).is_err());
+    assert!(overlay_url(45831, None, true).is_err());
+    assert_eq!(
+        overlay_url(45831, Some("http://127.0.0.1:5173/"), true).unwrap(),
+        "http://127.0.0.1:5173/"
+    );
+    for url in [
+        "https://example.com/",
+        "http://upstairspc/",
+        "javascript:alert(1)",
+        "http://user@localhost/",
+    ] {
+        assert!(overlay_url(45831, Some(url), true).is_err());
+    }
+}
+
 fn fixture(replies: Vec<(&'static str, u16, Value)>) -> (String, std::thread::JoinHandle<()>) {
     let server = Server::http("127.0.0.1:0").unwrap();
     let address = server.server_addr().to_string();
@@ -166,4 +188,59 @@ fn live_stream_parses_multiline_unicode_status_and_reports_closure() {
     assert!(matches!(&received[0], Frame::Status { status } if status["message"] == "Télévision"));
     assert!(error.contains("closed"));
     worker.join().unwrap();
+}
+
+#[test]
+fn live_stream_survives_idle_beyond_the_command_response_deadline() {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let worker = std::thread::spawn(move || {
+        for stream_number in 0..2 {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            if stream_number == 0 {
+                let body = identity().to_string();
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            } else {
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\nevent: status\ndata: {\"sequence\":1}\n\n").unwrap();
+                // ureq's response timeout also constrains subsequent body reads.
+                // An SSE connection must remain usable beyond the 8-second
+                // command/header deadline, even with no intervening event.
+                std::thread::sleep(Duration::from_secs(9));
+                let _ =
+                    socket.write_all(b": heartbeat\n\nevent: status\ndata: {\"sequence\":2}\n\n");
+            }
+        }
+    });
+    let client = Client::connect_to(&address).unwrap();
+    let mut sequences = Vec::new();
+    let result = client.watch(|frame| {
+        if let Frame::Status { status } = frame {
+            sequences.push(status["sequence"].as_u64().unwrap());
+            if sequences.len() == 2 {
+                return Err("test complete".into());
+            }
+        }
+        Ok(())
+    });
+    worker.join().unwrap();
+    assert_eq!(sequences, [1, 2]);
+    assert_eq!(result.unwrap_err(), "test complete");
 }

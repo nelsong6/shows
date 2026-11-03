@@ -93,28 +93,37 @@ The library normally expects show roots under `S:\Group-Nelson`. See `docs/new-c
 
 ## Build and local testing
 
-The frontend is embedded into the release executable. Use the NAS publisher for cross-computer testing:
+Use the fast development loop before opening a PR. See
+`docs/development.md` and `docs/feature-contracts/development-lifecycle.md`.
 
 ```powershell
-cd desktop-rs\frontend
-npm run build
-
-cd ..
-cargo test --workspace
-cargo build --release -p shows-desktop
-..\scripts\publish-shows-channel.ps1 -Channel dev
+.\scripts\dev-shows.ps1 ui -Target upstairspc
+.\scripts\dev-shows.ps1 remote -Target upstairspc status
+.\scripts\dev-shows.ps1 desktop
+.\scripts\dev-shows.ps1 test
+.\scripts\dev-shows.ps1 stop
 ```
 
-The normal local test install is `D:\Downloads\shows\shows-desktop.exe`. After a successful release build, close the running app and copy the new executable:
+UI previews use tracked Vite HMR against the real engine and SSE feed; they do
+not need a Rust build, a local player, or another database. Native previews
+start paused and require Vite; debug builds do not embed frontend assets.
+`SHOWS_DIST_DIR` and the fixed-path release-copy smoke script are retired.
+
+Keep debug output warm across worktrees in `D:\build\shows\cargo` (override
+`SHOWS_DEV_TARGET_DIR`). Local Cargo builds use at most four jobs. Release
+compilation is not an edit-preview step on nelsonpc.
+
+PRs run the relevant frontend/debug tests; main produces the optimized, embedded
+release bundle. After CI and merge, publish and install the exact main release
+on this PC and the TV in one operation:
 
 ```powershell
-Stop-Process -Name shows-desktop -Force -ErrorAction SilentlyContinue
-Copy-Item -Force `
-  .\target\release\shows-desktop.exe `
-  D:\Downloads\shows\shows-desktop.exe
+.\scripts\dev-shows.ps1 ship -Target upstairspc
 ```
 
-Use `scripts/test-install-release.ps1` for the legacy fixed-path smoke test when appropriate. The normal cross-computer path is the versioned launcher governed by `docs/feature-contracts/desktop-distribution.md`.
+The update command preserves a running TV's selected episode and pause state,
+uses its interactive Windows session, and leaves a closed app closed. Stable
+remains the hash-verified CI artifact; preview code never replaces it.
 
 ## Release
 

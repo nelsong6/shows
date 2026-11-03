@@ -155,6 +155,8 @@ impl Handle {
         h.set_option("vo", "libmpv");
         h.set_option("force-window", "no");
         h.set_option("idle", "yes");
+        #[cfg(debug_assertions)]
+        h.set_option("pause", "yes");
         h.set_option("keep-open", "no");
         h.set_option("hwdec", "no");
         let r = unsafe { (h.api.initialize)(h.ctx) };
