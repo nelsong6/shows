@@ -34,7 +34,7 @@ command may already have applied; inspect status before retrying.
 Publish the CI release using `scripts/publish-shows-channel.ps1 -Channel stable`
 and use the existing launcher to install it on both PCs. Run
 `scripts/install-shows-launcher.ps1` to install the terminal command. It adds
-`%LOCALAPPDATA%\shows\bin` to user PATH; existing terminals need that PATH once.
+`%USERPROFILE%\bin` to user PATH (already on PATH on the home PCs).
 SSH must already work with `ssh -o BatchMode=yes upstairspc hostname`, including
 known-host trust. Shows creates no SSH keys and exposes no HTTP listener on the
 LAN. The loopback port is 45831; leave `SHOWS_CONTROL_PORT` unset normally.

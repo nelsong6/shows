@@ -36,7 +36,7 @@ without running an executable from the network share.
 - **I7. Terminal companion.** Every new bundle includes `shows-remote.exe`.
   `launch-shows.ps1 -App remote` attaches it to the caller's stdin/stdout/stderr,
   forwards arguments and exit status, and never starts the desktop. The installer
-  copies the launcher locally and adds `%LOCALAPPDATA%\shows\bin` to user PATH
+  copies the launcher locally and adds `%USERPROFILE%\bin` to user PATH
   with a `shows-remote.cmd` entry point.
   Version selection also writes a native `agents/<channel>.cmd` entry point
   so SSH can start the installed agent with stdin/stdout preserved.

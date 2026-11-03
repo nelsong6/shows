@@ -10,7 +10,7 @@ $launcher = Join-Path $NasRoot "launch-shows.ps1"
 if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "Launcher not found: $launcher" }
 
 $installRoot = Join-Path $env:LOCALAPPDATA "shows"
-$bin = Join-Path $installRoot "bin"
+$bin = Join-Path $env:USERPROFILE "bin"
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
 $localLauncher = Join-Path $installRoot "launch-shows.ps1"
 Copy-Item -LiteralPath $launcher -Destination $localLauncher -Force
