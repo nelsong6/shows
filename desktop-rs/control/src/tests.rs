@@ -189,3 +189,58 @@ fn live_stream_parses_multiline_unicode_status_and_reports_closure() {
     assert!(error.contains("closed"));
     worker.join().unwrap();
 }
+
+#[test]
+fn live_stream_survives_idle_beyond_the_command_response_deadline() {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let worker = std::thread::spawn(move || {
+        for stream_number in 0..2 {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            if stream_number == 0 {
+                let body = identity().to_string();
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            } else {
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\nevent: status\ndata: {\"sequence\":1}\n\n").unwrap();
+                // ureq's response timeout also constrains subsequent body reads.
+                // An SSE connection must remain usable beyond the 8-second
+                // command/header deadline, even with no intervening event.
+                std::thread::sleep(Duration::from_secs(9));
+                let _ =
+                    socket.write_all(b": heartbeat\n\nevent: status\ndata: {\"sequence\":2}\n\n");
+            }
+        }
+    });
+    let client = Client::connect_to(&address).unwrap();
+    let mut sequences = Vec::new();
+    let result = client.watch(|frame| {
+        if let Frame::Status { status } = frame {
+            sequences.push(status["sequence"].as_u64().unwrap());
+            if sequences.len() == 2 {
+                return Err("test complete".into());
+            }
+        }
+        Ok(())
+    });
+    worker.join().unwrap();
+    assert_eq!(sequences, [1, 2]);
+    assert_eq!(result.unwrap_err(), "test complete");
+}

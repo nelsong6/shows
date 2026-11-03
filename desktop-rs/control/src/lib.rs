@@ -219,7 +219,6 @@ impl Client {
             .proxy(None)
             .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(8)))
-            .timeout_recv_response(Some(Duration::from_secs(8)))
             .build()
             .into();
         let response = agent
