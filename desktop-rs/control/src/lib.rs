@@ -68,6 +68,7 @@ pub enum Command {
     Defer {},
     Seek { seconds: f64 },
     Volume { level: f64 },
+    Fullscreen {},
     PlayShow { show_id: String },
 }
 

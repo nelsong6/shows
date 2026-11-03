@@ -60,6 +60,8 @@ enum Action {
     Play { show: Option<String> },
     /// Pause playback (safe to repeat).
     Pause,
+    /// Toggle fullscreen on the controlled TV, leaving playback unchanged.
+    Fullscreen,
     /// Mark the current episode watched and move forward.
     Skip,
     /// Navigate back without marking watched.
@@ -133,6 +135,7 @@ fn run() -> Result<(), String> {
         },
         Action::Play { show: None } => Command::Play {},
         Action::Pause => Command::Pause {},
+        Action::Fullscreen => Command::Fullscreen {},
         Action::Skip => Command::Skip {},
         Action::Previous => Command::Previous {},
         Action::Defer => Command::Defer {},

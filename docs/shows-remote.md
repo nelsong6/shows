@@ -13,6 +13,7 @@ instances first, and explains unavailable PCs. Select an instance to control it;
 **Refresh instances** checks again. No player starts as a side effect.
 
 Press `/` in the controller for its fzt command palette: playback controls,
+**Toggle fullscreen** on the controlled TV (`f` is the shortcut),
 play a show from the current round, reconnect, change instance, or quit.
 Arrows select a show; Enter plays it. Space sets play/pause, `s` plays, `p` pauses,
 `n` skips **and marks watched**, `b` goes back, `d` defers without marking watched,
@@ -24,6 +25,7 @@ shows-remote upstairspc status
 shows-remote upstairspc queue
 shows-remote upstairspc play
 shows-remote upstairspc pause
+shows-remote upstairspc fullscreen
 shows-remote upstairspc play "The Simpsons"
 shows-remote upstairspc seek -30
 shows-remote upstairspc volume 50

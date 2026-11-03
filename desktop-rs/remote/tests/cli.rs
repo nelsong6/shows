@@ -72,6 +72,26 @@ fn rejected_control_exits_nonzero_and_surfaces_the_target_error() {
 }
 
 #[test]
+fn fullscreen_uses_the_native_control_route() {
+    let output = run(
+        &["fullscreen"],
+        vec![
+            identity(),
+            (
+                "/remote/control",
+                json!({"ok":true,"message":"fullscreen toggle requested"}),
+            ),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("fullscreen toggle requested"));
+}
+
+#[test]
 fn ambiguous_show_selection_sends_no_play_request() {
     let output = run(
         &["play", "the"],

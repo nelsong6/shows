@@ -629,15 +629,15 @@ impl Compositor {
     /// thread. Wire into `ControlServer::set_on_fullscreen` so the overlay's
     /// `/fullscreen` endpoint and `f` keybind both work — the actual window
     /// style/size change happens on the message-loop thread that owns the HWND.
-    pub fn fullscreen_callback(&self) -> Box<dyn Fn() + Send + Sync> {
+    pub fn fullscreen_callback(&self) -> Box<dyn Fn() -> std::result::Result<(), String> + Send + Sync> {
         let raw = self.hwnd.0 as usize;
         Box::new(move || unsafe {
-            let _ = PostMessageW(
+            PostMessageW(
                 Some(HWND(raw as *mut _)),
                 WM_TOGGLE_FULLSCREEN,
                 WPARAM(0),
                 LPARAM(0),
-            );
+            ).map_err(|e| format!("Could not request fullscreen: {e}"))
         })
     }
 

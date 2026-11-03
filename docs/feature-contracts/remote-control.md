@@ -31,8 +31,9 @@ round. The target owns playback and all authoritative NAS transactions.
   `shows-desktop` and protocol 1. A missing, stopped, or different listener fails
   explicitly. Every new connection checks identity.
 - **T5. Narrow native surface.** `POST /remote/control` accepts typed playback
-  commands, requires JSON, and rejects browser Origin headers. It exposes no
-  library import, filesystem browsing, or shell/window actions.
+  commands and fullscreen toggle, requires JSON, and rejects browser Origin
+  headers. It exposes no library import, filesystem browsing, shell execution,
+  or other window actions.
 
 ## Playback and acknowledgement
 
@@ -42,6 +43,11 @@ round. The target owns playback and all authoritative NAS transactions.
   nothing. Switching closes the previous agent, leaves its player unchanged,
   and returns to instance selection. Status queued while the palette is open
   is consumed before another playback command is accepted.
+  **Toggle fullscreen** (`f`) remains available while connected and idle even
+  without a loaded episode. It acts only on the controlled desktop window.
+  Success acknowledges posting the window's toggle message; the authoritative
+  `window_fullscreen` SSE field confirms the resulting state. Missing windows
+  or failed UI-message posting return errors; toggles are never replayed.
 
 - **C1. Existing round semantics.** Skip, previous, defer and show navigation use
   the overlay's runner. [round-and-advance.md](round-and-advance.md) invariants

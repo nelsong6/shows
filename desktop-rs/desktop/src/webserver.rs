@@ -225,7 +225,7 @@ impl StatusPatch {
 }
 
 pub type WindowActionCb = Box<dyn Fn(WindowAction) + Send + Sync>;
-type FullscreenCb = Box<dyn Fn() + Send + Sync>;
+type FullscreenCb = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
 // Takes the desired pin state, not a flip — the overlay sends the target it
 // wants so duplicate POSTs from one click converge instead of cancelling out.
 type StayOnTopCb = Box<dyn Fn(bool) + Send + Sync>;
@@ -536,10 +536,7 @@ impl ControlServer {
                 self.respond_runner_outcome(request, |r| r.reload_round());
             }
             "/fullscreen" => {
-                if let Some(cb) = self.on_fullscreen.lock().unwrap().as_ref() {
-                    cb();
-                }
-                respond_control_ok(request, "fullscreen_toggled", "fullscreen toggled");
+                self.respond_fullscreen(request);
             }
             "/stay-on-top" => {
                 // Idempotent set: the body carries the desired pin state
@@ -697,6 +694,16 @@ impl ControlServer {
         }
     }
 
+    fn respond_fullscreen(&self, request: Request) {
+        let result = self.on_fullscreen.lock().unwrap().as_ref()
+            .ok_or_else(|| "The Shows window is unavailable".to_string())
+            .and_then(|callback| callback());
+        match result {
+            Ok(()) => respond_control_ok(request, "fullscreen_requested", "fullscreen toggle requested; window status confirms the result"),
+            Err(message) => respond_json(request, 503, &json!({"ok": false, "message": message})),
+        }
+    }
+
     fn remote_control(&self, mut request: Request) {
         use shows_control::Command;
         if request.headers().iter().any(|h| h.field.equiv("Origin")) ||
@@ -715,11 +722,12 @@ impl ControlServer {
             return respond_json(request, 400, &json!({"ok": false, "message": message}));
         }
         let status = self.status_json();
-        if !shows_control::playback_ready(&status) {
+        if !matches!(&command, Command::Fullscreen {}) && !shows_control::playback_ready(&status) {
             return respond_json(request, 503, &json!({"ok": false, "message": "Shows has no playable episode loaded; check status"}));
         }
         log::info!("remote control: {command:?}");
         match command {
+            Command::Fullscreen {} => self.respond_fullscreen(request),
             Command::Skip {} => self.respond_runner_outcome(request, |r| r.skip()),
             Command::Previous {} => self.respond_runner_outcome(request, |r| r.previous()),
             Command::Defer {} => self.respond_runner_outcome(request, |r| r.defer()),
@@ -1478,6 +1486,36 @@ fn header(name: &str, value: &str) -> Header {
 mod tests {
     use super::*;
     use std::io::Read;
+
+    #[test]
+    fn remote_fullscreen_needs_a_window_but_not_a_loaded_episode() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for available in [None, Some(false), Some(true)] {
+            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+            let calls = Arc::new(AtomicUsize::new(0));
+            if let Some(success) = available {
+                let calls = calls.clone();
+                control.set_on_fullscreen(Box::new(move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if success { Ok(()) } else { Err("UI message failed".into()) }
+                }));
+            }
+            let revision = control.replica.revision();
+            let listener = Server::http("127.0.0.1:0").unwrap();
+            let address = listener.server_addr().to_string();
+            let copy = control.clone();
+            let worker = std::thread::spawn(move || {
+                for _ in 0..2 { copy.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap()); }
+            });
+            let client = shows_control::Client::connect_to(&address).unwrap();
+            let result = client.execute(&shows_control::Command::Fullscreen {});
+            assert_eq!(result.is_ok(), available == Some(true));
+            assert_eq!(calls.load(Ordering::SeqCst), usize::from(available.is_some()));
+            assert_eq!(control.status_json()["window_fullscreen"], false);
+            assert_eq!(control.replica.revision(), revision);
+            worker.join().unwrap();
+        }
+    }
 
     #[test]
     fn native_remote_reports_unavailable_player_without_mutating_shared_state() {

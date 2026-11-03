@@ -87,6 +87,7 @@ impl Model {
             }),
             KeyCode::Char('s') => Some(Command::Play {}),
             KeyCode::Char('p') => Some(Command::Pause {}),
+            KeyCode::Char('f') => Some(Command::Fullscreen {}),
             KeyCode::Char('n') => Some(Command::Skip {}),
             KeyCode::Char('b') => Some(Command::Previous {}),
             KeyCode::Char('d') => Some(Command::Defer {}),
@@ -144,7 +145,14 @@ fn draw(frame: &mut TerminalFrame, model: &Model, target: &str) {
         Paragraph::new(headline)
             .block(
                 Block::bordered()
-                    .title(format!(" Shows Remote → {target}  ·  {state} "))
+                    .title(format!(
+                        " Shows Remote → {target}  ·  {state}{} ",
+                        if model.status["window_fullscreen"] == true {
+                            " · fullscreen"
+                        } else {
+                            ""
+                        }
+                    ))
                     .border_style(Style::default().fg(color)),
             )
             .wrap(Wrap { trim: true }),
@@ -220,7 +228,7 @@ fn draw(frame: &mut TerminalFrame, model: &Model, target: &str) {
             .style(Style::default().fg(color)),
         areas[3],
     );
-    frame.render_widget(Paragraph::new("/ commands · Space play/pause · n skip (marks watched) · b previous\nd defer · ←→ seek 10s · +/- volume · r reconnect · q quit")
+    frame.render_widget(Paragraph::new("/ commands · f fullscreen · Space play/pause · n skip (marks watched)\nb previous · d defer · ←→ seek 10s · +/- volume · r reconnect · q quit")
         .wrap(Wrap { trim: true }), areas[4]);
 }
 
@@ -242,6 +250,13 @@ fn palette(model: &Model) -> Result<Option<String>, String> {
             description: "Leave TV playback running".into(),
         },
     ];
+    if model.connected && model.pending.is_none() {
+        choices.push(Choice {
+            id: "fullscreen".into(),
+            name: "Toggle fullscreen".into(),
+            description: "Change the controlled TV window; leave playback unchanged".into(),
+        });
+    }
     if model.ready() {
         for (id, name) in [
             ("play", "Play"),
@@ -280,6 +295,7 @@ fn palette_command(model: &Model, action: &str) -> Option<Command> {
     let key = match action {
         "play" => KeyCode::Char('s'),
         "pause" => KeyCode::Char('p'),
+        "fullscreen" => KeyCode::Char('f'),
         "skip" => KeyCode::Char('n'),
         "previous" => KeyCode::Char('b'),
         "defer" => KeyCode::Char('d'),
@@ -404,7 +420,12 @@ pub fn run(mut session: Session, target: &str, channel: &str, local: bool) -> Re
                         Err(message) => model.disconnect(message),
                     }
                 }
-                _ if model.ready() => {
+                _ if model.ready()
+                    || (model.connected
+                        && model.pending.is_none()
+                        && (code == KeyCode::Char('f')
+                            || selected_command == Some(Command::Fullscreen {}))) =>
+                {
                     if let Some(command) = selected_command.or_else(|| model.control(code)) {
                         match connection
                             .as_mut()
@@ -443,6 +464,10 @@ mod tests {
             })
         );
         assert_eq!(palette_command(&model, "pause"), Some(Command::Pause {}));
+        assert_eq!(
+            palette_command(&model, "fullscreen"),
+            Some(Command::Fullscreen {})
+        );
         assert_eq!(
             palette_command(&model, "back"),
             Some(Command::Seek { seconds: -10.0 })
