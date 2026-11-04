@@ -27,6 +27,7 @@ impl VideoPreview {
         Ok(())
     }
 
+    /// Convert a top-down RGBA sample without changing its orientation.
     pub fn from_rgba(pixels: &[u8], aspect: f64, capture_ms: f64) -> Result<Self, String> {
         if pixels.len() != WIDTH * HEIGHT * 4 {
             return Err("Invalid video sample size".into());
@@ -34,7 +35,6 @@ impl VideoPreview {
         let ramp = b" .:-=+*#%@";
         let rows = pixels
             .as_chunks::<{ WIDTH * 4 }>().0.iter()
-            .rev()
             .map(|row| {
                 row.as_chunks::<4>().0.iter()
                     .map(|p| {
@@ -77,12 +77,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn converts_luminance_flips_gl_rows_and_preserves_terminal_aspect() {
+    fn preserves_top_down_surface_orientation_and_terminal_aspect() {
         let mut pixels = vec![0; WIDTH * HEIGHT * 4];
-        pixels[..WIDTH * 4].fill(255);
+        // Unequal corner luminances expose vertical and horizontal mirroring.
+        for (x, y, light) in [
+            (0, 0, 255),
+            (WIDTH - 1, 0, 170),
+            (0, HEIGHT - 1, 85),
+        ] {
+            let offset = (y * WIDTH + x) * 4;
+            pixels[offset..offset + 4].fill(light);
+        }
         let sample = VideoPreview::from_rgba(&pixels, 16.0 / 9.0, 1.0).unwrap();
-        assert_eq!(sample.rows[0], " ".repeat(WIDTH));
-        assert_eq!(sample.rows[HEIGHT - 1], "@".repeat(WIDTH));
+        assert_eq!(sample.rows[0].as_bytes()[0], b'@');
+        assert_eq!(sample.rows[0].as_bytes()[WIDTH - 1], b'*');
+        assert_eq!(sample.rows[HEIGHT - 1].as_bytes()[0], b'-');
+        assert_eq!(sample.rows[HEIGHT - 1].as_bytes()[WIDTH - 1], b' ');
+        assert_eq!(sample.fit(WIDTH as u16, HEIGHT as u16)[0].as_bytes()[0], b'@');
         let fitted = sample.fit(80, 30);
         assert_eq!((fitted[0].len(), fitted.len()), (80, 23));
         assert!(sample.fit(0, 1).is_empty());

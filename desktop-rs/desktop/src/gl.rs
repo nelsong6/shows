@@ -417,6 +417,8 @@ impl GlVideo {
             if !complete || error != 0 || !unlocked || !restored {
                 return Err(format!("Video preview capture failed (GL {error:#x})"));
             }
+            // This D3D-shared surface already reads in display order, matching
+            // render()'s FLIP_Y=0. Reversing its rows would invert the preview.
             VideoPreview::from_rgba(&pixels, self.w as f64 / self.h as f64, started.elapsed().as_secs_f64() * 1000.0)
         }
     }
@@ -460,3 +462,53 @@ impl GlVideo {
 
 unsafe impl Send for GlVideo {}
 unsafe impl Sync for GlVideo {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
+    };
+
+    #[test]
+    #[ignore = "Requires a GPU with WGL_NV_DX_interop2 and libmpv-2.dll"]
+    fn preview_preserves_rendered_video_orientation() {
+        let mut device = None;
+        unsafe {
+            D3D11CreateDevice(
+                None, D3D_DRIVER_TYPE_HARDWARE, Default::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION,
+                Some(&mut device), None, None,
+            ).unwrap();
+        }
+        let handle = Arc::new(Handle::create(crate::mpv::Api::load().unwrap()).unwrap());
+        handle.set_property_checked("pause", "yes").unwrap();
+        let video = GlVideo::create(&device.unwrap(), handle.clone(), 160, 90).unwrap();
+        let path = std::env::temp_dir().join(format!("shows-orientation-{}.ppm", std::process::id()));
+        // This image's top half is white and bottom half is black.
+        let mut image = b"P6\n160 90\n255\n".to_vec();
+        image.extend(std::iter::repeat_n(255, 160 * 45 * 3));
+        image.extend(std::iter::repeat_n(0, 160 * 45 * 3));
+        std::fs::write(&path, image).unwrap();
+        let captured = (|| {
+            handle.command_checked(&["loadfile", path.to_str().unwrap()])?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                handle.wait_event(0.01);
+                if video.poll_new_frame() {
+                    video.render();
+                    if handle.get_property("video-params/w").is_some() {
+                        return video.preview();
+                    }
+                }
+            }
+            Err("Timed out rendering the orientation fixture".to_string())
+        })();
+        unsafe { (handle.api.render_context_free)(video.rctx); }
+        std::fs::remove_file(path).unwrap();
+        let captured = captured.unwrap();
+        assert_eq!(captured.rows[10], "@".repeat(160), "white top of the video");
+        assert_eq!(captured.rows[80], " ".repeat(160), "black bottom of the video");
+    }
+}

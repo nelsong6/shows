@@ -86,6 +86,9 @@ round. The target owns playback and all authoritative NAS transactions.
   waits for a window reply time out after 500 ms; no request is
   replayed as a playback action. Terminal sizing preserves the source surface's
   aspect ratio and validates dimensions and printable ASCII before rendering.
+  Preview rows preserve the displayed video's top-to-bottom and left-to-right
+  orientation. The D3D-shared surface is already in display row order; ASCII
+  conversion must not reverse it.
 
 ## Distribution and evidence
 

@@ -52,6 +52,18 @@ Debug artifacts live in `D:\build\shows\cargo` across worktrees. Override with
 `SHOWS_DEV_TARGET_DIR`. Every local Cargo command uses four jobs. The command
 prints rebuild time; it never runs an optimized release build for a preview.
 
+The ASCII preview orientation also has a hardware smoke test. From `desktop-rs`,
+with the installed bundle's `libmpv-2.dll` on PATH, run:
+
+```powershell
+cargo test --locked -j 4 --target-dir D:\build\shows\cargo -p shows-desktop gl::tests::preview_preserves_rendered_video_orientation -- --ignored
+```
+
+It uses a hidden GPU surface and an isolated white-top/black-bottom image,
+without opening a player window or accessing the library. It requires
+`WGL_NV_DX_interop2`, so CI's normal workspace tests leave it ignored; the
+portable conversion test checks all four corners and terminal resizing.
+
 Debug desktops require an explicit HTTP loopback `SHOWS_DEV_URL`, supplied by
 the managed preview. They do not embed `frontend/dist`, so Rust debugging needs
 no frontend build. Releases always embed assets and reject `SHOWS_DEV_URL`.
