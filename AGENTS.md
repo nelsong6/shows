@@ -35,7 +35,6 @@ desktop-rs/           Cargo workspace
       model.rs        persisted row types
       update.rs       Forgejo Releases update check
   control/            shows-control; typed loopback/SSH control protocol and client
-  remote/             shows-remote; terminal remote and SSH agent, no database or player
   desktop/            shows-desktop; Windows shell and the only unsafe code
     src/
       main.rs         process wiring and shared/local database configuration
@@ -78,8 +77,10 @@ Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`.
 
 The control listener is loopback-only at `127.0.0.1:45831` (`SHOWS_CONTROL_PORT`
 overrides the port). `shows-remote` controls an already running desktop over
-existing Windows OpenSSH, using the installed target agent and the same SSE
-status feed. See `docs/feature-contracts/remote-control.md`.
+existing Windows OpenSSH, using the independently installed target agent and the
+same SSE status feed. Its source and releases live in `nelsong6/shows-remote`;
+this repository owns the protocol-1 `shows-control` crate and HTTP endpoints.
+See `docs/feature-contracts/remote-control.md`.
 
 ## New computer setup
 
@@ -98,7 +99,6 @@ Use the fast development loop before opening a PR. See
 
 ```powershell
 .\scripts\dev-shows.ps1 ui -Target upstairspc
-.\scripts\dev-shows.ps1 remote -Target upstairspc status
 .\scripts\dev-shows.ps1 desktop
 .\scripts\dev-shows.ps1 test
 .\scripts\dev-shows.ps1 stop
@@ -127,4 +127,4 @@ remains the hash-verified CI artifact; preview code never replaces it.
 
 ## Release
 
-`.forgejo/workflows/build-desktop.yaml` builds on Windows, embeds the React distribution, bundles `libmpv-2.dll`, and publishes a Forgejo Release. The desktop is not deployed to AKS.
+`.forgejo/workflows/build-desktop.yaml` builds on Windows, embeds the React distribution, bundles `libmpv-2.dll`, and publishes a Forgejo Release. The independent remote is never compiled or bundled here. The desktop is not deployed to AKS.

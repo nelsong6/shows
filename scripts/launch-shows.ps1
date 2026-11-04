@@ -29,7 +29,8 @@ function Install-Version([object]$manifest) {
   if ($manifest.channel -ne $Channel) { throw "Channel manifest is for $($manifest.channel), expected $Channel" }
   if ($manifest.version -notmatch '^[A-Za-z0-9._-]+$') { throw "Unsafe version in manifest" }
   $fileNames = @($manifest.files | ForEach-Object { $_.name })
-  foreach ($required in @("shows-desktop.exe", "shows-remote.exe", "libmpv-2.dll")) {
+  if ($fileNames.Count -ne 2) { throw 'The desktop bundle must contain only the player and libmpv' }
+  foreach ($required in @("shows-desktop.exe", "libmpv-2.dll")) {
     if ($required -notin $fileNames) { throw "Manifest is missing $required" }
   }
 
@@ -92,12 +93,8 @@ $selectedDir = Join-Path $versions $selectedVersion
 $exe = Join-Path $selectedDir "shows-desktop.exe"
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Installed executable is missing: $exe" }
 
-$agents = Join-Path $InstallRoot 'agents'
-New-Item -ItemType Directory -Force -Path $agents | Out-Null
-$agentTemp = Join-Path $agents "$Channel.$([guid]::NewGuid().ToString('N')).tmp"
-$agentCommand = '@"%~dp0..\versions\' + $selectedVersion + '\shows-remote.exe" --agent' + "`r`n"
-[IO.File]::WriteAllText($agentTemp, $agentCommand, (New-Object Text.UTF8Encoding $false))
-Move-Item -Force -LiteralPath $agentTemp -Destination (Join-Path $agents "$Channel.cmd")
+$retiredAgent = Join-Path $InstallRoot "agents\$Channel.cmd"
+if (Test-Path -LiteralPath $retiredAgent -PathType Leaf) { Remove-Item -LiteralPath $retiredAgent }
 
 # Expose the verified version as a native entry point, following the home tools'
 # version/current junction model. Never remove a real directory or its contents.

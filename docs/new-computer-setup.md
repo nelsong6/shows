@@ -38,9 +38,10 @@ builds. The shortcut checks the channel manifest before every launch, verifies
 the bundle hashes, installs it into a new versioned local directory, retains the
 previous version for rollback, and starts the local executable.
 
-The installer also installs the `shows-remote` terminal command. After updating
-both PCs, `shows-remote upstairspc` controls the already running upstairs instance
-over SSH. See [Shows Remote](shows-remote.md).
+Shows remote is installed separately from its own signed release on both the
+controller and target PC. It exposes `shows-remote` and its SSH agent at
+`%LOCALAPPDATA%\shows-remote\channels\stable`. The desktop installer does not
+install or update it. See [Shows Remote](shows-remote.md).
 
 ## Publish a build
 

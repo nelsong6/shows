@@ -21,10 +21,8 @@ $nativeBin = Join-Path $installRoot "channels\$Channel"
 $oldCommand = Join-Path $bin 'shows-remote.cmd'
 if (Test-Path -LiteralPath $oldCommand -PathType Leaf) { Remove-Item -LiteralPath $oldCommand -Force }
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($nativeBin -notin ($userPath -split ';')) {
-  [Environment]::SetEnvironmentVariable("Path", ($nativeBin + ';' + $userPath), "User")
-}
-if ($nativeBin -notin ($env:Path -split ';')) { $env:Path = $nativeBin + ';' + $env:Path }
+[Environment]::SetEnvironmentVariable('Path', (($userPath -split ';' | Where-Object { $_ -and $_ -ine $nativeBin }) -join ';'), 'User')
+$env:Path = ($env:Path -split ';' | Where-Object { $_ -and $_ -ine $nativeBin }) -join ';'
 
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($ShortcutPath)
@@ -35,7 +33,6 @@ $shortcut.IconLocation = "shell32.dll,137"
 $shortcut.Save()
 
 Write-Host "Installed $Channel Shows launcher at $ShortcutPath"
-Write-Host "Installed native shows-remote at $nativeBin"
 if ($DevelopmentRepo) {
   $developmentScript = Join-Path ([IO.Path]::GetFullPath($DevelopmentRepo)) 'scripts\dev-shows.ps1'
   if (-not (Test-Path -LiteralPath $developmentScript)) { throw "Development entry point is missing: $developmentScript" }

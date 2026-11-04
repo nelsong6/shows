@@ -87,9 +87,7 @@ try {
     if (-not $before) { throw 'Running Shows instance did not provide a status snapshot; it was left running' }
   }
   & (Join-Path $NasRoot 'install-shows-launcher.ps1') -Channel $Channel -NasRoot $NasRoot
-  $log = Join-Path $env:TEMP ('shows-update-' + [guid]::NewGuid().ToString('N'))
-  $selection = Start-Process -FilePath (Join-Path $install "channels\$Channel\shows-remote.exe") -ArgumentList '--version' -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput ($log + '.out') -RedirectStandardError ($log + '.err')
-  if ($selection.ExitCode -ne 0) { throw (Get-Content -Raw -LiteralPath ($log + '.err')) }
+  if (-not (Test-Path -LiteralPath (Join-Path $install "channels\$Channel\shows-desktop.exe"))) { throw 'Verified desktop entry point is missing' }
   $state = Get-Content -Raw -LiteralPath (Join-Path $install "launcher-state-$Channel.json") | ConvertFrom-Json
   $manifest = Get-Content -Raw -LiteralPath (Join-Path $NasRoot "channels\$Channel.json") | ConvertFrom-Json
   if ($state.current -ne $manifest.version) { throw 'The selected version does not match the channel' }

@@ -8,7 +8,7 @@ without running an executable from the network share.
 - **P1. Immutable versions.** A version is published once under
   `shows-app/versions/<version>` and is never overwritten.
 - **P2. Complete before visible.** The publisher stages the executable and
-  terminal companion and libmpv runtime, records their SHA-256 hashes and lengths, then moves the whole
+  libmpv runtime, records their SHA-256 hashes and lengths, then moves the whole
   bundle into `versions`. Only afterward does it replace the channel manifest.
 - **P3. Explicit channels.** `stable` and `dev` have independent manifests.
   Computers opt into one channel through their shortcut.
@@ -17,7 +17,7 @@ without running an executable from the network share.
   only ever carries a build CI produced from `main`. Dev builds are local and
   add a publication timestamp so repeated builds of one revision remain
   immutable.
-- **P5. Signed Windows binaries.** CI signs both executables and libmpv with the
+- **P5. Signed Windows binaries.** CI signs the desktop executable and libmpv with the
   existing home code-signing identity, verifies Authenticode and its pinned
   thumbprint, then archives the signed files. Manifests hash the signed bytes.
 
@@ -36,18 +36,12 @@ without running an executable from the network share.
   the previous version directory is not deleted during an update.
 - **I6. Local execution.** The selected executable starts from its local version
   directory so video startup does not depend on executing binaries over SMB.
-- **I7. Terminal companion.** Every new bundle includes `shows-remote.exe`.
-  Installation verifies the bundle and exposes it at
-  `%LOCALAPPDATA%\shows\channels\<channel>` through a version junction. The
-  at-menu entry starts `shows-remote.exe` there directly as an OS process, with
-  no shell or batch launcher. The installer adds that directory to user PATH
-  and removes the old shell entry point. Interactive startup sets the window
-  title to `Shows remote`; agent protocol and one-shot output contain no title
-  escape sequences. Setup/updates maintain the native pointer; ordinary remote
-  startup performs no installation or PowerShell invocation. Updates switch
-  only junctions, retaining immutable version directories and running binaries.
-  Version selection also writes a native `agents/<channel>.cmd` entry point
-  so SSH can start the installed agent with stdin/stdout preserved.
+- **I7. Independent terminal client.** Desktop bundles contain only
+  `shows-desktop.exe` and `libmpv-2.dll`. The remote is built, signed and installed
+  by [its own repository](https://forgejo.romaine.life/nelsong6/shows-remote).
+  Desktop installation removes the retired `agents/<channel>.cmd` entry point
+  and its remote PATH entry; it never installs a client or agent. The new client
+  and player interoperate through protocol 1 despite independent release SHAs.
 
 ## Automated updates
 

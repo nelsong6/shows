@@ -9,8 +9,6 @@ From a Shows worktree, use `shows-dev` (installed with
 
 ```powershell
 shows-dev ui -Target upstairspc
-shows-dev remote -Target upstairspc status
-shows-dev remote -Target upstairspc
 shows-dev desktop
 shows-dev test
 shows-dev stop
@@ -35,14 +33,9 @@ SSH child ends the preview process so devctl's bounded restart policy owns
 recovery. `devctl list`, `devctl logs <name>` and `devctl stop <name>` remain
 authoritative; no separate tunnel or dev-server process is left untracked.
 
-## Rust and terminal edits
+## Rust edits
 
-`remote` compiles only `shows-remote` and its dependencies in debug mode, then
-runs the requested command or interactive terminal. It runs the newly compiled
-agent locally through a tracked SSH preview bridge, so agent changes can be
-tried immediately without installing another TV executable. A bridge started by
-the command stops when that command exits; an existing matching preview is
-reused. Release clients continue to use the target's installed agent.
+The terminal remote has its own [repository and development entry point](https://forgejo.romaine.life/nelsong6/shows-remote).
 `desktop` builds the native
 shell and starts it under the tracked Vite environment. Native previews start
 paused and use the real local engine/cache; the first media cache pass may take

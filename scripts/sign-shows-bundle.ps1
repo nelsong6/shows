@@ -10,7 +10,7 @@ try {
   if ($certificate.Thumbprint -ne $expected -or -not $certificate.HasPrivateKey) { throw 'Unexpected home signing certificate' }
   # The Windows runner already trusts the home identity. Do not mutate its shared
   # trust stores: CurrentUser Root changes require an interactive Windows session.
-  foreach ($name in @('shows-desktop.exe','shows-remote.exe','libmpv-2.dll')) {
+  foreach ($name in @('shows-desktop.exe','libmpv-2.dll')) {
     $file = Join-Path $BundleDirectory $name
     $signature = Set-AuthenticodeSignature -FilePath $file -Certificate $certificate -HashAlgorithm SHA256
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Thumbprint -ne $expected) { throw "Signing verification failed for $name`: $($signature.Status)" }

@@ -160,7 +160,7 @@ impl Client {
             format!("Shows is not available on this PC. Open the current Shows release first. {e}")
         })?;
         if info["application"] != "shows-desktop" || info["protocol"] != PROTOCOL_VERSION {
-            return Err("This listener is not a compatible Shows desktop. Update Shows and shows-remote together.".into());
+            return Err(format!("This listener is not a compatible Shows desktop: the client requires control protocol {PROTOCOL_VERSION}."));
         }
         Ok(client)
     }

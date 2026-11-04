@@ -29,6 +29,6 @@ jobs:
       # / apiclient / oauth / sync / runner / model) runs fine on Linux. This
       # is the cheap per-PR sanity check; the Windows-only shell goes through
       # `build-desktop.yaml`.
-      - name: Test engine, control protocol and terminal remote
+      - name: Test engine and control protocol
         working-directory: desktop-rs
-        run: cargo test -p shows-core -p shows-control -p shows-remote --locked
+        run: cargo test -p shows-core -p shows-control --locked

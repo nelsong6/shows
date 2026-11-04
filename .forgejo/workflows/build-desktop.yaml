@@ -86,12 +86,12 @@ jobs:
         run: |
           $env:SHOWS_BUILD_SHA = (git rev-parse --short=7 HEAD).Trim()
           $env:SHOWS_UPDATE_CHANNEL = 'stable'
-          cargo build --release --locked -p shows-desktop -p shows-remote
+          cargo build --release --locked -p shows-desktop
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-      - name: Verify terminal channel installation
+      - name: Verify desktop channel installation
         run: |
-          ./scripts/test-remote-distribution.ps1
+          ./scripts/test-desktop-distribution.ps1
           foreach ($file in Get-ChildItem scripts/*.ps1) {
             $tokens = $null; $parseErrors = $null
             [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
@@ -103,7 +103,6 @@ jobs:
           $out = 'desktop-rs/dist/shows-desktop'
           New-Item -ItemType Directory -Force $out | Out-Null
           Copy-Item desktop-rs/target/release/shows-desktop.exe "$out/"
-          Copy-Item desktop-rs/target/release/shows-remote.exe "$out/"
           Copy-Item desktop-rs/desktop/third_party/libmpv/libmpv-2.dll "$out/"
 
 

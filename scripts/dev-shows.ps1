@@ -1,11 +1,10 @@
 #Requires -Version 7.0
 [CmdletBinding(PositionalBinding = $false)]
 param(
-  [Parameter(Position=0)][ValidateSet('ui','desktop','remote','test','stop','status','ship')][string]$Mode = 'ui',
+  [Parameter(Position=0)][ValidateSet('ui','desktop','test','stop','status','ship')][string]$Mode = 'ui',
   [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$')][string]$Target = 'upstairspc',
   [string]$Name = 'shows-preview',
-  [string]$RepoRoot,
-  [Parameter(ValueFromRemainingArguments=$true)][string[]]$RemoteArgs
+  [string]$RepoRoot
 )
 $ErrorActionPreference = 'Stop'
 if (-not $RepoRoot) {
@@ -72,39 +71,19 @@ if ($Mode -eq 'desktop' -and (Get-Process -Name shows-desktop -ErrorAction Silen
   if ($LASTEXITCODE -ne 0) { throw 'Could not stop the owned native preview before rebuilding' }
 }
 $previousEnvironment = @{}
-foreach ($variable in @('CARGO_TARGET_DIR','SHOWS_DEV_TARGET','SHOWS_DEV_DESKTOP_EXE','SHOWS_CONTROL_PORT','SHOWS_REMOTE_DEV_AGENT')) { $previousEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable, 'Process') }
-$ownedRemotePreview = $null
+foreach ($variable in @('CARGO_TARGET_DIR','SHOWS_DEV_TARGET','SHOWS_DEV_DESKTOP_EXE','SHOWS_CONTROL_PORT')) { $previousEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable, 'Process') }
+
 try {
 [Environment]::SetEnvironmentVariable('SHOWS_DEV_DESKTOP_EXE', $null, 'Process')
-if ($Mode -in @('remote','desktop','test')) {
+if ($Mode -in @('desktop','test')) {
   $env:CARGO_TARGET_DIR = $cache
   $arguments = @('--manifest-path', (Join-Path $workspace 'Cargo.toml'), '-j', '4', '--locked')
   $started = [Diagnostics.Stopwatch]::StartNew()
   if ($Mode -eq 'test') { & cargo.exe test @arguments --workspace; exit $LASTEXITCODE }
-  $package = if ($Mode -eq 'remote') { 'shows-remote' } else { 'shows-desktop' }
+  $package = 'shows-desktop'
   & cargo.exe build @arguments -p $package
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   Write-Host ("Incremental {0} build: {1:N2}s" -f $package, $started.Elapsed.TotalSeconds)
-  if ($Mode -eq 'remote') {
-    if ($Target -ne 'local') {
-      $bridgeName = $Name + '-remote'
-      $bridge = & devctl.exe list $bridgeName -Json | ConvertFrom-Json
-      $bridge = @($bridge)[0]
-      if ($bridge.status -in @('stopped','failed')) { $bridge = $null }
-      if (-not $bridge.port) {
-        & $PSCommandPath ui -Target $Target -Name $bridgeName -RepoRoot $RepoRoot
-        if ($LASTEXITCODE -ne 0) { throw 'Could not start the tracked remote development bridge' }
-        $ownedRemotePreview = $bridgeName
-        $bridge = @(& devctl.exe list $bridgeName -Json | ConvertFrom-Json)[0]
-      }
-      $health = Invoke-RestMethod "http://127.0.0.1:$($bridge.port)/__devctl/health" -TimeoutSec 2
-      if ($health.target -ne $Target -or [IO.Path]::GetFullPath($health.repo_dir) -ne [IO.Path]::GetFullPath($workspace)) { throw 'The named preview belongs to another target or worktree' }
-      $env:SHOWS_CONTROL_PORT = [string]$bridge.port
-    }
-    $env:SHOWS_REMOTE_DEV_AGENT = '1'
-    & (Join-Path $cache 'debug\shows-remote.exe') $Target @RemoteArgs
-    exit $LASTEXITCODE
-  }
   $Target = 'local'
   if (Get-Process -Name shows-desktop -ErrorAction SilentlyContinue) { throw 'Close Shows on this PC before starting its native desktop preview; ui mode can control the existing instance' }
   $env:SHOWS_DEV_DESKTOP_EXE = Join-Path $cache 'debug\shows-desktop.exe'
@@ -126,6 +105,5 @@ $env:SHOWS_DEV_TARGET = $Target
 & devctl.exe up frontend -Name $Name -Cwd $frontend -Project shows
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 } finally {
-  if ($ownedRemotePreview) { & devctl.exe stop $ownedRemotePreview | Out-Null }
   foreach ($variable in $previousEnvironment.Keys) { [Environment]::SetEnvironmentVariable($variable, $previousEnvironment[$variable], 'Process') }
 }

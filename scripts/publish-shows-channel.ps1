@@ -71,7 +71,6 @@ if ($Channel -eq "stable") {
   Expand-Archive -LiteralPath (Join-Path $download "shows-desktop-windows-amd64.zip") -DestinationPath (Join-Path $download "bundle")
   $exe = Join-Path $download "bundle\shows-desktop.exe"
   $LibmpvPath = Join-Path $download "bundle\libmpv-2.dll"
-  $remoteExe = Join-Path $download "bundle\shows-remote.exe"
 } else {
   if (-not $Version) {
     $sha = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()
@@ -81,7 +80,6 @@ if ($Channel -eq "stable") {
   $workspace = Join-Path $RepoRoot "desktop-rs"
   $frontend = Join-Path $workspace "frontend"
   $exe = Join-Path $workspace "target\release\shows-desktop.exe"
-  $remoteExe = Join-Path $workspace "target\release\shows-remote.exe"
 }
 if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid version: $Version" }
 
@@ -94,7 +92,7 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
   try {
     $env:SHOWS_BUILD_SHA = $Version
     $env:SHOWS_UPDATE_CHANNEL = $Channel
-    cargo build --release -p shows-desktop -p shows-remote
+    cargo build --release -p shows-desktop
     if ($LASTEXITCODE -ne 0) { throw "Desktop build failed" }
   } finally {
     Remove-Item Env:SHOWS_BUILD_SHA -ErrorAction SilentlyContinue
@@ -103,7 +101,7 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
   }
 }
 
-foreach ($required in @($exe, $remoteExe, $LibmpvPath, $launcher, $installer)) {
+foreach ($required in @($exe, $LibmpvPath, $launcher, $installer)) {
   if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Missing required file: $required" }
 }
 
@@ -116,8 +114,8 @@ $stage = Join-Path $stagingRoot ([guid]::NewGuid().ToString("N"))
 $destination = Join-Path $versions $Version
 if (Test-Path -LiteralPath $destination) {
   $existing = Get-Content -Raw -LiteralPath (Join-Path $destination 'manifest.json') | ConvertFrom-Json
-  $sources = @{'shows-desktop.exe'=$exe; 'shows-remote.exe'=$remoteExe; 'libmpv-2.dll'=$LibmpvPath}
-  if (@($existing.files).Count -ne 3) { throw 'Previously published version has an incomplete manifest' }
+  $sources = @{'shows-desktop.exe'=$exe; 'libmpv-2.dll'=$LibmpvPath}
+  if (@($existing.files).Count -ne 2) { throw 'Previously published desktop version has an unexpected manifest' }
   foreach ($name in $sources.Keys) {
     $file = @($existing.files | Where-Object name -eq $name)
     if ($file.Count -ne 1) { throw "Previously published version is missing $name" }
@@ -144,11 +142,10 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 
 try {
   Copy-Item -LiteralPath $exe -Destination (Join-Path $stage "shows-desktop.exe")
-  Copy-Item -LiteralPath $remoteExe -Destination (Join-Path $stage "shows-remote.exe")
   Copy-Item -LiteralPath $LibmpvPath -Destination (Join-Path $stage "libmpv-2.dll")
 
   $files = @()
-  foreach ($name in @("shows-desktop.exe", "shows-remote.exe", "libmpv-2.dll")) {
+  foreach ($name in @("shows-desktop.exe", "libmpv-2.dll")) {
     $path = Join-Path $stage $name
     $files += [ordered]@{
       name = $name
