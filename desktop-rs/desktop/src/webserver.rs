@@ -1,4 +1,4 @@
-//! Localhost control server backing the web overlay. Serves the built React
+//! Control servers. The localhost one backs the web overlay and serves the built React
 //! bundle and a same-origin control surface: the overlay subscribes to
 //! `/status/stream`, can read a one-shot `/status` snapshot, reads `/shows`,
 //! `/stats`, `/history`, and POSTs `/pause` `/skip` `/prev` `/defer` `/seek`
@@ -14,6 +14,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
+use shows_core::remote_token::TokenChecker;
 use shows_core::replica::Replica;
 use shows_core::runner::{ControlOutcome, Runner};
 use shows_core::scan;
@@ -244,6 +245,7 @@ pub struct ControlServer {
     on_window_action: Mutex<Option<WindowActionCb>>,
     on_preview: Mutex<Option<PreviewCb>>,
     preview_cache: Mutex<Option<(std::time::Instant, shows_control::preview::VideoPreview)>>,
+    remote_tokens: TokenChecker,
 }
 
 impl ControlServer {
@@ -276,6 +278,7 @@ impl ControlServer {
             on_window_action: Mutex::new(None),
             on_preview: Mutex::new(None),
             preview_cache: Mutex::new(None),
+            remote_tokens: TokenChecker::openbao(),
         })
     }
 
@@ -333,20 +336,69 @@ impl ControlServer {
         let address = shows_control::control_addr().expect("invalid Shows control port");
         let server = Server::http(&address).expect("bind Shows loopback control server");
         let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
+        self.serve(server, "control", Self::handle);
+        match shows_control::remote_port().and_then(|remote| {
+            Server::http(("0.0.0.0", remote)).map_err(|e| format!("port {remote}: {e}"))
+        }) {
+            Ok(remote) => self.serve(remote, "remote", Self::handle_remote),
+            // Playback on this PC doesn't need it; a remote elsewhere reports it can't connect.
+            Err(message) => log::error!("remote control port unavailable: {message}"),
+        }
+        port
+    }
+
+    fn serve(self: &Arc<Self>, server: Server, name: &str, handler: fn(&Arc<Self>, Request)) {
         let this = self.clone();
+        let requests = format!("{name}-request");
         std::thread::Builder::new()
-            .name("control-server".into())
+            .name(format!("{name}-server"))
             .spawn(move || {
                 for request in server.incoming_requests() {
                     let req_server = this.clone();
                     std::thread::Builder::new()
-                        .name("control-request".into())
-                        .spawn(move || req_server.handle(request))
+                        .name(requests.clone())
+                        .spawn(move || handler(&req_server, request))
                         .expect("spawn control request");
                 }
             })
             .expect("spawn control server");
-        port
+    }
+
+    /// The network port: the remote's routes alone, each behind a token OpenBao signed.
+    /// Library, window and overlay routes stay on the loopback port.
+    fn handle_remote(self: &Arc<Self>, request: Request) {
+        if request.headers().iter().any(|h| h.field.equiv("Origin")) {
+            return respond_json(request, 403, &json!({"ok": false, "message": "remote controls require a native client"}));
+        }
+        let token = request.headers().iter()
+            .find(|h| h.field.equiv("Authorization"))
+            .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
+            .unwrap_or("")
+            .to_owned();
+        if let Err(message) = self.remote_tokens.check(&token) {
+            log::warn!("remote request refused from {:?}: {message}", request.remote_addr());
+            return respond_json(request, 401, &json!({"ok": false, "message": format!("Shows refused this remote: {message}")}));
+        }
+        let method = request.method().clone();
+        let path = request.url().split('?').next().unwrap_or("").to_string();
+        match (&method, path.as_str()) {
+            (Method::Get, "/remote/info") => respond_json(request, 200, &Self::remote_info()),
+            (Method::Get, "/status") => respond_json(request, 200, &self.status_json()),
+            (Method::Get, "/status/stream") => self.status_stream(request),
+            (Method::Get, "/remote/preview") => self.video_preview(request),
+            (Method::Post, "/remote/control") => self.remote_control(request),
+            _ => respond_json(request, 404, &json!({"ok": false, "message": "not a remote route"})),
+        }
+    }
+
+    fn remote_info() -> Value {
+        json!({
+            "application": "shows-desktop",
+            "protocol": shows_control::PROTOCOL_VERSION,
+            "build": option_env!("SHOWS_BUILD_SHA").unwrap_or("source"),
+            "computer": std::env::var("COMPUTERNAME").unwrap_or_default(),
+            "pid": std::process::id(),
+        })
     }
 
     fn handle(self: &Arc<Self>, request: Request) {
@@ -361,13 +413,7 @@ impl ControlServer {
                 respond(request, 200, self.index_html(), "text/html; charset=utf-8")
             }
             (Method::Get, "/status") => respond_json(request, 200, &self.status_json()),
-            (Method::Get, "/remote/info") => respond_json(request, 200, &json!({
-                "application": "shows-desktop",
-                "protocol": shows_control::PROTOCOL_VERSION,
-                "build": option_env!("SHOWS_BUILD_SHA").unwrap_or("source"),
-                "computer": std::env::var("COMPUTERNAME").unwrap_or_default(),
-                "pid": std::process::id(),
-            })),
+            (Method::Get, "/remote/info") => respond_json(request, 200, &Self::remote_info()),
             (Method::Get, "/status/stream") => self.status_stream(request),
             (Method::Get, "/remote/preview") => self.video_preview(request),
             (Method::Get, "/shows") => {
@@ -1598,6 +1644,82 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(control.status_json(), before);
         assert_eq!(control.replica.revision(), revision);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn the_network_port_serves_only_the_remotes_routes_and_only_with_a_token() {
+        use std::io::Write;
+        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+        let listener = Server::http("127.0.0.1:0").unwrap();
+        let address = listener.server_addr().to_string();
+        let requests = [
+            ("GET /status", "", "401"),
+            ("GET /status", "Authorization: Bearer forged\r\n", "401"),
+            ("POST /window/close", "", "401"),
+            ("GET /status", "Origin: https://example.com\r\n", "403"),
+        ];
+        let copy = control.clone();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..requests.len() {
+                copy.handle_remote(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+            }
+        });
+        for (line, headers, code) in requests {
+            let mut socket = std::net::TcpStream::connect(&address).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            write!(socket, "{line} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{headers}Content-Length: 0\r\n\r\n").unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with(&format!("HTTP/1.1 {code}")), "{line}: {response}");
+        }
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_valid_token_reaches_the_remotes_routes_and_nothing_else() {
+        use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+        use std::io::Write;
+        const KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgKL/xHHDaM1YrKnv2
+mDuMrlN4kCyK6H6Zctd4R+n5AAmhRANCAAS5N+qDIf54e0j5JWN5q2/oG8JJm9YN
+RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
+-----END PRIVATE KEY-----
+";
+        let mut control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+        Arc::get_mut(&mut control).unwrap().remote_tokens = TokenChecker::with_fetch(Box::new(|| {
+            serde_json::from_value(json!({"keys":[{"kty":"EC","crv":"P-256","use":"sig","alg":"ES256","kid":"k1",
+                "x":"uTfqgyH-eHtI-SVjeatv6BvCSZvWDUV3BJcMeDc8yI4","y":"t405O4-jzrRWb1wqKOBc8LFqbBj5_gu3fa4P82q6sBY"}]}))
+                .map_err(|e| e.to_string())
+        }));
+        let mut header = Header::new(Algorithm::ES256);
+        header.kid = Some("k1".into());
+        let claims = json!({"aud":"shows","iss":shows_core::remote_token::ISSUER,"exp":chrono::Utc::now().timestamp() + 300});
+        let token = encode(&header, &claims, &EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap()).unwrap();
+        let listener = Server::http("127.0.0.1:0").unwrap();
+        let address = listener.server_addr().to_string();
+        let requests = [
+            ("GET /remote/info", "200"),
+            ("GET /status", "200"),
+            ("POST /window/close", "404"),
+            ("POST /library/add", "404"),
+            ("GET /library/browse", "404"),
+            ("GET /", "404"),
+        ];
+        let copy = control.clone();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..requests.len() {
+                copy.handle_remote(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+            }
+        });
+        for (line, code) in requests {
+            let mut socket = std::net::TcpStream::connect(&address).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            write!(socket, "{line} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n").unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with(&format!("HTTP/1.1 {code}")), "{line}: {response}");
+        }
         worker.join().unwrap();
     }
 

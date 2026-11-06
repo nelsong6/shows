@@ -1,6 +1,6 @@
 # Desktop remote-control boundary
 
-The independent [shows-remote client and SSH agent](https://forgejo.romaine.life/nelsong6/shows-remote)
+The independent [shows-remote client](https://forgejo.romaine.life/nelsong6/shows-remote)
 control an already running desktop. The desktop remains the sole owner of
 playback, the authoritative NAS database, round transitions and GPU captures.
 Client UI, transport, packaging and installation belong to the remote repository.
@@ -12,13 +12,21 @@ Client UI, transport, packaging and installation belong to the remote repository
   remote consumes an immutable revision; release SHAs do not have to match.
 - `GET /remote/info` identifies `shows-desktop` and its supported protocol before
   any controls. A missing, stopped or different listener fails explicitly.
-- The listener is loopback-only at `127.0.0.1:45831`; `SHOWS_CONTROL_PORT` selects
-  an explicit nonzero port for isolated development. There is no LAN listener.
+- The overlay's listener is loopback-only at `127.0.0.1:45831`; `SHOWS_CONTROL_PORT`
+  selects an explicit nonzero port for isolated development.
+- The network listener at `0.0.0.0:45832` (`SHOWS_REMOTE_PORT`) serves only
+  `/remote/info`, `/status`, `/status/stream`, `/remote/preview` and `/remote/control`.
+  Library, window and overlay routes are not reachable from it. home-sync's firewall rule
+  limits it to the local subnet.
+- Every network request carries a token OpenBao signed (role `shows`, audience `shows`,
+  five minutes), which the player checks itself against OpenBao's published keys, fetched
+  when a token names a key it hasn't seen. Browser Origin headers are refused. An open
+  status stream outlives its token. Traffic is plain HTTP: the token proves who the
+  remote is, and a token seen on the home network is usable until it expires.
 - `POST /remote/control` accepts typed playback and fullscreen commands, requires
   JSON, and rejects browser Origin headers. It exposes no filesystem browsing,
   shell execution, library import or other window actions.
-- The independent SSH agent runs from its independently installed native remote
-  channel. The desktop creates no agent command, client PATH entry or client binary.
+- The desktop creates no client command, PATH entry or binary.
 
 ## Playback and acknowledgements
 
@@ -42,7 +50,7 @@ Client UI, transport, packaging and installation belong to the remote repository
 
 `GET /remote/preview` samples the already rendered GPU video surface, downscaling
 to 160 by 90 before CPU readback. It opens no extra decoder or file and changes
-no playback or NAS state. The loopback-only route rejects browser Origin headers.
+no playback or NAS state. The route rejects browser Origin headers on both listeners.
 Successful captures are shared for 250 ms; concurrent captures fail explicitly
 rather than queuing. Window replies time out after 500 ms. Hidden or minimized
 windows report unavailability instead of returning stale video.

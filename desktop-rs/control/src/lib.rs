@@ -1,7 +1,8 @@
-//! The loopback control contract shared by the desktop and terminal companion.
+//! The control contract shared by the desktop and terminal companion.
 #![forbid(unsafe_code)]
 
 use std::io::{BufRead, BufReader, Read};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,9 @@ use serde_json::{Value, json};
 pub mod preview;
 
 pub const CONTROL_ADDR: &str = "127.0.0.1:45831";
+/// The player's network port, for a remote on another PC. It serves only the remote's
+/// routes, each needing a token OpenBao signed.
+pub const REMOTE_PORT: u16 = 45832;
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_FRAME: u64 = 1024 * 1024;
 
@@ -45,6 +49,18 @@ pub fn control_addr() -> Result<String, String> {
         }
         Err(std::env::VarError::NotPresent) => Ok(CONTROL_ADDR.into()),
         Err(_) => Err("SHOWS_CONTROL_PORT is not valid Unicode".into()),
+    }
+}
+
+pub fn remote_port() -> Result<u16, String> {
+    match std::env::var("SHOWS_REMOTE_PORT") {
+        Ok(port) => port
+            .parse()
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| "SHOWS_REMOTE_PORT must be a port from 1 to 65535".to_string()),
+        Err(std::env::VarError::NotPresent) => Ok(REMOTE_PORT),
+        Err(_) => Err("SHOWS_REMOTE_PORT is not valid Unicode".into()),
     }
 }
 
@@ -128,10 +144,14 @@ pub fn read_line(reader: &mut impl BufRead) -> Result<Option<String>, String> {
     if n == 0 { Ok(None) } else { Ok(Some(line)) }
 }
 
+/// Gets a current token for each request to another PC; it renews its own.
+pub type TokenSource = Arc<dyn Fn() -> Result<String, String> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Client {
     base: String,
     agent: ureq::Agent,
+    token: Option<TokenSource>,
 }
 
 impl Client {
@@ -146,8 +166,19 @@ impl Client {
         if !address.ip().is_loopback() {
             return Err("control HTTP connections must stay on loopback".into());
         }
+        Self::identified(format!("http://{address}"), None).map_err(|e| {
+            format!("Shows is not available on this PC. Open the current Shows release first. {e}")
+        })
+    }
+
+    /// Connects to the player on another PC, at `host:port`, with that PC's network port.
+    pub fn connect_remote(authority: &str, token: TokenSource) -> Result<Self, String> {
+        Self::identified(format!("http://{authority}"), Some(token))
+    }
+
+    fn identified(base: String, token: Option<TokenSource>) -> Result<Self, String> {
         let client = Self {
-            base: format!("http://{address}"),
+            base,
             agent: ureq::Agent::config_builder()
                 .proxy(None)
                 .max_redirects(0)
@@ -155,10 +186,9 @@ impl Client {
                 .timeout_global(Some(Duration::from_secs(8)))
                 .build()
                 .into(),
+            token,
         };
-        let info = client.get("/remote/info").map_err(|e| {
-            format!("Shows is not available on this PC. Open the current Shows release first. {e}")
-        })?;
+        let info = client.get("/remote/info")?;
         if info["application"] != "shows-desktop" || info["protocol"] != PROTOCOL_VERSION {
             return Err(format!("This listener is not a compatible Shows desktop: the client requires control protocol {PROTOCOL_VERSION}."));
         }
@@ -184,13 +214,19 @@ impl Client {
         Ok(value)
     }
 
+    fn bearer(&self) -> Result<Option<String>, String> {
+        self.token
+            .as_ref()
+            .map(|token| token().map(|value| format!("Bearer {value}")))
+            .transpose()
+    }
+
     fn get(&self, path: &str) -> Result<Value, String> {
-        let response = self
-            .agent
-            .get(format!("{}{path}", self.base))
-            .call()
-            .map_err(|e| e.to_string())?;
-        self.decode(response)
+        let mut request = self.agent.get(format!("{}{path}", self.base));
+        if let Some(value) = self.bearer()? {
+            request = request.header("Authorization", value);
+        }
+        self.decode(request.call().map_err(|e| e.to_string())?)
     }
 
     pub fn execute(&self, command: &Command) -> Result<Value, String> {
@@ -201,10 +237,14 @@ impl Client {
             Command::Preview {} => self.get("/remote/preview"),
             Command::Watch {} => Err("watch requires a status stream".into()),
             _ => {
-                let response = self
+                let mut request = self
                     .agent
                     .post(format!("{}/remote/control", self.base))
-                    .header("Content-Type", "application/json")
+                    .header("Content-Type", "application/json");
+                if let Some(value) = self.bearer()? {
+                    request = request.header("Authorization", value);
+                }
+                let response = request
                     .send(serde_json::to_vec(command).map_err(|e| e.to_string())?)
                     .map_err(|e| {
                         format!("Control outcome is unknown; check status before retrying. {e}")
@@ -226,10 +266,14 @@ impl Client {
             .timeout_connect(Some(Duration::from_secs(8)))
             .build()
             .into();
-        let response = agent
-            .get(format!("{}/status/stream", self.base))
-            .call()
-            .map_err(|e| e.to_string())?;
+        let mut request = agent.get(format!("{}/status/stream", self.base));
+        if let Some(value) = self.bearer()? {
+            request = request.header("Authorization", value);
+        }
+        let response = request.call().map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("Shows refused its status stream: {}", response.status()));
+        }
         let mut reader = BufReader::new(response.into_body().into_reader());
         let mut event = String::new();
         let mut data = String::new();

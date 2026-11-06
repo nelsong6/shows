@@ -34,7 +34,7 @@ desktop-rs/           Cargo workspace
       runner.rs       round-robin runner and local media cache orchestration
       model.rs        persisted row types
       update.rs       Forgejo Releases update check
-  control/            shows-control; typed loopback/SSH control protocol and client
+  control/            shows-control; typed control protocol and client
   desktop/            shows-desktop; Windows shell and the only unsafe code
     src/
       main.rs         process wiring and shared/local database configuration
@@ -75,12 +75,12 @@ The localhost control server exposes `GET /status/stream` as the React overlay's
 
 Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`.
 
-The control listener is loopback-only at `127.0.0.1:45831` (`SHOWS_CONTROL_PORT`
-overrides the port). `shows-remote` controls an already running desktop over
-existing Windows OpenSSH, using the independently installed target agent and the
-same SSE status feed. Its source and releases live in `nelsong6/shows-remote`;
-this repository owns the protocol-1 `shows-control` crate and HTTP endpoints.
-See `docs/feature-contracts/remote-control.md`.
+The overlay's control listener is loopback-only at `127.0.0.1:45831` (`SHOWS_CONTROL_PORT`
+overrides the port). `shows-remote` controls an already running desktop from another PC
+at the network listener on port 45832 (`SHOWS_REMOTE_PORT`), which serves only the
+remote's routes and needs a token OpenBao signed. Its source and releases live in
+`nelsong6/shows-remote`; this repository owns the protocol-1 `shows-control` crate and
+HTTP endpoints. See `docs/feature-contracts/remote-control.md`.
 
 ## New computer setup
 
