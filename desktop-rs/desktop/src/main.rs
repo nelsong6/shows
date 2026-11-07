@@ -69,6 +69,22 @@ fn log_path() -> std::path::PathBuf {
     dir.join("shows.log")
 }
 
+/// One log line for a panic: its message, source location and thread.
+fn panic_record(thread: Option<&str>, info: &std::panic::PanicHookInfo<'_>) -> String {
+    format!("panic on thread {}: {info}", thread.unwrap_or("<unnamed>"))
+}
+
+/// Send every panic to the log. Release has no console, so the default hook's
+/// stderr output is lost, and a panic on a control or runner thread leaves the
+/// process running.
+fn log_panics() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("{}", panic_record(std::thread::current().name(), info));
+        default_hook(info);
+    }));
+}
+
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Logging: dev → stderr (so `cargo run` shows it live); release → append
     // to `%APPDATA%\shows\shows.log` (the same place the Python build wrote,
@@ -86,6 +102,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     }
     builder.init();
+    log_panics();
 
     // Single-instance guard. A second local copy would race the player + control
     // server and silently drop watch updates; refuse and focus the running one.
@@ -368,4 +385,35 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     compositor.run(); // message loop — blocks until the window closes
     Ok(())
+}
+
+#[cfg(test)]
+mod panic_log_tests {
+    use super::panic_record;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn panic_record_names_the_message_location_and_thread() {
+        let recorded = Arc::new(Mutex::new(None));
+        let sink = recorded.clone();
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let record = panic_record(std::thread::current().name(), info);
+            if record.contains("database write failed") {
+                *sink.lock().unwrap() = Some(record);
+            }
+        }));
+        let outcome = std::thread::Builder::new()
+            .name("panic-log-test".into())
+            .spawn(|| panic!("database write failed"))
+            .unwrap()
+            .join();
+        std::panic::set_hook(previous);
+
+        assert!(outcome.is_err());
+        let record = recorded.lock().unwrap().take().expect("hook ran");
+        assert!(record.contains("panic-log-test"), "{record}");
+        assert!(record.contains("database write failed"), "{record}");
+        assert!(record.contains("main.rs"), "{record}");
+    }
 }

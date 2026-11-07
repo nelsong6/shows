@@ -73,7 +73,7 @@ Library import is in-app. Folder scanning derives backslash-joined `relative_pat
 
 The localhost control server exposes `GET /status/stream` as the React overlay's live SSE feed, `GET /status` as an on-demand snapshot, and the playback/library control routes in `desktop-rs/desktop/src/webserver.rs`. Database status includes the authoritative path and shared revision.
 
-Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`.
+Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`. Every panic is logged there at error level with its message, location and thread.
 
 The overlay's control listener is loopback-only at `127.0.0.1:45831` (`SHOWS_CONTROL_PORT`
 overrides the port). `shows-remote` controls an already running desktop from another PC
