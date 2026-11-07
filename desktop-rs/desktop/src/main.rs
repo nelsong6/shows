@@ -20,6 +20,7 @@ mod webserver;
 use std::sync::{Arc, mpsc::sync_channel};
 use std::time::{Duration, Instant};
 
+use shows_core::pending::PendingWatches;
 use shows_core::replica::Replica;
 use shows_core::roundlogic::parse_playlists;
 use shows_core::runner::{Callbacks, PlayerOps, Runner, StopFlag};
@@ -61,12 +62,17 @@ fn to_err(e: String) -> Box<dyn std::error::Error> {
     e.into()
 }
 
-/// `%APPDATA%\shows\shows.log`.
-fn log_path() -> std::path::PathBuf {
+/// `%APPDATA%\shows`.
+fn data_dir() -> std::path::PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".into());
     let dir = std::path::Path::new(&base).join("shows");
     let _ = std::fs::create_dir_all(&dir);
-    dir.join("shows.log")
+    dir
+}
+
+/// `%APPDATA%\shows\shows.log`.
+fn log_path() -> std::path::PathBuf {
+    data_dir().join("shows.log")
 }
 
 /// One log line for a panic: its message, source location and thread.
@@ -83,6 +89,35 @@ fn log_panics() {
         log::error!("{}", panic_record(std::thread::current().name(), info));
         default_hook(info);
     }));
+}
+
+/// Publishes the database's status when it changes. Given no revision, it
+/// keeps the last one known.
+fn database_publisher(
+    server: Arc<ControlServer>,
+    replica: Arc<Replica>,
+    pending: Arc<PendingWatches>,
+    path: String,
+) -> Arc<dyn Fn(Option<i64>) + Send + Sync> {
+    let last = std::sync::Mutex::new((0, serde_json::Value::Null));
+    Arc::new(move |revision| {
+        let mut last = last.lock().unwrap();
+        let known = revision.unwrap_or(last.0);
+        let next = serde_json::json!({
+            "database": {
+                "path": path,
+                "authoritative": true,
+                "revision": known,
+                "reachable": replica.is_reachable(),
+                "error": replica.failure(),
+                "pending_watches": pending.count(),
+            }
+        });
+        if next != last.1 {
+            *last = (known, next.clone());
+            server.push_raw(next);
+        }
+    })
 }
 
 fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -139,17 +174,18 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "S:\\shows.db".to_string());
     log::info!("opening authoritative database at {shared_db_path}");
-    let replica = Arc::new(Replica::try_new(&shared_db_path)?);
+    let replica = Arc::new(Replica::connect(&shared_db_path));
+    let pending = Arc::new(PendingWatches::for_database(&data_dir(), &shared_db_path));
 
     // Releases embed the overlay. Debug builds use the tracked Vite server.
     let server = ControlServer::new(replica.clone(), playlists.clone());
-    server.push_raw(serde_json::json!({
-        "database": {
-            "path": shared_db_path,
-            "authoritative": true,
-            "revision": replica.revision(),
-        }
-    }));
+    let publish_database = database_publisher(
+        server.clone(),
+        replica.clone(),
+        pending.clone(),
+        shared_db_path.clone(),
+    );
+    publish_database(replica.revision().ok());
     let port = server.start();
     let development_url = std::env::var("SHOWS_DEV_URL").ok();
     let overlay_url = shows_control::overlay_url(port, development_url.as_deref(), cfg!(debug_assertions)).map_err(to_err)?;
@@ -160,7 +196,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let api = mpv::Api::load().map_err(to_err)?;
     let handle = Arc::new(mpv::Handle::create(api).map_err(to_err)?);
     let player = Player::new(handle.clone());
-    if let Some(vol) = replica.get_volume() {
+    if let Ok(Some(vol)) = replica.get_volume() {
         player.set_volume(vol);
     }
     let compositor = Compositor::create(handle.clone(), &overlay_url)?;
@@ -178,33 +214,6 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Runner pushes phase/round/advance into the control server's status.
     let stop = StopFlag::new();
-    {
-        let (database, status_server, watcher_stop, watcher_path) = (
-            replica.clone(),
-            server.clone(),
-            stop.clone(),
-            shared_db_path.clone(),
-        );
-        std::thread::Builder::new()
-            .name("database-revision-watcher".into())
-            .spawn(move || {
-                let mut revision = database.revision();
-                while !watcher_stop.wait_timeout(Duration::from_secs(2)) {
-                    let next = database.revision();
-                    if next != revision {
-                        revision = next;
-                        status_server.push_raw(serde_json::json!({
-                            "database": {
-                                "path": watcher_path,
-                                "authoritative": true,
-                                "revision": revision,
-                            }
-                        }));
-                    }
-                }
-            })
-            .expect("spawn database revision watcher");
-    }
     let cb = {
         let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status) = (
             server.clone(),
@@ -214,6 +223,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             server.clone(),
             server.clone(),
         );
+        let on_database = publish_database.clone();
         Callbacks {
             on_round: Some(Box::new(move |round, pos| {
                 let entries: Vec<_> = round
@@ -295,10 +305,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 };
                 s_status.push_status(StatusPatch::phase(phase, message));
             })),
+            on_database: Some(Box::new(move || on_database(None))),
         }
     };
     let runner = Arc::new(Runner::new(
         replica.clone(),
+        pending.clone(),
         player.clone() as Arc<dyn PlayerOps>,
         playlists.clone(),
         stop.clone(),
@@ -351,6 +363,20 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     {
         let wake_status = start_status_waker(server.clone(), Duration::from_millis(100));
         player.set_on_playback_change(Box::new(move || wake_status()));
+    }
+
+    // Watches the shared revision. A share can't push a change, so this polls,
+    // and it is what notices the database going away and coming back.
+    {
+        let (r, watcher_stop) = (runner.clone(), stop.clone());
+        std::thread::Builder::new()
+            .name("database-revision-watcher".into())
+            .spawn(move || {
+                while !watcher_stop.wait_timeout(Duration::from_secs(2)) {
+                    publish_database(r.check_database());
+                }
+            })
+            .expect("spawn database revision watcher");
     }
 
     // Round-robin runner.

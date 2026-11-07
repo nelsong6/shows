@@ -52,7 +52,7 @@ One episode per active show per round. This is structural, not a soft limit — 
 
 ### I7. Advance accepts any non-empty subset of the round (per-episode skip)
 
-An advance need not cover the *entire* round — a single `(show_id, episode_id)` is valid, and each entry is marked watched independently (the count reflects only the newly-watched, per I3). Advancing one entry is the **per-episode skip**: "I'm done with this one, move that show forward now," without waiting for the rest of the round. On the desktop this is the `n` control (`runner.skip`), which marks the current episode watched immediately and jumps mpv forward. (Natural advance — A1 — is the same one-entry operation, triggered by an episode's EOF rather than by the user.)
+An advance need not cover the *entire* round — a single `(show_id, episode_id)` is valid, and each entry is marked watched independently (the count reflects only the newly-watched, per I3). Advancing one entry is the **per-episode skip**: "I'm done with this one, move that show forward now," without waiting for the rest of the round. On the desktop this is the `n` control (`runner.skip`), which records the current episode as watched and then jumps mpv forward; the jump never happens with the mark unrecorded. (Natural advance — A1 — is the same one-entry operation, triggered by an episode's EOF rather than by the user.)
 
 The skip marks the episode **watched** (a `watch_history` row is written; the show offers its next-lowest-position unwatched episode next). To move past an episode *without* counting it watched, use defer (below).
 
@@ -60,10 +60,13 @@ The skip marks the episode **watched** (a `watch_history` row is written; the sh
 
 The NAS SQLite database is authoritative and is opened directly by every app.
 There is no local database replica, dirty-row preference, push, pull, or merge.
+The only local write path is the pending-watch list under
+[Database outages](#database-outages).
 
 ### Authoritative database ordering
 
-- Every state mutation commits to the shared database before the control returns.
+- Every state mutation commits to the shared database before the control returns,
+  except a watched mark during an outage, which waits in the pending list.
 - SQLite serializes competing writers. If two apps update the same field, the
   last committed statement is the visible value.
 - Reads are never served from an independently-owned database copy. An edit made
@@ -78,8 +81,20 @@ There is no local database replica, dirty-row preference, push, pull, or merge.
   watch-state authority.
 
 - **Empty playlist (no active shows)**: `engine.next_round` returns `[]`; the runner treats the playlist as drained and parks until shutdown.
-- **Database unreachable**: startup fails explicitly because authoritative state cannot be read or mutated. Previously cached media is not treated as database state.
+- **Database unreachable**: see [Database outages](#database-outages). Previously cached media is not treated as database state.
 - **Crash mid-round**: per-episode advances already committed on EOF remain watched; an unfinished episode remains unwatched.
+
+### Database outages
+
+The database is on a network share, and Windows gives up an open file's handle for good when its SMB session drops, so a connection held through an outage fails forever while a new one works at once. An outage is routine, and watching continues through it.
+
+- **O1. A database failure never crashes anything.** Every `Replica` call returns its error. A failed connection is replaced once straight away; if that fails too, the database is unreachable and every call fails at once, without waiting on the network, until `Replica::revision` reconnects. A reconnection never creates the file: a missing database is a failure, not an empty library.
+- **O2. Every watched mark goes through the pending list.** `runner.record_watched` durably appends the mark to `pending-watches-<database hash>.jsonl` in `%APPDATA%\shows`, then it is applied to the database at once if possible. There is one path, reachable or not. A list that can't be written is the only way a mark fails, and then a skip reports the failure and playback stays put.
+- **O3. Marks land when the database returns.** The revision watcher notices within its two-second poll, applies the list oldest first with each mark's original time, and restores the `playing` entry (M3). A mark applied twice changes nothing (I3), so a crash mid-replay is safe, and two computers that watched the same episode offline end with one watch.
+- **O4. Drift between computers reconciles on return, and need not be perfect.** Each computer keeps playing its loaded round. If both play the same episode, I3 settles it. Anything else drift produces, such as another computer starting a new round meanwhile, is accepted.
+- **O5. A round boundary waits.** A loaded round plays on from the local cache, but the next round can only come from the database, and waiting marks land before it is picked. The runner holds in `fetching` with the message "waiting for the NAS database", and starts again when it returns. A failed read is never read as an empty playlist: `drained` means the database said so. The same hold covers starting the app with the NAS down.
+- **O6. Everything else fails explicitly.** Skip, previous and Play Show work offline; Play Show navigates the loaded round. Defer and the library routes answer 503 `database_unavailable` with a message. A file loaded offline plays from the start with default tracks, a changed track or volume applies but isn't saved, and resume positions aren't saved until the database returns.
+- **O7. The outage is visible.** `database.reachable`, `database.error` and `database.pending_watches` are on the status feed, the overlay shows an alert, and the player shows a message on the video when the database goes and when it returns. See [desktop-status.md](desktop-status.md).
 
 ## Defer: swap a show's next pick
 

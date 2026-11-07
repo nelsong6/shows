@@ -104,6 +104,9 @@ export type Status = {
     path?: string;
     authoritative: boolean;
     revision: number;
+    reachable: boolean;
+    error: string | null;
+    pending_watches: number;
   };
   file_sync?: FileSyncStatus;
   alerts?: StatusAlert[];

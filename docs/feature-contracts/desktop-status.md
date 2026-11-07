@@ -52,7 +52,10 @@ Each `round[]` item contains:
 
 - `path`: configured NAS SQLite path.
 - `authoritative`: always `true`.
-- `revision`: monotonically increasing shared change counter.
+- `revision`: monotonically increasing shared change counter; the last one read while the database is unreachable.
+- `reachable`: false while the database can't be reached. Watched marks wait locally and a new round holds until it returns; see "Database outages" in [round-and-advance.md](round-and-advance.md).
+- `error`: why it can't be reached, or `null`.
+- `pending_watches`: watched marks not yet applied to the database.
 
 `sync` and `startup_sync` are absent. A revision change is broadcast through the
 normal status stream so the frontend can refresh library reads after another
@@ -82,7 +85,7 @@ entry is already present in the local cache.
 
 - `error_kind`: currently `round_unplayable` for a round that produced no playable media; otherwise `null`.
 - `round_blocked`: true only while a round-unplayable error is active.
-- `alerts`: derived server-side from status and file-sync state.
+- `alerts`: derived server-side from status, database and file-sync state.
 
 Any non-error phase patch must clear stale round error state by setting
 `error_kind: null` and `round_blocked: false`.

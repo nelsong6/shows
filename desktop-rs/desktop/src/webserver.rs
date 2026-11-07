@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use shows_core::remote_token::TokenChecker;
-use shows_core::replica::Replica;
+use shows_core::replica::{DbError, Replica};
 use shows_core::runner::{ControlOutcome, Runner};
 use shows_core::scan;
 
@@ -31,6 +31,16 @@ fn embedded_asset(path: &str) -> Option<Vec<u8>> {
     { Asset::get(path).map(|file| file.data.into_owned()) }
     #[cfg(debug_assertions)]
     { let _ = path; None }
+}
+
+/// The value of a database call, or the handler answers 503 and returns.
+macro_rules! from_database {
+    ($request:ident, $call:expr) => {
+        match $call {
+            Ok(value) => value,
+            Err(e) => return respond_database_error($request, &e),
+        }
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,15 +427,16 @@ impl ControlServer {
             (Method::Get, "/status/stream") => self.status_stream(request),
             (Method::Get, "/remote/preview") => self.video_preview(request),
             (Method::Get, "/shows") => {
-                let v = json!(self.replica.overlay_shows(&self.playlists));
+                let v = json!(from_database!(request, self.replica.overlay_shows(&self.playlists)));
                 respond_json(request, 200, &v)
             }
             (Method::Get, "/stats") => {
-                respond_json(request, 200, &self.replica.stats(&self.playlists))
+                let stats = from_database!(request, self.replica.stats(&self.playlists));
+                respond_json(request, 200, &stats)
             }
             (Method::Get, "/history") => {
                 let show = query_param(&url, "show").unwrap_or_default();
-                let v = json!(self.replica.show_history(&show));
+                let v = json!(from_database!(request, self.replica.show_history(&show)));
                 respond_json(request, 200, &v)
             }
             (Method::Get, "/health") => respond(request, 200, b"ok".to_vec(), "text/plain"),
@@ -498,7 +509,9 @@ impl ControlServer {
                         }),
                     );
                 };
-                let Some(show) = self.replica.show(show_id) else {
+                // Navigation works without the database; only a confirmed
+                // miss stops it here.
+                if let Ok(None) = self.replica.show(show_id) {
                     return respond_json(
                         request,
                         404,
@@ -508,8 +521,8 @@ impl ControlServer {
                             "message": format!("show {show_id} was not found"),
                         }),
                     );
-                };
-                self.respond_runner_outcome(request, |r| r.play_show(&show.id));
+                }
+                self.respond_runner_outcome(request, |r| r.play_show(show_id));
             }
             "/library/mark-watched" => {
                 let b = read_body(&mut request);
@@ -524,7 +537,7 @@ impl ControlServer {
                         }),
                     );
                 };
-                self.replica.mark_show_watched(id);
+                from_database!(request, self.replica.mark_show_watched(id));
                 self.notify_database_change();
                 respond_control_ok(request, "show_marked_watched", "show marked watched");
             }
@@ -541,7 +554,7 @@ impl ControlServer {
                         }),
                     );
                 };
-                self.replica.mark_show_unwatched(id);
+                from_database!(request, self.replica.mark_show_unwatched(id));
                 self.notify_database_change();
                 respond_control_ok(request, "show_marked_unwatched", "show marked unwatched");
             }
@@ -561,7 +574,7 @@ impl ControlServer {
                         }),
                     );
                 };
-                let Some((_show_id, playlist)) = self.replica.remove_round_entry(episode_id) else {
+                let Some((_show_id, playlist)) = from_database!(request, self.replica.remove_round_entry(episode_id)) else {
                     return respond_json(
                         request,
                         404,
@@ -648,7 +661,7 @@ impl ControlServer {
                 let b = read_body(&mut request);
                 if let Some(v) = b.get("volume").and_then(Value::as_f64) {
                     self.with_player(|p| p.set_volume(v));
-                    self.replica.set_volume(v);
+                    self.save_volume(v);
                 }
                 respond_control_ok(request, "volume_updated", "volume updated");
             }
@@ -700,7 +713,7 @@ impl ControlServer {
                         }),
                     );
                 };
-                let removed = self.replica.remove_show(id);
+                let removed = from_database!(request, self.replica.remove_show(id));
                 if removed {
                     self.notify_database_change();
                     respond_control_ok(request, "show_removed", "show removed");
@@ -729,12 +742,12 @@ impl ControlServer {
                         }),
                     );
                 };
-                self.replica.update_show(
+                from_database!(request, self.replica.update_show(
                     id,
                     b.get("name").and_then(Value::as_str),
                     b.get("root_path").and_then(Value::as_str),
                     b.get("playlist").and_then(Value::as_str),
-                );
+                ));
                 self.notify_database_change();
                 respond_control_ok(request, "show_updated", "show updated");
             }
@@ -832,7 +845,7 @@ impl ControlServer {
                 };
                 match result {
                     Ok(()) => {
-                        if let Command::Volume { level } = command { self.replica.set_volume(level); }
+                        if let Command::Volume { level } = command { self.save_volume(level); }
                         self.notify();
                         respond_control_ok(request, "control_applied", "control applied by the target player");
                     }
@@ -878,7 +891,7 @@ impl ControlServer {
                 &json!({"error":"no video files found under root_path"}),
             );
         }
-        let sid = self.replica.create_show(&playlist, &name, &root, &eps);
+        let sid = from_database!(request, self.replica.create_show(&playlist, &name, &root, &eps));
         self.notify_database_change();
         respond_json(request, 200, &json!({"id": sid, "episodes": eps.len()}));
     }
@@ -909,7 +922,7 @@ impl ControlServer {
     fn library_next_round(self: &Arc<Self>, request: Request) {
         // We assume playlist "nelson" for now, or take it from query params.
         // Let's just use the active shows for all playlists we know about, or default to nelson.
-        let shows = self.replica.active_shows(&["nelson".to_string()]);
+        let shows = from_database!(request, self.replica.active_shows(&["nelson".to_string()]));
         let round = shows_core::engine::next_round(&shows);
 
         let mut results = Vec::new();
@@ -944,7 +957,7 @@ impl ControlServer {
 
         let mut unadded = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&parent) {
-            let existing_shows = self.replica.all_shows();
+            let existing_shows = from_database!(request, self.replica.all_shows());
             for entry in entries.flatten() {
                 if let Ok(file_type) = entry.file_type() {
                     if file_type.is_dir() {
@@ -975,11 +988,11 @@ impl ControlServer {
 
     fn library_detect_new_episodes(self: &Arc<Self>, request: Request) {
         let mut shows_with_new = Vec::new();
-        let all_shows = self.replica.all_shows();
+        let all_shows = from_database!(request, self.replica.all_shows());
 
         for show in all_shows {
             let scanned: Vec<String> = scan::scan_episodes(&show.root_path);
-            let existing = self.replica.episode_paths(&show.id);
+            let existing = from_database!(request, self.replica.episode_paths(&show.id));
             let mut new_eps = Vec::new();
 
             for ep in scanned {
@@ -1008,7 +1021,7 @@ impl ControlServer {
             .unwrap_or("")
             .to_string();
         if !sid.is_empty() {
-            if self.replica.remove_show(&sid) {
+            if from_database!(request, self.replica.remove_show(&sid)) {
                 self.notify_database_change();
             }
         }
@@ -1029,10 +1042,10 @@ impl ControlServer {
                     .collect()
             });
         let mut added = 0usize;
-        if let Some(show) = self.replica.show(&sid) {
+        if let Some(show) = from_database!(request, self.replica.show(&sid)) {
             let full_sorted: Vec<String> =
                 specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
-            let added_ids = self.replica.rescan_episodes(&sid, &full_sorted);
+            let added_ids = from_database!(request, self.replica.rescan_episodes(&sid, &full_sorted));
             added = added_ids.len();
             self.notify_database_change();
         }
@@ -1053,13 +1066,13 @@ impl ControlServer {
                     .collect()
             });
         let mut added = 0usize;
-        if let Some(show) = self.replica.show(&sid) {
+        if let Some(show) = from_database!(request, self.replica.show(&sid)) {
             let full_sorted: Vec<String> =
                 specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
-            let added_ids = self.replica.rescan_episodes(&sid, &full_sorted);
+            let added_ids = from_database!(request, self.replica.rescan_episodes(&sid, &full_sorted));
             added = added_ids.len();
             if added > 0 {
-                self.replica.mark_episodes_watched(&sid, &added_ids);
+                from_database!(request, self.replica.mark_episodes_watched(&sid, &added_ids));
             }
             self.notify_database_change();
         }
@@ -1074,8 +1087,8 @@ impl ControlServer {
             .unwrap_or("")
             .to_string();
 
-        if let Some(show) = self.replica.show(&sid) {
-            let history = self.replica.show_history(&sid);
+        if let Some(show) = from_database!(request, self.replica.show(&sid)) {
+            let history = from_database!(request, self.replica.show_history(&sid));
             let first_unwatched_id =
                 shows_core::engine::first_unwatched(&show.episodes).map(|e| e.id.clone());
 
@@ -1163,8 +1176,9 @@ impl ControlServer {
         }
     }
     fn respond_runner_outcome(&self, request: Request, f: impl FnOnce(&Runner) -> ControlOutcome) {
-        let outcome = self.runner.lock().unwrap().as_ref().map(|r| f(r.as_ref()));
-        match outcome {
+        // A clone, so the control doesn't run under the lock every route needs.
+        let runner = self.runner.lock().unwrap().clone();
+        match runner.map(|r| f(&r)) {
             Some(outcome) => respond_control_outcome(request, outcome),
             None => respond_json(
                 request,
@@ -1177,6 +1191,13 @@ impl ControlServer {
             ),
         }
     }
+    /// The volume is already applied; a failed save only loses it across restarts.
+    fn save_volume(&self, volume: f64) {
+        if let Err(e) = self.replica.set_volume(volume) {
+            log::warn!("volume not saved: {e}");
+        }
+    }
+
     fn notify_database_change(&self) {
         // Mutations are already committed to the authoritative NAS database.
         self.notify();
@@ -1452,6 +1473,24 @@ fn read_body(request: &mut Request) -> Value {
 
 fn status_alerts(status: &serde_json::Map<String, Value>) -> Value {
     let mut alerts = Vec::new();
+    let database = status.get("database").and_then(Value::as_object);
+    if database
+        .and_then(|d| d.get("reachable"))
+        .and_then(Value::as_bool)
+        == Some(false)
+    {
+        let database = database.expect("reachable came from it");
+        let waiting = database
+            .get("pending_watches")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        alerts.push(json!({
+            "level": "warning",
+            "title": "NAS database unreachable",
+            "message": format!("Playback continues. Watched marks waiting here: {waiting}. A new round has to wait for the NAS."),
+            "detail": database.get("error").and_then(Value::as_str).unwrap_or(""),
+        }));
+    }
     let round_unplayable = status
         .get("error_kind")
         .and_then(Value::as_str)
@@ -1546,8 +1585,28 @@ fn control_outcome_json(outcome: &ControlOutcome) -> Value {
 }
 
 fn respond_control_outcome(request: Request, outcome: ControlOutcome) {
-    let code = if outcome.ok() { 200 } else { 409 };
+    let code = if outcome.ok() {
+        200
+    } else if outcome.is_failure() {
+        503
+    } else {
+        409
+    };
     respond_json(request, code, &control_outcome_json(&outcome));
+}
+
+fn respond_database_error(request: Request, error: &DbError) {
+    let message = format!("the database can't be reached: {error}");
+    respond_json(
+        request,
+        503,
+        &json!({
+            "ok": false,
+            "status": "database_unavailable",
+            "message": message,
+            "error": message,
+        }),
+    );
 }
 
 fn respond_control_ok(request: Request, status: &str, message: &str) {
@@ -1584,7 +1643,7 @@ mod tests {
                     if success { Ok(()) } else { Err("UI message failed".into()) }
                 }));
             }
-            let revision = control.replica.revision();
+            let revision = control.replica.revision().unwrap();
             let listener = Server::http("127.0.0.1:0").unwrap();
             let address = listener.server_addr().to_string();
             let copy = control.clone();
@@ -1596,7 +1655,7 @@ mod tests {
             assert_eq!(result.is_ok(), available == Some(true));
             assert_eq!(calls.load(Ordering::SeqCst), usize::from(available.is_some()));
             assert_eq!(control.status_json()["window_fullscreen"], false);
-            assert_eq!(control.replica.revision(), revision);
+            assert_eq!(control.replica.revision().unwrap(), revision);
             worker.join().unwrap();
         }
     }
@@ -1604,7 +1663,7 @@ mod tests {
     #[test]
     fn native_remote_reports_unavailable_player_without_mutating_shared_state() {
         let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec!["nelson".into()]);
-        let revision = control.replica.revision();
+        let revision = control.replica.revision().unwrap();
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();
         let copy = control.clone();
@@ -1616,7 +1675,7 @@ mod tests {
         let client = shows_control::Client::connect_to(&address).unwrap();
         assert!(client.execute(&shows_control::Command::Play {}).unwrap_err().contains("no playable episode"));
         worker.join().unwrap();
-        assert_eq!(control.replica.revision(), revision);
+        assert_eq!(control.replica.revision().unwrap(), revision);
     }
 
     #[test]
@@ -1630,7 +1689,7 @@ mod tests {
             shows_control::preview::VideoPreview::from_rgba(&vec![0; 160 * 90 * 4], 16.0 / 9.0, 1.0)
         }));
         let before = control.status_json();
-        let revision = control.replica.revision();
+        let revision = control.replica.revision().unwrap();
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();
         let copy = control.clone();
@@ -1643,7 +1702,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(control.status_json(), before);
-        assert_eq!(control.replica.revision(), revision);
+        assert_eq!(control.replica.revision().unwrap(), revision);
         worker.join().unwrap();
     }
 
@@ -1859,6 +1918,52 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
         assert_eq!(value["phase"], "fetching");
         assert!(value["error_kind"].is_null());
         assert_eq!(value["round_blocked"], false);
+    }
+
+    #[test]
+    fn database_routes_answer_an_outage_with_a_message_not_an_empty_500() {
+        let control = ControlServer::new(
+            Arc::new(Replica::connect("missing-directory/shows.db")),
+            vec!["nelson".into()],
+        );
+        let listener = Server::http("127.0.0.1:0").unwrap();
+        let address = listener.server_addr().to_string();
+        let requests = ["GET /stats", "GET /shows", "GET /library/next-round", "POST /library/mark-watched"];
+        let copy = control.clone();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..requests.len() {
+                copy.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+            }
+        });
+        for line in requests {
+            use std::io::Write;
+            let body = "{\"show_id\":\"s1\"}";
+            let mut socket = std::net::TcpStream::connect(&address).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            write!(socket, "{line} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            assert!(response.starts_with("HTTP/1.1 503"), "{line}: {response}");
+            assert!(response.contains("database_unavailable"), "{line}: {response}");
+        }
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn status_alerts_report_an_unreachable_database_and_what_is_waiting() {
+        let mut status = serde_json::Map::new();
+        status.insert("database".into(), json!({
+            "reachable": false, "pending_watches": 3, "error": "disk I/O error",
+        }));
+
+        let alerts = status_alerts(&status);
+
+        assert_eq!(alerts[0]["title"], "NAS database unreachable");
+        assert!(alerts[0]["message"].as_str().unwrap().contains("waiting here: 3"));
+        assert_eq!(alerts[0]["detail"], "disk I/O error");
+
+        status.insert("database".into(), json!({"reachable": true, "pending_watches": 0}));
+        assert_eq!(status_alerts(&status), json!([]));
     }
 
     #[test]

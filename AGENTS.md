@@ -13,7 +13,7 @@ When extending a feature documented at `docs/feature-contracts/`, name the affec
 The Rust desktop is the engine. Round selection, advance, defer, resume, library management, and watch history run directly against the authoritative SQLite database on the NAS, normally `S:\shows.db`:
 
 - `SHOWS_SHARED_DB` overrides the shared database path.
-- There is no local database replica, dirty-row preference, or manual sync.
+- There is no local database replica, dirty-row preference, or manual sync. The one local write path is the pending-watch list described under "Shared database and concurrency".
 - SQLite commit order is authoritative when multiple computers write.
 - Database triggers increment a shared revision; running apps watch it so externally committed edits refresh their status consumers.
 - The current round's media files are copied from the NAS to `D:\Downloads\Watching` before playback. `SHOWS_LOCAL_WATCHING_DIR` overrides that cache path.
@@ -30,6 +30,7 @@ desktop-rs/           Cargo workspace
       roundlogic.rs   round helpers and playlist parsing
       scan.rs         folder scanning and episode discovery
       replica.rs      authoritative SQLite schema, reads, and transactions
+      pending.rs      local list of watched marks on their way to the database
       engine.rs       pure round/advance/defer engine
       runner.rs       round-robin runner and local media cache orchestration
       model.rs        persisted row types
@@ -65,7 +66,9 @@ This reproduces the legacy PowerShell ordering bit-for-bit. See `docs/feature-co
 
 ## Shared database and concurrency
 
-Multiple computers may update the NAS database. Keep multi-statement mutations transactional and preserve last-commit-wins behavior. The local media cache is disposable and must never become a database authority. If the database is unreachable, fail explicitly rather than creating divergent local state.
+Multiple computers may update the NAS database. Keep multi-statement mutations transactional and preserve last-commit-wins behavior. The local media cache is disposable and must never become a database authority.
+
+The database is on a network share, so every `Replica` call can fail and returns the error; a dead connection is replaced, and failures never panic. Watched marks are the one thing allowed to wait locally: each goes through a small pending list (`core/src/pending.rs`) on its way to the database, so playback continues through a NAS outage and the marks land when it returns. Applying a mark twice changes nothing, which makes that safe across computers. Two clients that drift reconcile on return, and it need not be perfect. Everything else fails explicitly while the database is unreachable. See "Database outages" in `docs/feature-contracts/round-and-advance.md`.
 
 Library import is in-app. Folder scanning derives backslash-joined `relative_path` values so the ordering hash remains stable.
 

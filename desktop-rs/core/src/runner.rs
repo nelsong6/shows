@@ -1,8 +1,9 @@
 //! Round-robin playback loop over the NAS-hosted SQLite database.
 //!
 //! The desktop is the engine: each round is computed from the authoritative
-//! SQLite database ([`crate::engine::next_round`]). Advances and defers commit
-//! to that database immediately.
+//! SQLite database ([`crate::engine::next_round`]). Watched marks go through
+//! the local pending list ([`crate::pending`]) and on to that database at once
+//! when it can be reached; defers commit to it directly.
 //!
 //! ```text
 //!   IDLE    -> next round from database -> queue N -> PLAYING
@@ -19,11 +20,13 @@
 //! core and is fully tested with fakes.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::engine;
-use crate::replica::Replica;
+use crate::pending::{PendingWatch, PendingWatches};
+use crate::replica::{DbResult, Replica};
 
 /// A `threading.Event`-equivalent: settable, with a blocking `wait`.
 pub struct StopFlag {
@@ -51,6 +54,19 @@ impl StopFlag {
         while !*g {
             g = self.cv.wait(g).unwrap();
         }
+    }
+    /// Block until set or until `ready` holds. Whatever makes `ready` true must
+    /// then call [`StopFlag::wake`].
+    pub fn wait_until(&self, ready: impl Fn() -> bool) {
+        let mut g = self.state.lock().unwrap();
+        while !*g && !ready() {
+            g = self.cv.wait(g).unwrap();
+        }
+    }
+    /// Wake every waiter without setting the flag.
+    pub fn wake(&self) {
+        let _g = self.state.lock().unwrap();
+        self.cv.notify_all();
     }
     /// Block up to `d`; returns the set state afterward.
     pub fn wait_timeout(&self, d: Duration) -> bool {
@@ -237,6 +253,11 @@ pub enum ControlOutcome {
         status: &'static str,
         message: String,
     },
+    /// The control couldn't be carried out because storage failed.
+    Failed {
+        status: &'static str,
+        message: String,
+    },
 }
 
 impl ControlOutcome {
@@ -254,21 +275,34 @@ impl ControlOutcome {
         }
     }
 
+    fn failed(status: &'static str, message: impl Into<String>) -> ControlOutcome {
+        ControlOutcome::Failed {
+            status,
+            message: message.into(),
+        }
+    }
+
     pub fn ok(&self) -> bool {
         matches!(self, ControlOutcome::Applied { .. })
     }
 
+    pub fn is_failure(&self) -> bool {
+        matches!(self, ControlOutcome::Failed { .. })
+    }
+
     pub fn status(&self) -> &'static str {
         match self {
-            ControlOutcome::Applied { status, .. } | ControlOutcome::Noop { status, .. } => status,
+            ControlOutcome::Applied { status, .. }
+            | ControlOutcome::Noop { status, .. }
+            | ControlOutcome::Failed { status, .. } => status,
         }
     }
 
     pub fn message(&self) -> &str {
         match self {
-            ControlOutcome::Applied { message, .. } | ControlOutcome::Noop { message, .. } => {
-                message
-            }
+            ControlOutcome::Applied { message, .. }
+            | ControlOutcome::Noop { message, .. }
+            | ControlOutcome::Failed { message, .. } => message,
         }
     }
 }
@@ -324,6 +358,7 @@ pub type OnDrained = Box<dyn Fn() + Send + Sync>;
 pub type OnError = Box<dyn Fn(&str) + Send + Sync>;
 pub type OnFileSync = Box<dyn Fn(&FileSyncReport) + Send + Sync>;
 pub type OnStatus = Box<dyn Fn(&str, &str) + Send + Sync>;
+pub type OnDatabase = Box<dyn Fn() + Send + Sync>;
 
 #[derive(Default)]
 pub struct Callbacks {
@@ -333,6 +368,8 @@ pub struct Callbacks {
     pub on_error: Option<OnError>,
     pub on_file_sync: Option<OnFileSync>,
     pub on_status: Option<OnStatus>,
+    /// Reachability or the pending-watch count may have changed.
+    pub on_database: Option<OnDatabase>,
 }
 
 struct Inner {
@@ -345,6 +382,9 @@ struct Inner {
 
 pub struct Runner {
     replica: Arc<Replica>,
+    pending: Arc<PendingWatches>,
+    /// Whether the last [`Runner::check_database`] reached the database.
+    database_seen: AtomicBool,
     player: Arc<dyn PlayerOps>,
     playlists: Vec<String>,
     stop: Arc<StopFlag>,
@@ -355,6 +395,7 @@ pub struct Runner {
 impl Runner {
     pub fn new(
         replica: Arc<Replica>,
+        pending: Arc<PendingWatches>,
         player: Arc<dyn PlayerOps>,
         playlists: Vec<String>,
         stop: Arc<StopFlag>,
@@ -362,6 +403,8 @@ impl Runner {
     ) -> Runner {
         Runner {
             replica,
+            pending,
+            database_seen: AtomicBool::new(true),
             player,
             playlists,
             stop,
@@ -385,11 +428,22 @@ impl Runner {
 
     fn run_loop(&self) {
         while !self.stop.is_set() {
-            let (mut round, mut pos) = self.load_round_from_db();
-            if round.is_empty() {
-                round = self.compute_and_save_new_round();
-                pos = 0;
-            }
+            let (round, pos) = match self.next_round_from_db() {
+                Ok(next) => next,
+                Err(e) if self.replica.is_reachable() => {
+                    log::error!("round could not be read: {e}");
+                    if let Some(cb) = &self.cb.on_error {
+                        cb(&format!("the round could not be read from the database: {e}"));
+                    }
+                    self.stop.wait();
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("holding for the database: {e}");
+                    self.wait_for_database();
+                    continue;
+                }
+            };
             if round.is_empty() {
                 log::info!("playlists drained: {}", self.playlists.join(","));
                 if let Some(cb) = &self.cb.on_drained {
@@ -451,6 +505,72 @@ impl Runner {
         }
     }
 
+    /// The next round to play. Waiting marks land first: a round picked without
+    /// them would offer episodes that have already been watched.
+    fn next_round_from_db(&self) -> DbResult<(Vec<RoundEntry>, usize)> {
+        self.apply_pending()?;
+        let (round, pos) = self.load_round_from_db()?;
+        if round.is_empty() {
+            return Ok((self.compute_and_save_new_round()?, 0));
+        }
+        Ok((round, pos))
+    }
+
+    /// Hold at a round boundary until the database is back: the next round can
+    /// only come from it. [`Runner::check_database`] ends the wait.
+    fn wait_for_database(&self) {
+        if let Some(cb) = &self.cb.on_status {
+            cb("fetching", "waiting for the NAS database");
+        }
+        self.stop.wait_until(|| self.replica.is_reachable());
+    }
+
+    /// One look at the database, on the app's revision watcher: it is the only
+    /// thing that notices the database going or coming back. Returns the shared
+    /// revision when the database answered.
+    pub fn check_database(&self) -> Option<i64> {
+        let was_reachable = self.replica.is_reachable();
+        let revision = self.replica.revision().ok();
+        let reachable = revision.is_some();
+        let seen = self.database_seen.swap(reachable, Ordering::SeqCst);
+        if seen && !reachable {
+            self.player.show_text(
+                "NAS unreachable: watched episodes are kept here until it returns",
+                8000,
+            );
+        }
+        if !reachable {
+            return None;
+        }
+        // Another thread may have lost the database since the last look, and
+        // this revision read may have just got it back, so `seen` isn't enough.
+        if seen && was_reachable {
+            if self.pending.count() > 0 {
+                let _ = self.apply_pending();
+            }
+        } else {
+            let waiting = self.pending.count();
+            self.reconcile();
+            self.stop.wake();
+            self.player
+                .show_text(&format!("NAS back, watched marks applied: {waiting}"), 5000);
+        }
+        revision
+    }
+
+    /// Catch the database up with what happened while it was gone.
+    fn reconcile(&self) {
+        if self.apply_pending().is_err() {
+            return;
+        }
+        let playing = self.inner.lock().unwrap().playing.clone();
+        if let Some(cur) = playing {
+            if let Err(e) = self.replica.set_round_playing(&cur.episode_id, &self.playlists) {
+                log::warn!("could not restore the playing entry: {e}");
+            }
+        }
+    }
+
     // ── interactive controls (control-server thread) ─────────────────────
     pub fn set_pos(&self, i: usize) {
         self.inner.lock().unwrap().pos = i;
@@ -466,17 +586,22 @@ impl Runner {
         }
     }
 
-    /// Skip the current episode: jump forward now and mark it watched (I7).
+    /// Skip the current episode: record it watched, then jump forward (I7). The
+    /// jump never waits on the NAS, and never happens with the mark unrecorded.
     pub fn skip(&self) -> ControlOutcome {
-        let cur = self.current();
-        self.player.skip();
-        if let Some(cur) = cur {
-            let show_name = cur.show_name.clone();
-            self.apply_advance(&[cur]);
-            ControlOutcome::applied("skipped", format!("skipped {show_name}"))
-        } else {
-            ControlOutcome::noop("no_current_episode", "nothing is currently selected")
+        let Some(cur) = self.current() else {
+            self.player.skip();
+            return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
+        };
+        if let Err(e) = self.record_watched(&cur) {
+            return ControlOutcome::failed(
+                "watch_not_recorded",
+                format!("{} was not skipped: {e}", cur.show_name),
+            );
         }
+        self.player.skip();
+        let _ = self.apply_pending();
+        ControlOutcome::applied("skipped", format!("skipped {}", cur.show_name))
     }
 
     /// Step back to the previous entry in the current round. Navigation only:
@@ -506,12 +631,21 @@ impl Runner {
         let Some(cur) = self.current() else {
             return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
         };
-        if !self.replica.defer(&cur.show_id, &cur.episode_id) {
-            log::warn!("defer no-op for {:?}", cur.show_name);
-            return ControlOutcome::noop(
-                "not_deferred",
-                format!("{} could not be deferred", cur.show_name),
-            );
+        match self.replica.defer(&cur.show_id, &cur.episode_id) {
+            Ok(true) => {}
+            Ok(false) => {
+                log::warn!("defer no-op for {:?}", cur.show_name);
+                return ControlOutcome::noop(
+                    "not_deferred",
+                    format!("{} could not be deferred", cur.show_name),
+                );
+            }
+            Err(e) => {
+                return ControlOutcome::failed(
+                    "database_unavailable",
+                    format!("{} was not deferred: {e}", cur.show_name),
+                );
+            }
         }
         let show_name = cur.show_name.clone();
         self.inner
@@ -519,30 +653,33 @@ impl Runner {
             .unwrap()
             .deferred
             .insert(cur.episode_id.clone());
-        self.replica
-            .update_round_entry_state(&cur.episode_id, "deferred", &cur.playlist);
+        if let Err(e) = self
+            .replica
+            .update_round_entry_state(&cur.episode_id, "deferred", &cur.playlist)
+        {
+            log::warn!("deferred entry state not saved: {e}");
+        }
         self.player.skip();
         ControlOutcome::applied("deferred", format!("deferred {show_name}"))
     }
 
     /// Play a specific show immediately by navigating to it in the current round playlist.
     pub fn play_show(&self, show_id: &str) -> ControlOutcome {
-        let raw = self.replica.get_round_queue();
-        let filtered_raw: Vec<_> = raw
-            .iter()
-            .filter(|(_, _, _, _, playlist, _, _)| self.playlists.contains(playlist))
-            .collect();
-
-        let existing_pos = filtered_raw
-            .iter()
-            .position(|(_, s_id, _, _, _, _, _)| s_id == show_id);
+        // The loaded round is mpv's playlist (M1), so this needs no database.
+        let existing_pos = {
+            let mut inner = self.inner.lock().unwrap();
+            let found = inner
+                .round
+                .as_ref()
+                .and_then(|round| round.iter().position(|e| e.show_id == show_id));
+            if let Some(idx) = found {
+                inner.pos = idx;
+            }
+            found
+        };
 
         if let Some(idx) = existing_pos {
             // The selected file's load moves `playing` to it (M3).
-            {
-                let mut inner = self.inner.lock().unwrap();
-                inner.pos = idx;
-            }
             self.player.set_playlist_pos(idx);
             ControlOutcome::applied("playing_selected_show", format!("selected show {show_id}"))
         } else {
@@ -562,8 +699,13 @@ impl Runner {
         let Some(cur) = self.current() else {
             return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
         };
-        self.replica.set_subtitle_track(&cur.episode_id, sid);
-        ControlOutcome::applied("subtitle_updated", "subtitle track updated")
+        match self.replica.set_subtitle_track(&cur.episode_id, sid) {
+            Ok(()) => ControlOutcome::applied("subtitle_updated", "subtitle track updated"),
+            Err(e) => ControlOutcome::failed(
+                "database_unavailable",
+                format!("subtitle track changed but not saved: {e}"),
+            ),
+        }
     }
 
     pub fn set_current_audio_track(&self, aid: &str) -> ControlOutcome {
@@ -571,13 +713,19 @@ impl Runner {
         let Some(cur) = self.current() else {
             return ControlOutcome::noop("no_current_episode", "nothing is currently selected");
         };
-        self.replica.set_audio_track(&cur.episode_id, aid);
-        ControlOutcome::applied("audio_updated", "audio track updated")
+        match self.replica.set_audio_track(&cur.episode_id, aid) {
+            Ok(()) => ControlOutcome::applied("audio_updated", "audio track updated"),
+            Err(e) => ControlOutcome::failed(
+                "database_unavailable",
+                format!("audio track changed but not saved: {e}"),
+            ),
+        }
     }
 
     // ── playback callbacks (mpv event thread; keep fast + local) ─────────
     /// A queued file opened — mark it now-playing, note reachable media, restore
-    /// its saved resume position and per-episode track choices.
+    /// its saved resume position and per-episode track choices. Without the
+    /// database the file still plays, from the start with default tracks.
     pub fn on_file_loaded(&self) {
         let Some(cur) = self.current() else {
             return;
@@ -587,16 +735,23 @@ impl Runner {
             inner.playing = Some(cur.clone());
             inner.loaded_any = true;
         }
-        self.replica
-            .set_round_playing(&cur.episode_id, &self.playlists);
-        let prefs = self.replica.playback_preferences(&cur.episode_id);
+        if let Err(e) = self
+            .replica
+            .set_round_playing(&cur.episode_id, &self.playlists)
+        {
+            log::warn!("playing entry not saved: {e}");
+        }
+        let prefs = self
+            .replica
+            .playback_preferences(&cur.episode_id)
+            .unwrap_or_default();
         if let Some(sid) = prefs.subtitle_track.as_deref() {
             self.player.set_sub(sid);
         }
         if let Some(aid) = prefs.audio_track.as_deref() {
             self.player.set_audio(aid);
         }
-        if let Some(pos) = self.replica.resume_pos(&cur.episode_id) {
+        if let Ok(Some(pos)) = self.replica.resume_pos(&cur.episode_id) {
             if pos > 1.0 {
                 self.player.seek_absolute(pos);
             }
@@ -614,10 +769,14 @@ impl Runner {
                 _ => return,
             }
         };
-        let result = self.apply_advance(&[cur]);
-        if let Some(cb) = &self.cb.on_advance {
-            cb(&result);
+        if let Err(e) = self.record_watched(&cur) {
+            log::error!("{} finished but was not recorded: {e}", cur.show_name);
+            if let Some(cb) = &self.cb.on_error {
+                cb(&format!("{} was not recorded as watched: {e}", cur.show_name));
+            }
+            return;
         }
+        let _ = self.apply_pending();
     }
 
     /// Persist the current episode's position to the database. Called
@@ -628,13 +787,15 @@ impl Runner {
         };
         if let Some(pos) = self.player.time_pos() {
             if pos > 1.0 {
-                self.replica.set_resume(&cur.episode_id, Some(pos));
+                if let Err(e) = self.replica.set_resume(&cur.episode_id, Some(pos)) {
+                    log::debug!("resume position not saved: {e}");
+                }
             }
         }
     }
 
-    fn load_round_from_db(&self) -> (Vec<RoundEntry>, usize) {
-        let raw = self.replica.get_round_queue();
+    fn load_round_from_db(&self) -> DbResult<(Vec<RoundEntry>, usize)> {
+        let raw = self.replica.get_round_queue()?;
         let mut round = Vec::new();
         let mut playing_pos = None;
         let mut first_pending_pos = None;
@@ -643,7 +804,7 @@ impl Runner {
             if !self.playlists.contains(&playlist) {
                 continue;
             }
-            let Some(show) = self.replica.show(&show_id) else {
+            let Some(show) = self.replica.show(&show_id)? else {
                 continue;
             };
             let Some(ep) = show.episodes.iter().find(|e| e.id == ep_id) else {
@@ -676,14 +837,14 @@ impl Runner {
 
         // Resume where playback last was, even on an already-watched episode;
         // a round with nothing playing starts at its first pending entry.
-        match playing_pos.or(first_pending_pos) {
+        Ok(match playing_pos.or(first_pending_pos) {
             Some(pos) => (round, pos),
             None => (vec![], 0),
-        }
+        })
     }
 
-    fn compute_and_save_new_round(&self) -> Vec<RoundEntry> {
-        let round = self.fetch_round();
+    fn compute_and_save_new_round(&self) -> DbResult<Vec<RoundEntry>> {
+        let round = self.fetch_round()?;
         if !round.is_empty() {
             let entries: Vec<(String, String, i32, String, String)> = round
                 .iter()
@@ -699,14 +860,14 @@ impl Runner {
                 })
                 .collect();
             let now = chrono::Utc::now().to_rfc3339();
-            self.replica.save_round_queue(&entries, &now);
+            self.replica.save_round_queue(&entries, &now)?;
         }
-        round
+        Ok(round)
     }
 
     // ── round build / advance (all local; sync is best-effort) ───────────
-    fn fetch_round(&self) -> Vec<RoundEntry> {
-        let shows = self.replica.active_shows(&self.playlists);
+    fn fetch_round(&self) -> DbResult<Vec<RoundEntry>> {
+        let shows = self.replica.active_shows(&self.playlists)?;
         let ordered = engine::next_round(&shows);
         let name_by: std::collections::HashMap<&str, &str> = shows
             .iter()
@@ -724,7 +885,7 @@ impl Runner {
                 ep_rel_path_by.insert(ep.id.as_str(), ep.relative_path.as_str());
             }
         }
-        ordered
+        Ok(ordered
             .iter()
             .map(|o| {
                 let position = ep_pos_by
@@ -761,35 +922,68 @@ impl Runner {
                     position,
                 }
             })
-            .collect()
+            .collect())
     }
 
-    fn apply_advance(&self, entries: &[RoundEntry]) -> AdvanceResult {
-        for entry in entries {
-            self.replica
-                .update_round_entry_state(&entry.episode_id, "watched", &entry.playlist);
+    /// Durably note that `entry` was watched. On `Ok` the mark can't be lost,
+    /// whatever the database is doing; [`Runner::apply_pending`] lands it.
+    fn record_watched(&self, entry: &RoundEntry) -> std::io::Result<()> {
+        let recorded = self.pending.add(&PendingWatch {
+            show_id: entry.show_id.clone(),
+            episode_id: entry.episode_id.clone(),
+            playlist: entry.playlist.clone(),
+            watched_at: chrono::Utc::now().to_rfc3339(),
+        });
+        self.database_changed();
+        recorded
+    }
+
+    /// Land every waiting mark in the database. Safe to repeat and to run on
+    /// two computers: an episode already watched stays as it is (I3).
+    fn apply_pending(&self) -> DbResult<()> {
+        let mut result = AdvanceResult::default();
+        let mut applied = false;
+        let outcome = self.pending.flush(|watch| {
+            let landed = self.commit_watch(watch)?;
+            result.advanced_count += landed.advanced_count;
+            result.removed_shows.extend(landed.removed_shows);
+            applied = true;
+            Ok(())
+        });
+        if applied {
+            if let Some(cb) = &self.cb.on_advance {
+                cb(&result);
+            }
         }
-        let pairs: Vec<(String, String)> = entries
-            .iter()
-            .map(|e| (e.show_id.clone(), e.episode_id.clone()))
-            .collect();
-        let (advanced, removed_ids) = self.replica.advance(&pairs);
-        let removed_shows = removed_ids
-            .iter()
-            .map(|sid| {
-                let v = self.replica.reveal(sid);
-                let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
-                RemovedShow {
-                    id: s("id"),
-                    name: s("name"),
-                    date_added: s("date_added"),
-                    last_played_at: s("last_played_at"),
-                }
-            })
-            .collect();
-        AdvanceResult {
-            advanced_count: advanced,
+        self.database_changed();
+        outcome.map(|_| ())
+    }
+
+    fn commit_watch(&self, watch: &PendingWatch) -> DbResult<AdvanceResult> {
+        self.replica
+            .update_round_entry_state(&watch.episode_id, "watched", &watch.playlist)?;
+        let pairs = [(watch.show_id.clone(), watch.episode_id.clone())];
+        let (advanced_count, removed_ids) = self.replica.advance_at(&pairs, &watch.watched_at)?;
+        let mut removed_shows = Vec::new();
+        for sid in &removed_ids {
+            let v = self.replica.reveal(sid)?;
+            let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            removed_shows.push(RemovedShow {
+                id: s("id"),
+                name: s("name"),
+                date_added: s("date_added"),
+                last_played_at: s("last_played_at"),
+            });
+        }
+        Ok(AdvanceResult {
+            advanced_count,
             removed_shows,
+        })
+    }
+
+    fn database_changed(&self) {
+        if let Some(cb) = &self.cb.on_database {
+            cb();
         }
     }
 
@@ -1056,7 +1250,7 @@ mod tests {
 
     fn watched(r: &Replica, episode_id: &str) -> Option<String> {
         for sid in ["s1", "s2"] {
-            if let Some(s) = r.show(sid) {
+            if let Some(s) = r.show(sid).unwrap() {
                 for e in s.episodes {
                     if e.id == episode_id {
                         return e.watched_at;
@@ -1076,6 +1270,7 @@ mod tests {
     ) -> Arc<Runner> {
         Arc::new(Runner::new(
             r,
+            pending(),
             player,
             playlists.iter().map(|s| s.to_string()).collect(),
             stop,
@@ -1083,8 +1278,44 @@ mod tests {
         ))
     }
 
+    fn pending() -> Arc<PendingWatches> {
+        static DIR: std::sync::LazyLock<tempfile::TempDir> =
+            std::sync::LazyLock::new(|| tempfile::tempdir().unwrap());
+        Arc::new(PendingWatches::open(
+            DIR.path().join(format!("{}.jsonl", uuid::Uuid::new_v4())),
+        ))
+    }
+
+    /// A database on disk, so a test can take it away and bring it back.
+    struct Nas {
+        dir: tempfile::TempDir,
+    }
+
+    impl Nas {
+        fn new() -> Nas {
+            Nas {
+                dir: tempfile::tempdir().unwrap(),
+            }
+        }
+        fn path(&self) -> std::path::PathBuf {
+            self.dir.path().join("shows.db")
+        }
+        fn replica(&self, shows: &[Show]) -> Arc<Replica> {
+            let r = Arc::new(Replica::new(self.path().to_str().unwrap()));
+            r.seed_test_shows(shows);
+            r
+        }
+        fn go_down(&self, r: &Replica) {
+            r.drop_connection_for_test();
+            std::fs::rename(self.path(), self.dir.path().join("away.db")).unwrap();
+        }
+        fn come_back(&self) {
+            std::fs::rename(self.dir.path().join("away.db"), self.path()).unwrap();
+        }
+    }
+
     fn set_round(runner: &Runner) {
-        let round = runner.fetch_round();
+        let round = runner.fetch_round().unwrap();
         runner.inner.lock().unwrap().round = Some(round);
     }
 
@@ -1134,7 +1365,7 @@ mod tests {
         assert!(outcome.ok());
         assert_eq!(outcome.status(), "deferred");
         let ep = r
-            .show("s1")
+            .show("s1").unwrap()
             .unwrap()
             .episodes
             .into_iter()
@@ -1266,7 +1497,7 @@ mod tests {
             StopFlag::new(),
             Callbacks::default(),
         );
-        let round = run.fetch_round();
+        let round = run.fetch_round().unwrap();
 
         assert_eq!(round.len(), 1);
         let entry = &round[0];
@@ -1294,7 +1525,7 @@ mod tests {
         run.defer(); // no round in progress -> no-op
         run.skip(); // skip still nudges the player
         assert_eq!(p.skips.load(Ordering::SeqCst), 1);
-        assert!(r.show("s1").unwrap().episodes[0].watched_at.is_none());
+        assert!(r.show("s1").unwrap().unwrap().episodes[0].watched_at.is_none());
     }
 
     #[test]
@@ -1437,7 +1668,7 @@ mod tests {
         run.defer(); // bumps + marks deferred + player.skip()
         run.on_natural_end(); // a stray EOF for the deferred entry -> no-op
         let ep = r
-            .show("s1")
+            .show("s1").unwrap()
             .unwrap()
             .episodes
             .into_iter()
@@ -1505,7 +1736,7 @@ mod tests {
             StopFlag::new(),
             Callbacks::default(),
         );
-        let rnd = run.fetch_round();
+        let rnd = run.fetch_round().unwrap();
         let ids: BTreeSet<&str> = rnd.iter().map(|e| e.show_id.as_str()).collect();
         assert_eq!(ids, ["s1", "s2"].into_iter().collect());
     }
@@ -1527,7 +1758,7 @@ mod tests {
         run.set_pos(0);
         let cur = run.current().unwrap();
         run.save_resume();
-        assert_eq!(r.resume_pos(&cur.episode_id), Some(100.0));
+        assert_eq!(r.resume_pos(&cur.episode_id).unwrap(), Some(100.0));
     }
 
     #[test]
@@ -1544,7 +1775,7 @@ mod tests {
         set_round(&run);
         run.set_pos(0);
         let cur = run.current().unwrap();
-        r.set_resume(&cur.episode_id, Some(200.0));
+        r.set_resume(&cur.episode_id, Some(200.0)).unwrap();
         run.on_file_loaded();
         assert_eq!(*p.seeked.lock().unwrap(), Some(200.0));
         assert_eq!(
@@ -1582,7 +1813,7 @@ mod tests {
         assert_eq!(*p.sub.lock().unwrap(), Some("no".into()));
         assert_eq!(*p.audio.lock().unwrap(), Some("2".into()));
 
-        let prefs = r.playback_preferences(&cur.episode_id);
+        let prefs = r.playback_preferences(&cur.episode_id).unwrap();
         assert_eq!(prefs.subtitle_track.as_deref(), Some("no"));
         assert_eq!(prefs.audio_track.as_deref(), Some("2"));
     }
@@ -1601,8 +1832,8 @@ mod tests {
         set_round(&run);
         run.set_pos(0);
         let cur = run.current().unwrap();
-        r.set_subtitle_track(&cur.episode_id, "3");
-        r.set_audio_track(&cur.episode_id, "1");
+        r.set_subtitle_track(&cur.episode_id, "3").unwrap();
+        r.set_audio_track(&cur.episode_id, "1").unwrap();
 
         run.on_file_loaded();
 
@@ -1679,7 +1910,7 @@ mod tests {
         );
 
         // Compute and save round
-        let round = run.fetch_round();
+        let round = run.fetch_round().unwrap();
         assert_eq!(round.len(), 2);
 
         let idx_c = round.iter().position(|r| r.episode_id == "c").unwrap();
@@ -1702,7 +1933,7 @@ mod tests {
                 )
             })
             .collect();
-        r.save_round_queue(&entries, "2026-05-31T00:00:00Z");
+        r.save_round_queue(&entries, "2026-05-31T00:00:00Z").unwrap();
 
         // Populate inner.round and inner.pos (start playing "a")
         {
@@ -1712,7 +1943,7 @@ mod tests {
         }
 
         // Manual play for s2's "c" (which is in the existing queue at idx_c)
-        let s2 = r.show("s2").unwrap();
+        let s2 = r.show("s2").unwrap().unwrap();
 
         let outcome = run.play_show(&s2.id);
         assert!(outcome.ok());
@@ -1725,7 +1956,7 @@ mod tests {
         // 2. FakePlayer received set_playlist_pos(idx_c)
         assert_eq!(*p.playlist_pos.lock().unwrap(), Some(idx_c));
         // 3. Database queue was NOT modified (order matches the round computed)
-        let q = r.get_round_queue();
+        let q = r.get_round_queue().unwrap();
         assert_eq!(q.len(), 2);
         assert_eq!(q[0].0, round[0].episode_id);
         assert_eq!(q[1].0, round[1].episode_id);
@@ -1748,7 +1979,7 @@ mod tests {
             StopFlag::new(),
             Callbacks::default(),
         );
-        let round = run.compute_and_save_new_round();
+        let round = run.compute_and_save_new_round().unwrap();
         run.inner.lock().unwrap().round = Some(round.clone());
         let idx_a = round.iter().position(|e| e.episode_id == "a").unwrap();
         let idx_c = round.iter().position(|e| e.episode_id == "c").unwrap();
@@ -1760,7 +1991,7 @@ mod tests {
         run.set_pos(idx_c);
         run.on_file_loaded();
 
-        let (_, pos) = run.load_round_from_db();
+        let (_, pos) = run.load_round_from_db().unwrap();
         assert_eq!(pos, idx_c);
         assert!(watched(&r, "a").is_some());
         assert!(watched(&r, "c").is_none());
@@ -1768,8 +1999,237 @@ mod tests {
         // Stepping back to the finished "a" is where playback last was.
         run.set_pos(idx_a);
         run.on_file_loaded();
-        let (_, pos) = run.load_round_from_db();
+        let (_, pos) = run.load_round_from_db().unwrap();
         assert_eq!(pos, idx_a);
         assert!(watched(&r, "a").is_some());
+    }
+
+    // ── database outages ─────────────────────────────────────────────
+    #[test]
+    fn a_skip_during_an_outage_moves_on_and_lands_when_the_nas_returns() {
+        let nas = Nas::new();
+        let r = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        set_round(&run);
+        let cur = run.current().unwrap();
+
+        nas.go_down(&r);
+        assert!(run.skip().ok());
+        assert_eq!(p.skips.load(Ordering::SeqCst), 1);
+        assert_eq!(run.pending.count(), 1);
+        assert_eq!(run.check_database(), None);
+
+        nas.come_back();
+        assert!(run.check_database().is_some());
+        assert_eq!(run.pending.count(), 0);
+        assert!(watched(&r, &cur.episode_id).is_some());
+    }
+
+    #[test]
+    fn a_mark_that_cant_be_recorded_leaves_playback_where_it_is() {
+        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let dir = tempfile::tempdir().unwrap();
+        let run = Runner::new(
+            r.clone(),
+            Arc::new(PendingWatches::open(dir.path().to_path_buf())),
+            p.clone(),
+            vec!["nelson".to_string()],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        set_round(&run);
+        let cur = run.current().unwrap();
+
+        let outcome = run.skip();
+
+        assert!(outcome.is_failure());
+        assert_eq!(outcome.status(), "watch_not_recorded");
+        assert_eq!(p.skips.load(Ordering::SeqCst), 0);
+        assert!(watched(&r, &cur.episode_id).is_none());
+    }
+
+    #[test]
+    fn an_episode_finished_during_an_outage_keeps_the_time_it_was_watched() {
+        let nas = Nas::new();
+        let r = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        set_round(&run);
+        let cur = run.current().unwrap();
+
+        nas.go_down(&r);
+        run.check_database();
+        play_sim(&run, 0);
+        let finished = chrono::Utc::now().to_rfc3339();
+        std::thread::sleep(Duration::from_millis(5));
+
+        nas.come_back();
+        run.check_database();
+        let watched_at = watched(&r, &cur.episode_id).unwrap();
+        assert!(watched_at <= finished, "{watched_at} after {finished}");
+    }
+
+    #[test]
+    fn the_playing_entry_is_restored_after_an_outage() {
+        let nas = Nas::new();
+        let r = nas.replica(&[
+            show("s1", "nelson", &["a"]),
+            show("s2", "nelson", &["b"]),
+        ]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let round = run.compute_and_save_new_round().unwrap();
+        run.inner.lock().unwrap().round = Some(round.clone());
+
+        nas.go_down(&r);
+        run.check_database();
+        run.set_pos(1);
+        run.on_file_loaded();
+        nas.come_back();
+        run.check_database();
+
+        let queue = r.get_round_queue().unwrap();
+        let playing: Vec<_> = queue.iter().filter(|row| row.3 == "playing").collect();
+        assert_eq!(playing.len(), 1);
+        assert_eq!(playing[0].0, round[1].episode_id);
+    }
+
+    #[test]
+    fn navigation_works_during_an_outage_and_defer_fails_explicitly() {
+        let nas = Nas::new();
+        let r = nas.replica(&[
+            show("s1", "nelson", &["a"]),
+            show("s2", "nelson", &["b"]),
+        ]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        set_round(&run);
+        let other = run.inner.lock().unwrap().round.as_ref().unwrap()[1].clone();
+
+        nas.go_down(&r);
+
+        assert!(run.play_show(&other.show_id).ok());
+        assert_eq!(*p.playlist_pos.lock().unwrap(), Some(1));
+        let deferred = run.defer();
+        assert!(deferred.is_failure());
+        assert_eq!(deferred.status(), "database_unavailable");
+        assert_eq!(p.skips.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn two_computers_watching_the_same_episode_offline_reconcile_to_one_watch() {
+        let nas = Nas::new();
+        let first = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
+        let second = Arc::new(Replica::new(nas.path().to_str().unwrap()));
+        let p = Arc::new(FakePlayer::default());
+        let on_first = runner(first.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let on_second = runner(second.clone(), p, &["nelson"], StopFlag::new(), Callbacks::default());
+        set_round(&on_first);
+        set_round(&on_second);
+        first.drop_connection_for_test();
+        second.drop_connection_for_test();
+
+        assert!(on_first.skip().ok());
+        assert!(on_second.skip().ok());
+        on_first.check_database();
+        on_second.check_database();
+
+        assert_eq!(on_first.pending.count() + on_second.pending.count(), 0);
+        assert_eq!(first.show_history("s1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn marks_left_by_a_closed_app_land_before_the_next_round_is_picked() {
+        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
+        let run = runner(
+            r.clone(),
+            Arc::new(FakePlayer::default()),
+            &["nelson"],
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        let first_pick = run.fetch_round().unwrap()[0].clone();
+        run.pending
+            .add(&PendingWatch {
+                show_id: first_pick.show_id.clone(),
+                episode_id: first_pick.episode_id.clone(),
+                playlist: first_pick.playlist.clone(),
+                watched_at: chrono::Utc::now().to_rfc3339(),
+            })
+            .unwrap();
+
+        let (round, _) = run.next_round_from_db().unwrap();
+
+        assert_ne!(round[0].episode_id, first_pick.episode_id);
+    }
+
+    fn holding_run(
+        r: Arc<Replica>,
+    ) -> (Arc<Runner>, Arc<AtomicUsize>, std::sync::mpsc::Receiver<String>) {
+        let stop = StopFlag::new();
+        let drained = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (d, round_stop) = (drained.clone(), stop.clone());
+        let tx_round = tx.clone();
+        let tx = Mutex::new(tx);
+        let tx_round = Mutex::new(tx_round);
+        let cb = Callbacks {
+            on_drained: Some(Box::new(move || {
+                d.fetch_add(1, Ordering::SeqCst);
+            })),
+            on_status: Some(Box::new(move |_, message| {
+                tx.lock().unwrap().send(message.to_string()).unwrap();
+            })),
+            on_round: Some(Box::new(move |_, _| {
+                tx_round.lock().unwrap().send("round".to_string()).unwrap();
+                round_stop.set();
+            })),
+            ..Default::default()
+        };
+        let run = runner(r, Arc::new(FakePlayer::default()), &["nelson"], stop, cb);
+        (run, drained, rx)
+    }
+
+    fn next_message(rx: &std::sync::mpsc::Receiver<String>) -> String {
+        rx.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    #[test]
+    fn an_outage_holds_for_the_nas_instead_of_declaring_the_playlist_drained() {
+        let nas = Nas::new();
+        let r = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
+        nas.go_down(&r);
+        let (run, drained, rx) = holding_run(r);
+        run.check_database();
+        let looping = run.clone();
+        let worker = std::thread::spawn(move || looping.run_loop());
+
+        assert_eq!(next_message(&rx), "waiting for the NAS database");
+        assert_eq!(drained.load(Ordering::SeqCst), 0);
+
+        nas.come_back();
+        run.check_database();
+        assert_eq!(next_message(&rx), "round");
+        worker.join().unwrap();
+        assert_eq!(drained.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_connection_lost_and_regained_between_checks_still_releases_the_hold() {
+        let nas = Nas::new();
+        let r = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
+        r.drop_connection_for_test();
+        let (run, _, rx) = holding_run(r);
+        let looping = run.clone();
+        let worker = std::thread::spawn(move || looping.run_loop());
+        assert_eq!(next_message(&rx), "waiting for the NAS database");
+
+        // No check saw it down: this one reconnects on its own first read.
+        run.check_database();
+
+        assert_eq!(next_message(&rx), "round");
+        worker.join().unwrap();
     }
 }
