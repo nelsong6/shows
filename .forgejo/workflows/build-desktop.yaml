@@ -27,17 +27,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: romaine-life/pipeline-templates/actions/home-cache@main
+
       - name: Install Rust toolchain
         run: |
           rustup update stable --no-self-update
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-      - uses: https://github.com/actions/cache@v4
+      - uses: actions/cache@v4
         with:
           path: desktop-rs/target
           key: shows-windows-rust-target-v1-${{ hashFiles('desktop-rs/Cargo.lock') }}
 
-      - uses: https://github.com/actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: npm
@@ -53,7 +55,7 @@ jobs:
 
       - name: Cache libmpv runtime
         id: libmpv
-        uses: https://github.com/actions/cache@v4
+        uses: actions/cache@v4
         with:
           path: desktop-rs/desktop/third_party/libmpv
           key: libmpv-windows-20250420-3600c71
@@ -63,7 +65,7 @@ jobs:
         run: |
           $file = 'mpv-dev-x86_64-20250420-git-3600c71.7z'
           $archive = Join-Path $env:RUNNER_TEMP $file
-          curl.exe -fSL --proto '=https' --proto-redir '=https' "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/$file" -o $archive
+          curl.exe -fSL --proto '=https' --proto-redir '=https' "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/$file" -o $archive # internet: libmpv SourceForge download has no cache
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash -ne 'C13F26BDCA62E5E52990DBC82920E05734D7922889ACC48C38B8A1C5DA6B8F9C') { throw 'libmpv archive checksum mismatch' }
           New-Item -ItemType Directory -Force desktop-rs/desktop/third_party/libmpv | Out-Null
@@ -115,7 +117,7 @@ jobs:
       - name: Zip signed bundle
         run: Compress-Archive -Path desktop-rs/dist/shows-desktop/* -DestinationPath desktop-rs/dist/shows-desktop-windows-amd64.zip -Force
 
-      - uses: https://data.forgejo.org/forgejo/upload-artifact@v4
+      - uses: forgejo/upload-artifact@v4
         with:
           name: shows-desktop-${{ github.sha }}
           path: desktop-rs/dist/shows-desktop-windows-amd64.zip
