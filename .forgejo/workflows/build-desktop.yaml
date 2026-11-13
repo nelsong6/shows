@@ -155,3 +155,6 @@ jobs:
           $zip = Get-Item desktop-rs/dist/shows-desktop-windows-amd64.zip
           Invoke-RestMethod -Method Post "$api/releases/$($release.id)/assets?name=$($zip.Name)" -Headers $headers -Form @{attachment = $zip} | Out-Null
           Invoke-RestMethod -Method Patch "$api/releases/$($release.id)" -Headers $headers -ContentType 'application/json' -Body '{"draft":false}' | Out-Null
+      - name: Delete the files of older releases
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: romaine-life/pipeline-templates/actions/prune-releases@main
