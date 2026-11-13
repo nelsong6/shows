@@ -65,7 +65,7 @@ jobs:
         run: |
           $file = 'mpv-dev-x86_64-20250420-git-3600c71.7z'
           $archive = Join-Path $env:RUNNER_TEMP $file
-          curl.exe -fSL --proto '=https' --proto-redir '=https' "https://downloads.sourceforge.net/project/mpv-player-windows/libmpv/$file" -o $archive # internet: libmpv SourceForge download has no cache
+          curl.exe -fSL --proto '=https' --proto-redir '=https' "https://artifacts.home.romaine.life/general/sourceforge/project/mpv-player-windows/libmpv/$file" -o $archive
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash -ne 'C13F26BDCA62E5E52990DBC82920E05734D7922889ACC48C38B8A1C5DA6B8F9C') { throw 'libmpv archive checksum mismatch' }
           New-Item -ItemType Directory -Force desktop-rs/desktop/third_party/libmpv | Out-Null
