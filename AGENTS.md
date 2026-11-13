@@ -130,4 +130,4 @@ remains the hash-verified CI artifact; preview code never replaces it.
 
 ## Release
 
-`.forgejo/workflows/build-desktop.yaml` builds on Windows, embeds the React distribution, bundles `libmpv-2.dll`, and publishes a Forgejo Release. The independent remote is never compiled or bundled here. The desktop is not deployed to AKS.
+The `build` job of `.forgejo/workflows/ci.yml` builds on Windows, embeds the React distribution, bundles `libmpv-2.dll`, and publishes a Forgejo Release. The independent remote is never compiled or bundled here. The desktop is not deployed to AKS.

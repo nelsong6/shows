@@ -1,4 +1,4 @@
-name: Build Desktop
+name: CI
 
 on:
   pull_request:
@@ -10,12 +10,59 @@ permissions:
   contents: write
 
 concurrency:
-  group: desktop-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: romaine-life/pipeline-templates/actions/check-fetches@main
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo code=true >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only "$BASE...HEAD")
+          if grep -qvE '\.md$|^docs/|^LICENSE$' <<< "$files"; then
+            echo code=true >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: romaine-life/pipeline-templates/actions/home-cache@main
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-rs
+
+      # `shows-core` is `#![forbid(unsafe_code)]` and Win32/libmpv-free, so the
+      # 73-test suite (ordering / roundlogic / scan / update / engine / replica
+      # / apiclient / oauth / sync / runner / model) runs fine on Linux. This
+      # is the cheap per-PR sanity check; the Windows-only shell goes through
+      # the build job.
+      - name: Test engine and control protocol
+        working-directory: desktop-rs
+        run: cargo test -p shows-core -p shows-control --locked
+
   build:
-    name: Package shows-desktop for Windows
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
     env:
       RUSTUP_TOOLCHAIN: stable
@@ -124,7 +171,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish Forgejo release
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -156,5 +203,5 @@ jobs:
           Invoke-RestMethod -Method Post "$api/releases/$($release.id)/assets?name=$($zip.Name)" -Headers $headers -Form @{attachment = $zip} | Out-Null
           Invoke-RestMethod -Method Patch "$api/releases/$($release.id)" -Headers $headers -ContentType 'application/json' -Body '{"draft":false}' | Out-Null
       - name: Delete the files of older releases
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: romaine-life/pipeline-templates/actions/prune-releases@main

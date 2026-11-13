@@ -50,7 +50,7 @@ if ($Channel -eq "stable") {
       if ((Get-Date) -gt $deadline) { throw "Timed out waiting for $Release" }
       if ($releaseSha) {
         $checks = Invoke-RestMethod "$repoApi/commits/$releaseSha/status" -Headers $releaseHeaders
-        $build = $checks.statuses | Where-Object { $_.context -like 'Build Desktop / *' -and $_.status -in @('failure','error') } | Select-Object -First 1
+        $build = $checks.statuses | Where-Object { $_.context -like 'CI / build (*' -and $_.status -in @('failure','error') } | Select-Object -First 1
         if ($build) { throw "Release build ended with $($build.status): $($build.target_url)" }
       }
       Write-Host "Waiting for CI release $Release"

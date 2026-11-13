@@ -5,7 +5,7 @@
 //! dev/source builds without an embedded SHA simply yield `None`.
 //!
 //! The build SHA is stamped in at compile time via the `SHOWS_BUILD_SHA` env var
-//! (set by `.forgejo/workflows/build-desktop.yaml`); a dev `cargo build` has none,
+//! (set by `.forgejo/workflows/ci.yml`); a dev `cargo build` has none,
 //! so it's treated as "version unknown" and skips the check.
 
 use std::io::Write;
