@@ -38,10 +38,9 @@ builds. The shortcut checks the channel manifest before every launch, verifies
 the bundle hashes, installs it into a new versioned local directory, retains the
 previous version for rollback, and starts the local executable.
 
-Shows remote is installed separately from its own signed release on the
-controller PC. It exposes `shows-remote` at
-`%LOCALAPPDATA%\shows-remote\channels\stable`. The desktop installer does not
-install or update it. See [Shows Remote](shows-remote.md).
+Shows remote is a separate home tool: home-sync installs its signed release on
+every home PC, and the at menu opens it. The desktop installer does not install or
+update it. See [Shows Remote](shows-remote.md).
 
 ## Publish a build
 
