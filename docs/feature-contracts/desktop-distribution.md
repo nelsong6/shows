@@ -13,10 +13,11 @@ without running an executable from the network share.
 - **P3. Explicit channels.** `stable` and `dev` have independent manifests.
   Computers opt into one channel through their shortcut.
 - **P4. Reproducible identity.** Stable publishes the bundle CI attached to a
-  `desktop-<sha>` Forgejo release, versioned by that SHA, so the stable channel
-  only ever carries a build CI produced from `main`. Dev builds are local and
-  add a publication timestamp so repeated builds of one revision remain
-  immutable.
+  numbered `v0.1.N` Forgejo release (pipeline-templates' release-version step),
+  versioned by that number, so the stable channel only ever carries a build CI
+  produced from `main`. The executable is stamped with the same number. Dev builds
+  are local, never numbered, and named `dev-<publication time>` so repeated builds
+  remain immutable.
 - **P5. Signed Windows binaries.** CI signs the desktop executable and libmpv with the
   existing home code-signing identity, verifies Authenticode and its pinned
   thumbprint, then archives the signed files. Manifests hash the signed bytes.
@@ -41,7 +42,7 @@ without running an executable from the network share.
   by [its own repository](https://forgejo.romaine.life/nelsong6/shows-remote).
   Desktop installation removes the retired `agents/<channel>.cmd` entry point
   and its remote PATH entry; it never installs a client or agent. The new client
-  and player interoperate through protocol 1 despite independent release SHAs.
+  and player interoperate through protocol 1 despite independent release versions.
 
 ## Automated updates
 

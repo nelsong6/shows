@@ -45,7 +45,7 @@ update it. See [Shows Remote](shows-remote.md).
 ## Publish a build
 
 Advance the stable channel to CI's latest release (or name one with
-`-Release desktop-<sha>`); nothing is compiled locally:
+`-Release v0.1.<n>`); nothing is compiled locally:
 
 ```powershell
 .\scripts\publish-shows-channel.ps1 -Channel stable

@@ -36,15 +36,30 @@ if ($Channel -eq "stable") {
   }
   $repoApi = 'https://forgejo.romaine.life/api/v1/repos/nelsong6/shows'
   $releaseApi = "$repoApi/releases"
+  # The release CI numbered on a commit: the v<series>.N tag release-version reserved on it.
+  function Find-ReleaseTag([string]$commit) {
+    for ($page = 1; ; $page++) {
+      # Invoke-RestMethod returns a JSON array as one object: piping it enumerates the tags.
+      $tags = Invoke-RestMethod "$repoApi/tags?limit=50&page=$page" -Headers $releaseHeaders
+      if (-not $tags) { return $null }
+      $tag = $tags | Where-Object { $_.commit.sha -eq $commit -and $_.name -match '^v[0-9]+(\.[0-9]+)+$' } | Select-Object -First 1
+      if ($tag) { return $tag.name }
+    }
+  }
   if ($WaitForRelease) {
     if (-not $Release) {
       $releaseSha = (Invoke-RestMethod "$repoApi/branches/main" -Headers $releaseHeaders).commit.id
       if ($releaseSha -notmatch '^[0-9a-f]{40}$') { throw 'Could not identify main for release publication' }
-      $Release = 'desktop-' + $releaseSha.Substring(0,7)
     }
     $deadline = (Get-Date).AddMinutes(20)
     while ($true) {
-      $published = Invoke-RestMethod "$releaseApi/tags/$([Uri]::EscapeDataString($Release))" -Headers $releaseHeaders -SkipHttpErrorCheck -StatusCodeVariable releaseStatus
+      # CI numbers main's commit when its build starts; until then the release has no name.
+      if (-not $Release) { $Release = Find-ReleaseTag $releaseSha }
+      if (-not $Release) {
+        $releaseStatus = 404
+      } else {
+        $published = Invoke-RestMethod "$releaseApi/tags/$([Uri]::EscapeDataString($Release))" -Headers $releaseHeaders -SkipHttpErrorCheck -StatusCodeVariable releaseStatus
+      }
       if ($releaseStatus -eq 200 -and -not $published.draft -and ($published.assets | Where-Object { $_.name -eq 'shows-desktop-windows-amd64.zip' -and $_.size -gt 0 })) { break }
       if ($releaseStatus -notin @(200,404)) { throw "Release lookup failed with HTTP $releaseStatus" }
       if ((Get-Date) -gt $deadline) { throw "Timed out waiting for $Release" }
@@ -53,15 +68,15 @@ if ($Channel -eq "stable") {
         $build = $checks.statuses | Where-Object { $_.context -like 'CI / build (*' -and $_.status -in @('failure','error') } | Select-Object -First 1
         if ($build) { throw "Release build ended with $($build.status): $($build.target_url)" }
       }
-      Write-Host "Waiting for CI release $Release"
+      Write-Host "Waiting for CI release $(if ($Release) { $Release } else { "of $releaseSha" })"
       Start-Sleep -Seconds 10
     }
   }
   $releasePath = if ($Release) { 'tags/' + [Uri]::EscapeDataString($Release) } else { 'latest' }
   $metadata = Invoke-RestMethod "$releaseApi/$releasePath" -Headers $releaseHeaders
   $Release = $metadata.tag_name
-  if ($Release -notmatch '^desktop-([0-9a-f]+)$') { throw "Not a desktop release tag: $Release" }
-  $Version = $Matches[1]
+  if ($Release -notmatch '^v[0-9]+(\.[0-9]+)+$') { throw "Not a numbered desktop release: $Release" }
+  $Version = $Release
 
   $download = Join-Path ([IO.Path]::GetTempPath()) "shows-release-$([guid]::NewGuid().ToString('N'))"
   New-Item -ItemType Directory -Path $download | Out-Null
@@ -72,11 +87,8 @@ if ($Channel -eq "stable") {
   $exe = Join-Path $download "bundle\shows-desktop.exe"
   $LibmpvPath = Join-Path $download "bundle\libmpv-2.dll"
 } else {
-  if (-not $Version) {
-    $sha = (git -C $RepoRoot rev-parse --short=12 HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or -not $sha) { throw "Could not determine git revision" }
-    $Version = "$sha-$(Get-Date -Format 'yyyyMMddHHmmss')"
-  }
+  # A local build is never numbered: it is dev, made unique by when it was published.
+  if (-not $Version) { $Version = "dev-$(Get-Date -Format 'yyyyMMddHHmmss')" }
   $workspace = Join-Path $RepoRoot "desktop-rs"
   $frontend = Join-Path $workspace "frontend"
   $exe = Join-Path $workspace "target\release\shows-desktop.exe"
@@ -90,12 +102,12 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
 
   Push-Location $workspace
   try {
-    $env:SHOWS_BUILD_SHA = $Version
+    $env:SHOWS_VERSION = $Version
     $env:SHOWS_UPDATE_CHANNEL = $Channel
     cargo build --release -p shows-desktop
     if ($LASTEXITCODE -ne 0) { throw "Desktop build failed" }
   } finally {
-    Remove-Item Env:SHOWS_BUILD_SHA -ErrorAction SilentlyContinue
+    Remove-Item Env:SHOWS_VERSION -ErrorAction SilentlyContinue
     Remove-Item Env:SHOWS_UPDATE_CHANNEL -ErrorAction SilentlyContinue
     Pop-Location
   }

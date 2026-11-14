@@ -72,6 +72,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The desktop's version and its release tag (PIPT-7): main (a push or a dispatch) reserves the next v0.1.N on
+      # this commit; a PR build is named after it, v0.1.N-prP.R, and is not released.
+      - id: version
+        uses: romaine-life/pipeline-templates/actions/release-version@main
+        with:
+          prefix: v0.1
+          publish: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+
       - uses: romaine-life/pipeline-templates/actions/home-cache@main
 
       - uses: romaine-life/pipeline-templates/actions/rust-toolchain@main
@@ -127,9 +135,10 @@ jobs:
 
       - name: Build desktop
         working-directory: desktop-rs
+        env:
+          SHOWS_VERSION: ${{ steps.version.outputs.version }}
+          SHOWS_UPDATE_CHANNEL: stable
         run: |
-          $env:SHOWS_BUILD_SHA = (git rev-parse --short=7 HEAD).Trim()
-          $env:SHOWS_UPDATE_CHANNEL = 'stable'
           cargo build --release --locked -p shows-desktop
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
@@ -161,23 +170,20 @@ jobs:
 
       - uses: forgejo/upload-artifact@v4
         with:
-          name: shows-desktop-${{ github.sha }}
+          name: shows-desktop-${{ steps.version.outputs.version }}
           path: desktop-rs/dist/shows-desktop-windows-amd64.zip
           if-no-files-found: error
 
       - name: Publish Forgejo release
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: steps.version.outputs.tag != ''
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           $api = "$env:GITHUB_SERVER_URL/api/v1/repos/$env:GITHUB_REPOSITORY"
           $headers = @{ Authorization = "token $env:TOKEN" }
           $sha = (git rev-parse HEAD).Trim()
-          $short = (git rev-parse --short=7 HEAD).Trim()
-          $tag = "desktop-$short"
-          $tagged = Invoke-RestMethod "$api/tags/$tag" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable tagStatus
-          if ($tagStatus -eq 200 -and $tagged.commit.sha -ne $sha) { throw 'Desktop tag already names another commit' }
-          if ($tagStatus -ne 200 -and $tagStatus -ne 404) { throw "Tag lookup returned $tagStatus" }
+          $tag = $env:TAG
           $existing = Invoke-RestMethod "$api/releases/tags/$tag" -Headers $headers -SkipHttpErrorCheck -StatusCodeVariable status
           if ($status -eq 200 -and -not $existing.draft -and ($existing.assets | Where-Object name -eq 'shows-desktop-windows-amd64.zip')) {
             Write-Host "Already released $tag"
@@ -186,7 +192,7 @@ jobs:
           if ($status -ne 404 -and $status -ne 200) { throw "Release lookup returned $status" }
           if ($status -eq 200) { $release = $existing } else {
             $release = Invoke-RestMethod -Method Post "$api/releases" -Headers $headers -ContentType 'application/json' -Body (@{
-              tag_name = $tag; target_commitish = $sha; name = "shows-desktop @ $short"
+              tag_name = $tag; target_commitish = $sha; name = "shows-desktop $tag"
               body = "Signed Windows desktop built from $sha. Download the ZIP, unpack, and run shows-desktop.exe."
               draft = $true
             } | ConvertTo-Json)
@@ -198,5 +204,5 @@ jobs:
           Invoke-RestMethod -Method Post "$api/releases/$($release.id)/assets?name=$($zip.Name)" -Headers $headers -Form @{attachment = $zip} | Out-Null
           Invoke-RestMethod -Method Patch "$api/releases/$($release.id)" -Headers $headers -ContentType 'application/json' -Body '{"draft":false}' | Out-Null
       - name: Delete the files of older releases
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: steps.version.outputs.tag != ''
         uses: romaine-life/pipeline-templates/actions/prune-releases@main

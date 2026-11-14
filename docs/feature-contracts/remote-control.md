@@ -9,7 +9,7 @@ Client UI, transport, packaging and installation belong to the remote repository
 
 - The desktop-owned `shows-control` crate defines protocol 1, typed commands,
   bounded messages, SSE parsing, identity validation and preview encoding. The
-  remote consumes an immutable revision; release SHAs do not have to match.
+  remote consumes an immutable revision; release versions do not have to match.
 - `GET /remote/info` identifies `shows-desktop` and its supported protocol before
   any controls. A missing, stopped or different listener fails explicitly.
 - The overlay's listener is loopback-only at `127.0.0.1:45831`; `SHOWS_CONTROL_PORT`

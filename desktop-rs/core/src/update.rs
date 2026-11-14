@@ -2,12 +2,15 @@
 //!
 //! Forgejo requires a stored Git credential even for public release metadata.
 //! Authentication never prompts. Missing credentials, offline requests, and
-//! dev/source builds without an embedded SHA simply yield `None`.
+//! dev/source builds without an embedded version simply yield `None`.
 //!
-//! The build SHA is stamped in at compile time via the `SHOWS_BUILD_SHA` env var
-//! (set by `.forgejo/workflows/ci.yml`); a dev `cargo build` has none,
-//! so it's treated as "version unknown" and skips the check.
+//! CI stamps the release version (`v0.1.N`, or `v0.1.N-prP.R` for a build that
+//! isn't released) in at compile time via `SHOWS_VERSION`, from
+//! pipeline-templates' release-version step; a local `cargo build` has none, so
+//! it's treated as "version unknown" and skips the check. A release is offered
+//! only when its number is higher than this build's.
 
+use std::cmp::Ordering;
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -20,7 +23,6 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const RELEASES_LATEST: &str =
     "https://forgejo.romaine.life/api/v1/repos/nelsong6/shows/releases/latest";
-const TAG_PREFIX: &str = "desktop-"; // release tags are desktop-<short-sha>
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
@@ -29,9 +31,9 @@ pub struct UpdateInfo {
     pub url: String,
 }
 
-/// The short SHA this build was stamped with, or `None` on a source/dev run.
-pub fn current_sha() -> Option<String> {
-    option_env!("SHOWS_BUILD_SHA")
+/// The release version this build was stamped with, or `None` on a source/dev run.
+pub fn current_version() -> Option<String> {
+    option_env!("SHOWS_VERSION")
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -41,19 +43,40 @@ pub fn current_channel() -> &'static str {
     option_env!("SHOWS_UPDATE_CHANNEL").unwrap_or("dev")
 }
 
-/// Pure comparison: given the current SHA and the latest release tag+url, return
-/// `UpdateInfo` when a different (newer) release exists, else `None`.
-pub fn compare(current: &str, tag: &str, url: &str) -> Option<UpdateInfo> {
-    let latest = tag.strip_prefix(TAG_PREFIX).unwrap_or(tag);
-    if !latest.is_empty() && latest != current {
-        Some(UpdateInfo {
-            latest: latest.to_string(),
-            current: current.to_string(),
-            url: url.to_string(),
-        })
-    } else {
-        None
+/// A version's place in the series: its numbers, and whether it is a build that
+/// isn't released (`v0.1.13-pr152.871`), which comes before `v0.1.13` itself.
+/// `None` for anything that isn't `v` and dot-separated numbers.
+fn release_number(version: &str) -> Option<(Vec<u64>, bool)> {
+    let (base, unreleased) = match version.split_once('-') {
+        Some((base, _)) => (base, true),
+        None => (version, false),
+    };
+    let numbers = base
+        .strip_prefix('v')?
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    Some((numbers, unreleased))
+}
+
+fn newer(latest: &(Vec<u64>, bool), current: &(Vec<u64>, bool)) -> bool {
+    match latest.0.cmp(&current.0) {
+        Ordering::Equal => current.1 && !latest.1,
+        order => order == Ordering::Greater,
     }
+}
+
+/// Pure comparison: given the current version and the latest release tag+url,
+/// return `UpdateInfo` when the release is numbered higher than this build,
+/// else `None`. A tag that isn't a release number is never offered.
+pub fn compare(current: &str, tag: &str, url: &str) -> Option<UpdateInfo> {
+    let latest = release_number(tag)?;
+    let mine = release_number(current)?;
+    newer(&latest, &mine).then(|| UpdateInfo {
+        latest: tag.to_string(),
+        current: current.to_string(),
+        url: url.to_string(),
+    })
 }
 
 /// Compare this build to Forgejo's latest release. `None` on a dev build, when
@@ -62,7 +85,7 @@ pub fn check() -> Option<UpdateInfo> {
     if current_channel() != "stable" {
         return None;
     }
-    let current = current_sha()?;
+    let current = current_version()?;
     let (tag, url) = fetch_latest_release()?;
     compare(&current, &tag, &url)
 }
@@ -168,38 +191,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn update_available() {
+    fn a_higher_release_is_offered() {
         assert_eq!(
-            compare("old1234", "desktop-new5678", "https://gh/rel"),
+            compare("v0.1.4", "v0.1.12", "https://forgejo/rel"),
             Some(UpdateInfo {
-                latest: "new5678".into(),
-                current: "old1234".into(),
-                url: "https://gh/rel".into(),
+                latest: "v0.1.12".into(),
+                current: "v0.1.4".into(),
+                url: "https://forgejo/rel".into(),
             })
         );
+        assert!(compare("v0.1.40", "v0.2.0", "u").is_some());
     }
 
     #[test]
-    fn up_to_date_is_none() {
-        assert_eq!(compare("same999", "desktop-same999", ""), None);
+    fn the_same_or_an_older_release_is_not_offered() {
+        assert_eq!(compare("v0.1.7", "v0.1.7", ""), None);
+        assert_eq!(compare("v0.1.12", "v0.1.4", ""), None);
     }
 
     #[test]
-    fn empty_latest_is_none() {
-        // a tag that's only the prefix (or empty) yields no comparable version
-        assert_eq!(compare("x", "desktop-", "u"), None);
-        assert_eq!(compare("x", "", "u"), None);
+    fn a_build_that_is_not_released_is_behind_its_own_number() {
+        assert!(compare("v0.1.13-pr152.871", "v0.1.13", "u").is_some());
+        assert_eq!(compare("v0.1.13-pr152.871", "v0.1.12", "u"), None);
+        assert_eq!(compare("v0.1.13-run871", "v0.1.12", "u"), None);
     }
 
     #[test]
-    fn unprefixed_tag_compared_whole() {
-        assert_eq!(
-            compare("x", "v2", "u"),
-            Some(UpdateInfo {
-                latest: "v2".into(),
-                current: "x".into(),
-                url: "u".into(),
-            })
-        );
+    fn a_tag_or_build_that_is_not_a_release_number_is_never_offered() {
+        // desktop-<commit> is how releases were named before they were numbered.
+        assert_eq!(compare("v0.1.4", "desktop-1a2b3c4", "u"), None);
+        assert_eq!(compare("v0.1.4", "", "u"), None);
+        assert_eq!(compare("v0.1.4", "v0.1.x", "u"), None);
+        assert_eq!(compare("dev", "v0.1.9", "u"), None);
     }
 }

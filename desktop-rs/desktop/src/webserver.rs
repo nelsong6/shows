@@ -405,7 +405,7 @@ impl ControlServer {
         json!({
             "application": "shows-desktop",
             "protocol": shows_control::PROTOCOL_VERSION,
-            "build": option_env!("SHOWS_BUILD_SHA").unwrap_or("source"),
+            "build": option_env!("SHOWS_VERSION").unwrap_or("dev"),
             "computer": std::env::var("COMPUTERNAME").unwrap_or_default(),
             "pid": std::process::id(),
         })
