@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: romaine-life/pipeline-templates/actions/home-cache@main
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: romaine-life/pipeline-templates/actions/rust-toolchain@main
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -64,8 +64,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: windows-latest
-    env:
-      RUSTUP_TOOLCHAIN: stable
     defaults:
       run:
         shell: pwsh -NoLogo -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; . ([scriptblock]::Create([IO.File]::ReadAllText('{0}'))); if (Test-Path variable:LASTEXITCODE) { exit $LASTEXITCODE }"
@@ -76,17 +74,14 @@ jobs:
 
       - uses: romaine-life/pipeline-templates/actions/home-cache@main
 
-      - name: Install Rust toolchain
-        run: |
-          rustup update stable --no-self-update
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: romaine-life/pipeline-templates/actions/rust-toolchain@main
 
       - uses: actions/cache@v4
         with:
           path: desktop-rs/target
           key: shows-windows-rust-target-v1-${{ hashFiles('desktop-rs/Cargo.lock') }}
 
-      - uses: actions/setup-node@v4
+      - uses: romaine-life/pipeline-templates/actions/setup-node@main
         with:
           node-version: '20'
           cache: npm
