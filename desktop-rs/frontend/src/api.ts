@@ -82,14 +82,6 @@ export type FileSyncStatus = {
   problems: FileSyncProblem[];
 };
 
-// Set by the launch update-check when this build is behind the latest release.
-export type UpdateInfo = {
-  available: boolean;
-  latest: string;
-  current: string;
-  url: string;
-};
-
 export type Status = {
   phase: Phase;
   message: string;
@@ -112,7 +104,6 @@ export type Status = {
   alerts?: StatusAlert[];
   error_kind?: 'round_unplayable' | string;
   round_blocked?: boolean;
-  update?: UpdateInfo;
   window_maximized?: boolean;
   window_fullscreen?: boolean;
   window_on_top?: boolean;

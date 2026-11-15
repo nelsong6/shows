@@ -103,12 +103,10 @@ if ($Channel -eq "dev" -and -not $SkipBuild) {
   Push-Location $workspace
   try {
     $env:SHOWS_VERSION = $Version
-    $env:SHOWS_UPDATE_CHANNEL = $Channel
     cargo build --release -p shows-desktop
     if ($LASTEXITCODE -ne 0) { throw "Desktop build failed" }
   } finally {
     Remove-Item Env:SHOWS_VERSION -ErrorAction SilentlyContinue
-    Remove-Item Env:SHOWS_UPDATE_CHANNEL -ErrorAction SilentlyContinue
     Pop-Location
   }
 }

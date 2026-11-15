@@ -40,7 +40,6 @@ import {
   type HistoryEvent,
   type Playback,
   type Stats,
-  type UpdateInfo,
   type ControlResult,
   fetchShowDetails,
   type ShowDetailsResponse,
@@ -124,7 +123,6 @@ function App() {
   const [showDetails, setShowDetails] = useState<ShowDetailsResponse | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [updateDismissed, setUpdateDismissed] = useState<string | null>(null);
   const [controlsIdle, setControlsIdle] = useState(false);
   const [controlsHovered, setControlsHovered] = useState(false);
   const [controlsPointerDown, setControlsPointerDown] = useState(false);
@@ -914,12 +912,6 @@ function App() {
       />
       <VolumeOsd volume={volOsd} />
       {controlToast && <ControlToast message={controlToast.message} level={controlToast.level} />}
-      {status.update?.available && status.update.latest !== updateDismissed && (
-        <UpdateBanner
-          info={status.update}
-          onDismiss={() => setUpdateDismissed(status.update!.latest)}
-        />
-      )}
       {overlayVisible ? (
         <div className={`layout${roundActive ? ' over-video' : ''}`}>
 
@@ -975,39 +967,6 @@ function App() {
         onToggleStayOnTop={togglePin}
         onToggleFullscreen={() => runControl(toggleFullscreen)}
       />
-    </div>
-  );
-}
-
-// A dismissible banner shown when the launch update-check finds a newer release.
-function UpdateBanner({ info, onDismiss }: { info: UpdateInfo; onDismiss: () => void }) {
-  return (
-    <div
-      className="updatebar"
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        padding: '6px 12px',
-        background: 'rgba(18,18,18,0.94)',
-        borderBottom: '1px solid var(--border, #333)',
-        fontSize: 13,
-        color: 'var(--fg-secondary, #ccc)',
-      }}
-    >
-      <span className="pill info">update</span>
-      <span style={{ flex: 1 }}>
-        A newer build is available — <strong>{info.latest}</strong>
-        {info.current ? ` (you're on ${info.current})` : ''}.
-      </span>
-      {info.url && (
-        <a className="gb" href={info.url} target="_blank" rel="noreferrer">
-          releases ↗
-        </a>
-      )}
-      <button className="gb" onClick={onDismiss} title="dismiss">
-        ✕
-      </button>
     </div>
   );
 }

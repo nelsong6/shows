@@ -34,7 +34,6 @@ desktop-rs/           Cargo workspace
       engine.rs       pure round/advance/defer engine
       runner.rs       round-robin runner and local media cache orchestration
       model.rs        persisted row types
-      update.rs       Forgejo Releases update check
   control/            shows-control; typed control protocol and client
   desktop/            shows-desktop; Windows shell and the only unsafe code
     src/

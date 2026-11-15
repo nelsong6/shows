@@ -137,7 +137,6 @@ jobs:
         working-directory: desktop-rs
         env:
           SHOWS_VERSION: ${{ steps.version.outputs.version }}
-          SHOWS_UPDATE_CHANNEL: stable
         run: |
           cargo build --release --locked -p shows-desktop
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
