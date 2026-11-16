@@ -8,7 +8,8 @@
 //! ```text
 //!   IDLE    -> next round from database -> queue N -> PLAYING
 //!   PLAYING -> each episode's natural end advances it (local); round drains -> IDLE
-//!   IDLE    -> empty round -> DRAINED -> park
+//!   IDLE    -> empty round -> DRAINED -> wait for another playlist
+//!   any     -> playlist switched -> IDLE
 //! ```
 //!
 //! Advance is per-episode: an episode is marked watched the instant it plays to
@@ -20,12 +21,13 @@
 //! core and is fully tested with fakes.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::engine;
 use crate::pending::{PendingWatch, PendingWatches};
+use crate::playlist::PlaylistChoice;
 use crate::replica::{DbResult, Replica};
 
 /// A `threading.Event`-equivalent: settable, with a blocking `wait`.
@@ -359,6 +361,7 @@ pub type OnError = Box<dyn Fn(&str) + Send + Sync>;
 pub type OnFileSync = Box<dyn Fn(&FileSyncReport) + Send + Sync>;
 pub type OnStatus = Box<dyn Fn(&str, &str) + Send + Sync>;
 pub type OnDatabase = Box<dyn Fn() + Send + Sync>;
+pub type OnPlaylist = Box<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Default)]
 pub struct Callbacks {
@@ -370,6 +373,8 @@ pub struct Callbacks {
     pub on_status: Option<OnStatus>,
     /// Reachability or the pending-watch count may have changed.
     pub on_database: Option<OnDatabase>,
+    /// The runner is about to play this playlist.
+    pub on_playlist: Option<OnPlaylist>,
 }
 
 struct Inner {
@@ -386,7 +391,12 @@ pub struct Runner {
     /// Whether the last [`Runner::check_database`] reached the database.
     database_seen: AtomicBool,
     player: Arc<dyn PlayerOps>,
-    playlists: Vec<String>,
+    choice: Arc<PlaylistChoice>,
+    /// The playlist the loaded round came from; none before the first round.
+    playlist: Mutex<Option<String>>,
+    /// Counts [`Runner::select_playlist`] switches, so the run loop can tell
+    /// one happened while it was busy or waiting.
+    switches: AtomicU64,
     stop: Arc<StopFlag>,
     cb: Callbacks,
     inner: Mutex<Inner>,
@@ -397,7 +407,7 @@ impl Runner {
         replica: Arc<Replica>,
         pending: Arc<PendingWatches>,
         player: Arc<dyn PlayerOps>,
-        playlists: Vec<String>,
+        choice: Arc<PlaylistChoice>,
         stop: Arc<StopFlag>,
         cb: Callbacks,
     ) -> Runner {
@@ -406,7 +416,9 @@ impl Runner {
             pending,
             database_seen: AtomicBool::new(true),
             player,
-            playlists,
+            choice,
+            playlist: Mutex::new(None),
+            switches: AtomicU64::new(0),
             stop,
             cb,
             inner: Mutex::new(Inner {
@@ -428,15 +440,16 @@ impl Runner {
 
     fn run_loop(&self) {
         while !self.stop.is_set() {
-            let (round, pos) = match self.next_round_from_db() {
+            let switches = self.switches.load(Ordering::SeqCst);
+            let (playlist, round, pos) = match self.next_round_from_db() {
                 Ok(next) => next,
                 Err(e) if self.replica.is_reachable() => {
                     log::error!("round could not be read: {e}");
                     if let Some(cb) = &self.cb.on_error {
                         cb(&format!("the round could not be read from the database: {e}"));
                     }
-                    self.stop.wait();
-                    return;
+                    self.wait_for_switch(switches);
+                    continue;
                 }
                 Err(e) => {
                     log::warn!("holding for the database: {e}");
@@ -445,12 +458,12 @@ impl Runner {
                 }
             };
             if round.is_empty() {
-                log::info!("playlists drained: {}", self.playlists.join(","));
+                log::info!("playlist drained: {}", playlist.as_deref().unwrap_or("(none)"));
                 if let Some(cb) = &self.cb.on_drained {
                     cb();
                 }
-                self.stop.wait(); // park until shutdown
-                return;
+                self.wait_for_switch(switches);
+                continue;
             }
             {
                 let mut inner = self.inner.lock().unwrap();
@@ -461,8 +474,8 @@ impl Runner {
                 inner.loaded_any = false;
             }
             log::info!(
-                "round loaded/queued: playlists={} episodes={} start_pos={} start_episode={}",
-                self.playlists.join(","),
+                "round loaded/queued: playlist={} episodes={} start_pos={} start_episode={}",
+                playlist.as_deref().unwrap_or(""),
                 round.len(),
                 pos,
                 round.get(pos).map(|e| e.episode_id.as_str()).unwrap_or("")
@@ -477,6 +490,12 @@ impl Runner {
                 cb(&round, pos);
             }
 
+            if self.switches.load(Ordering::SeqCst) != switches {
+                // Switched while this round loaded: the switch's interrupt
+                // came before the wait below could see it.
+                self.player.playlist_clear();
+                continue;
+            }
             let wait_res = self.player.wait_for_round_end(&self.stop);
             if self.stop.is_set() {
                 return;
@@ -489,31 +508,95 @@ impl Runner {
                 return;
             }
             self.player.playlist_clear();
+            if self.switches.load(Ordering::SeqCst) != switches {
+                continue;
+            }
             let loaded_any = {
                 let mut inner = self.inner.lock().unwrap();
                 inner.round = None;
                 inner.loaded_any
             };
             if !loaded_any {
-                log::error!("round produced no playable media; parking until restart");
+                log::error!("round produced no playable media; waiting for another playlist");
                 if let Some(cb) = &self.cb.on_error {
                     cb("no playable media — check that the show files are reachable");
                 }
-                self.stop.wait();
-                return;
+                self.wait_for_switch(switches);
             }
         }
     }
 
-    /// The next round to play. Waiting marks land first: a round picked without
+    /// The next round to play and the playlist it comes from, none when the
+    /// library has no shows. Waiting marks land first: a round picked without
     /// them would offer episodes that have already been watched.
-    fn next_round_from_db(&self) -> DbResult<(Vec<RoundEntry>, usize)> {
+    fn next_round_from_db(&self) -> DbResult<(Option<String>, Vec<RoundEntry>, usize)> {
         self.apply_pending()?;
-        let (round, pos) = self.load_round_from_db()?;
+        let Some(playlist) = self.resolve_playlist()? else {
+            return Ok((None, vec![], 0));
+        };
+        let (round, pos) = self.load_round_from_db(&playlist)?;
         if round.is_empty() {
-            return Ok((self.compute_and_save_new_round()?, 0));
+            let round = self.compute_and_save_new_round(&playlist)?;
+            return Ok((Some(playlist), round, 0));
         }
-        Ok((round, pos))
+        Ok((Some(playlist), round, pos))
+    }
+
+    /// This computer's chosen playlist, or the first by name when it has never
+    /// chosen one.
+    fn resolve_playlist(&self) -> DbResult<Option<String>> {
+        let playlist = self.choice.resolve(&self.replica)?;
+        *self.playlist.lock().unwrap() = playlist.clone();
+        if let (Some(name), Some(cb)) = (&playlist, &self.cb.on_playlist) {
+            cb(name);
+        }
+        Ok(playlist)
+    }
+
+    /// The playlist the loaded round came from.
+    pub fn playlist(&self) -> Option<String> {
+        self.playlist.lock().unwrap().clone()
+    }
+
+    /// Hold until another playlist is chosen: this one has nothing to play.
+    fn wait_for_switch(&self, seen: u64) {
+        self.stop
+            .wait_until(|| self.switches.load(Ordering::SeqCst) != seen);
+    }
+
+    /// Play `name` from where it was left. The current episode's position is
+    /// saved first, and its round stays in the database to resume later.
+    pub fn select_playlist(&self, name: &str) -> ControlOutcome {
+        match self.replica.playlists() {
+            Ok(known) if known.iter().any(|p| p == name) => {}
+            Ok(_) => {
+                return ControlOutcome::noop(
+                    "unknown_playlist",
+                    format!("no playlist is named {name}"),
+                );
+            }
+            Err(e) => {
+                return ControlOutcome::failed(
+                    "database_unavailable",
+                    format!("playlists could not be read: {e}"),
+                );
+            }
+        }
+        if let Err(e) = self.choice.save(name) {
+            return ControlOutcome::failed(
+                "choice_not_saved",
+                format!("{name} was not selected: the choice could not be saved: {e}"),
+            );
+        }
+        if self.playlist().as_deref() == Some(name) {
+            return ControlOutcome::applied("playlist_selected", format!("already playing {name}"));
+        }
+        self.save_resume();
+        log::info!("playlist selected: {name}");
+        self.switches.fetch_add(1, Ordering::SeqCst);
+        self.stop.wake();
+        self.player.playlist_clear();
+        ControlOutcome::applied("playlist_selected", format!("playing {name}"))
     }
 
     /// Hold at a round boundary until the database is back: the next round can
@@ -565,7 +648,7 @@ impl Runner {
         }
         let playing = self.inner.lock().unwrap().playing.clone();
         if let Some(cur) = playing {
-            if let Err(e) = self.replica.set_round_playing(&cur.episode_id, &self.playlists) {
+            if let Err(e) = self.replica.set_round_playing(&cur.episode_id, &cur.playlist) {
                 log::warn!("could not restore the playing entry: {e}");
             }
         }
@@ -737,7 +820,7 @@ impl Runner {
         }
         if let Err(e) = self
             .replica
-            .set_round_playing(&cur.episode_id, &self.playlists)
+            .set_round_playing(&cur.episode_id, &cur.playlist)
         {
             log::warn!("playing entry not saved: {e}");
         }
@@ -794,17 +877,19 @@ impl Runner {
         }
     }
 
-    fn load_round_from_db(&self) -> DbResult<(Vec<RoundEntry>, usize)> {
+    fn load_round_from_db(&self, playlist: &str) -> DbResult<(Vec<RoundEntry>, usize)> {
         let raw = self.replica.get_round_queue()?;
         let mut round = Vec::new();
         let mut playing_pos = None;
         let mut first_pending_pos = None;
 
-        for (ep_id, show_id, play_order, state, playlist, _updated_at, _dirty) in raw {
-            if !self.playlists.contains(&playlist) {
+        for (ep_id, show_id, play_order, state, queued_in, _updated_at, _dirty) in raw {
+            if queued_in != playlist {
                 continue;
             }
-            let Some(show) = self.replica.show(&show_id)? else {
+            // A show moved to another playlist since this round began has left it.
+            let Some(show) = self.replica.show(&show_id)?.filter(|s| s.playlist == playlist)
+            else {
                 continue;
             };
             let Some(ep) = show.episodes.iter().find(|e| e.id == ep_id) else {
@@ -843,10 +928,10 @@ impl Runner {
         })
     }
 
-    fn compute_and_save_new_round(&self) -> DbResult<Vec<RoundEntry>> {
-        let round = self.fetch_round()?;
+    fn compute_and_save_new_round(&self, playlist: &str) -> DbResult<Vec<RoundEntry>> {
+        let round = self.fetch_round(playlist)?;
         if !round.is_empty() {
-            let entries: Vec<(String, String, i32, String, String)> = round
+            let entries: Vec<(String, String, i32, String)> = round
                 .iter()
                 .enumerate()
                 .map(|(i, r)| {
@@ -855,19 +940,18 @@ impl Runner {
                         r.show_id.clone(),
                         i as i32,
                         "pending".to_string(),
-                        r.playlist.clone(),
                     )
                 })
                 .collect();
             let now = chrono::Utc::now().to_rfc3339();
-            self.replica.save_round_queue(&entries, &now)?;
+            self.replica.save_round_queue(playlist, &entries, &now)?;
         }
         Ok(round)
     }
 
     // ── round build / advance (all local; sync is best-effort) ───────────
-    fn fetch_round(&self) -> DbResult<Vec<RoundEntry>> {
-        let shows = self.replica.active_shows(&self.playlists)?;
+    fn fetch_round(&self, playlist: &str) -> DbResult<Vec<RoundEntry>> {
+        let shows = self.replica.active_shows(playlist)?;
         let ordered = engine::next_round(&shows);
         let name_by: std::collections::HashMap<&str, &str> = shows
             .iter()
@@ -1007,8 +1091,8 @@ impl Runner {
         };
 
         log::info!(
-            "file sync start: playlists={} round_entries={} local_base={:?}",
-            self.playlists.join(","),
+            "file sync start: playlist={} round_entries={} local_base={:?}",
+            self.playlist().unwrap_or_default(),
             round.len(),
             canonical_base
         );
@@ -1165,7 +1249,6 @@ fn prune_unused_files(dir: &std::path::Path, active_paths: &std::collections::Ha
 mod tests {
     use super::*;
     use crate::engine::{Episode, Show};
-    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
@@ -1264,7 +1347,7 @@ mod tests {
     fn runner(
         r: Arc<Replica>,
         player: Arc<dyn PlayerOps>,
-        playlists: &[&str],
+        playlist: &str,
         stop: Arc<StopFlag>,
         cb: Callbacks,
     ) -> Arc<Runner> {
@@ -1272,7 +1355,7 @@ mod tests {
             r,
             pending(),
             player,
-            playlists.iter().map(|s| s.to_string()).collect(),
+            Arc::new(PlaylistChoice::in_memory(Some(playlist))),
             stop,
             cb,
         ))
@@ -1315,7 +1398,7 @@ mod tests {
     }
 
     fn set_round(runner: &Runner) {
-        let round = runner.fetch_round().unwrap();
+        let round = runner.fetch_round("nelson").unwrap();
         runner.inner.lock().unwrap().round = Some(round);
     }
 
@@ -1333,7 +1416,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1354,7 +1437,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1383,7 +1466,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1493,11 +1576,11 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
-        let round = run.fetch_round().unwrap();
+        let round = run.fetch_round("nelson").unwrap();
 
         assert_eq!(round.len(), 1);
         let entry = &round[0];
@@ -1518,7 +1601,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1532,7 +1615,7 @@ mod tests {
     fn controls_report_noop_without_current_round() {
         let r = replica(&[show("s1", "nelson", &["a"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r, p, &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(r, p, "nelson", StopFlag::new(), Callbacks::default());
 
         assert_eq!(run.defer().status(), "no_current_episode");
         assert_eq!(run.previous().status(), "no_current_episode");
@@ -1546,7 +1629,7 @@ mod tests {
         let run = runner(
             r,
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1567,7 +1650,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             stop.clone(),
             Callbacks::default(),
         );
@@ -1604,7 +1687,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             stop.clone(),
             Callbacks::default(),
         );
@@ -1631,7 +1714,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             stop.clone(),
             Callbacks::default(),
         );
@@ -1657,7 +1740,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1695,7 +1778,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let run = runner(r.clone(), p, &["nelson"], stop, cb);
+        let run = runner(r.clone(), p, "nelson", stop, cb);
         run.run_loop();
         assert!(
             errors
@@ -1721,24 +1804,89 @@ mod tests {
             })),
             ..Default::default()
         };
-        let run = runner(r, Arc::new(FakePlayer::default()), &["nelson"], stop, cb);
+        let run = runner(r, Arc::new(FakePlayer::default()), "nelson", stop, cb);
         run.run_loop();
         assert!(drained.load(Ordering::SeqCst));
     }
 
+    // ── playlist selection ───────────────────────────────────────────────
     #[test]
-    fn cross_playlist_round_spans_playlists() {
-        let r = replica(&[show("s1", "nelson", &["a"]), show("s2", "couple", &["b"])]);
-        let run = runner(
+    fn a_computer_that_never_chose_plays_the_first_playlist_by_name() {
+        let r = replica(&[show("s1", "interesting", &["a"]), show("s2", "background", &["b"])]);
+        let run = Arc::new(Runner::new(
             r,
+            pending(),
             Arc::new(FakePlayer::default()),
-            &["nelson", "couple"],
+            Arc::new(PlaylistChoice::in_memory(None)),
             StopFlag::new(),
             Callbacks::default(),
-        );
-        let rnd = run.fetch_round().unwrap();
-        let ids: BTreeSet<&str> = rnd.iter().map(|e| e.show_id.as_str()).collect();
-        assert_eq!(ids, ["s1", "s2"].into_iter().collect());
+        ));
+        let (playlist, round, _) = run.next_round_from_db().unwrap();
+        assert_eq!(playlist.as_deref(), Some("background"));
+        assert_eq!(round[0].show_id, "s2");
+    }
+
+    #[test]
+    fn switching_back_resumes_the_playlist_where_it_was_left() {
+        let r = replica(&[
+            show("s1", "background", &["a"]),
+            show("s2", "background", &["b"]),
+            show("s3", "interesting", &["c"]),
+        ]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r.clone(), p.clone(), "background", StopFlag::new(), Callbacks::default());
+        let (_, round, _) = run.next_round_from_db().unwrap();
+        r.set_round_playing(&round[1].episode_id, "background").unwrap();
+
+        let outcome = run.select_playlist("interesting");
+        assert!(outcome.ok(), "{outcome:?}");
+        assert_eq!(p.clears.load(Ordering::SeqCst), 1);
+        let (playlist, round_c, _) = run.next_round_from_db().unwrap();
+        assert_eq!(playlist.as_deref(), Some("interesting"));
+        assert_eq!(round_c[0].episode_id, "c");
+
+        assert!(run.select_playlist("background").ok());
+        let (_, resumed, pos) = run.next_round_from_db().unwrap();
+        assert_eq!(resumed[pos].episode_id, round[1].episode_id);
+    }
+
+    #[test]
+    fn an_unknown_playlist_is_not_selected() {
+        let r = replica(&[show("s1", "background", &["a"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(r, p.clone(), "background", StopFlag::new(), Callbacks::default());
+        run.next_round_from_db().unwrap();
+        let outcome = run.select_playlist("nelson");
+        assert!(!outcome.ok() && !outcome.is_failure(), "{outcome:?}");
+        assert_eq!(run.choice.get().as_deref(), Some("background"));
+        assert_eq!(p.clears.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_drained_playlist_waits_for_another_to_be_chosen() {
+        let r = replica(&[show("s1", "background", &["a"])]);
+        let stop = StopFlag::new();
+        let (drained_tx, drained) = std::sync::mpsc::channel();
+        let drained_tx = Mutex::new(drained_tx);
+        let played = Arc::new(Mutex::new(None));
+        let (p2, stop2) = (played.clone(), stop.clone());
+        let cb = Callbacks {
+            on_drained: Some(Box::new(move || drained_tx.lock().unwrap().send(()).unwrap())),
+            on_round: Some(Box::new(move |round, _| {
+                *p2.lock().unwrap() = Some(round[0].playlist.clone());
+                stop2.set();
+            })),
+            ..Default::default()
+        };
+        let run = runner(r, Arc::new(FakePlayer::default()), "empty", stop.clone(), cb);
+        let looping = {
+            let run = run.clone();
+            std::thread::spawn(move || run.run_loop())
+        };
+        drained.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(run.select_playlist("background").ok());
+        looping.join().unwrap();
+        assert_eq!(played.lock().unwrap().as_deref(), Some("background"));
     }
 
     // ── resume ─────────────────────────────────────────────────────────
@@ -1750,7 +1898,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p,
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1768,7 +1916,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1797,7 +1945,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1825,7 +1973,7 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -1904,19 +2052,19 @@ mod tests {
         let run = runner(
             r.clone(),
             p.clone(),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
 
         // Compute and save round
-        let round = run.fetch_round().unwrap();
+        let round = run.fetch_round("nelson").unwrap();
         assert_eq!(round.len(), 2);
 
         let idx_c = round.iter().position(|r| r.episode_id == "c").unwrap();
         let idx_a = round.iter().position(|r| r.episode_id == "a").unwrap();
 
-        let entries: Vec<(String, String, i32, String, String)> = round
+        let entries: Vec<(String, String, i32, String)> = round
             .iter()
             .enumerate()
             .map(|(i, r)| {
@@ -1929,11 +2077,10 @@ mod tests {
                     } else {
                         "pending".to_string()
                     },
-                    r.playlist.clone(),
                 )
             })
             .collect();
-        r.save_round_queue(&entries, "2026-05-31T00:00:00Z").unwrap();
+        r.save_round_queue("nelson", &entries, "2026-05-31T00:00:00Z").unwrap();
 
         // Populate inner.round and inner.pos (start playing "a")
         {
@@ -1975,11 +2122,11 @@ mod tests {
         let run = runner(
             r.clone(),
             p,
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
-        let round = run.compute_and_save_new_round().unwrap();
+        let round = run.compute_and_save_new_round("nelson").unwrap();
         run.inner.lock().unwrap().round = Some(round.clone());
         let idx_a = round.iter().position(|e| e.episode_id == "a").unwrap();
         let idx_c = round.iter().position(|e| e.episode_id == "c").unwrap();
@@ -1991,7 +2138,7 @@ mod tests {
         run.set_pos(idx_c);
         run.on_file_loaded();
 
-        let (_, pos) = run.load_round_from_db().unwrap();
+        let (_, pos) = run.load_round_from_db("nelson").unwrap();
         assert_eq!(pos, idx_c);
         assert!(watched(&r, "a").is_some());
         assert!(watched(&r, "c").is_none());
@@ -1999,7 +2146,7 @@ mod tests {
         // Stepping back to the finished "a" is where playback last was.
         run.set_pos(idx_a);
         run.on_file_loaded();
-        let (_, pos) = run.load_round_from_db().unwrap();
+        let (_, pos) = run.load_round_from_db("nelson").unwrap();
         assert_eq!(pos, idx_a);
         assert!(watched(&r, "a").is_some());
     }
@@ -2010,7 +2157,7 @@ mod tests {
         let nas = Nas::new();
         let r = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(r.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
         set_round(&run);
         let cur = run.current().unwrap();
 
@@ -2035,7 +2182,7 @@ mod tests {
             r.clone(),
             Arc::new(PendingWatches::open(dir.path().to_path_buf())),
             p.clone(),
-            vec!["nelson".to_string()],
+            Arc::new(PlaylistChoice::in_memory(Some("nelson"))),
             StopFlag::new(),
             Callbacks::default(),
         );
@@ -2055,7 +2202,7 @@ mod tests {
         let nas = Nas::new();
         let r = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(r.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
         set_round(&run);
         let cur = run.current().unwrap();
 
@@ -2079,8 +2226,8 @@ mod tests {
             show("s2", "nelson", &["b"]),
         ]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
-        let round = run.compute_and_save_new_round().unwrap();
+        let run = runner(r.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
+        let round = run.compute_and_save_new_round("nelson").unwrap();
         run.inner.lock().unwrap().round = Some(round.clone());
 
         nas.go_down(&r);
@@ -2104,7 +2251,7 @@ mod tests {
             show("s2", "nelson", &["b"]),
         ]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
+        let run = runner(r.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
         set_round(&run);
         let other = run.inner.lock().unwrap().round.as_ref().unwrap()[1].clone();
 
@@ -2124,8 +2271,8 @@ mod tests {
         let first = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
         let second = Arc::new(Replica::new(nas.path().to_str().unwrap()));
         let p = Arc::new(FakePlayer::default());
-        let on_first = runner(first.clone(), p.clone(), &["nelson"], StopFlag::new(), Callbacks::default());
-        let on_second = runner(second.clone(), p, &["nelson"], StopFlag::new(), Callbacks::default());
+        let on_first = runner(first.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
+        let on_second = runner(second.clone(), p, "nelson", StopFlag::new(), Callbacks::default());
         set_round(&on_first);
         set_round(&on_second);
         first.drop_connection_for_test();
@@ -2146,11 +2293,11 @@ mod tests {
         let run = runner(
             r.clone(),
             Arc::new(FakePlayer::default()),
-            &["nelson"],
+            "nelson",
             StopFlag::new(),
             Callbacks::default(),
         );
-        let first_pick = run.fetch_round().unwrap()[0].clone();
+        let first_pick = run.fetch_round("nelson").unwrap()[0].clone();
         run.pending
             .add(&PendingWatch {
                 show_id: first_pick.show_id.clone(),
@@ -2160,7 +2307,7 @@ mod tests {
             })
             .unwrap();
 
-        let (round, _) = run.next_round_from_db().unwrap();
+        let (_, round, _) = run.next_round_from_db().unwrap();
 
         assert_ne!(round[0].episode_id, first_pick.episode_id);
     }
@@ -2188,7 +2335,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let run = runner(r, Arc::new(FakePlayer::default()), &["nelson"], stop, cb);
+        let run = runner(r, Arc::new(FakePlayer::default()), "nelson", stop, cb);
         (run, drained, rx)
     }
 

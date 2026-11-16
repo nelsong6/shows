@@ -16,7 +16,10 @@ This contract is intentionally frontend-facing. Any field used by
 
 - `phase`: one of `initializing`, `auth`, `syncing`, `fetching`, `playing`, `drained`, `error`.
 - `message`: human-readable current state.
-- `playlist`: comma-separated active playlists for this runner.
+- `playlist`: the playlist this computer plays (see "Playlists" in
+  [round-and-advance.md](round-and-advance.md)); empty until the first round is read.
+- `playlists`: every playlist holding a show, by name: the choices the overlay and
+  the remote offer. Re-read when the database revision moves.
 - `round`: array of current round entries. Empty when no round is active.
 - `round_pos`: zero-based index into `round`. Valid when `phase == "playing"` and `round` is non-empty.
 - `round_id`: monotonically increasing desktop-local round identity, or `null` when no round is active.

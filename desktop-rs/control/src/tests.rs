@@ -140,6 +140,12 @@ fn invalid_numeric_controls_are_rejected_before_network_io() {
         Command::Seek {
             seconds: f64::INFINITY,
         },
+        Command::SelectPlaylist {
+            playlist: String::new(),
+        },
+        Command::SelectPlaylist {
+            playlist: "x".repeat(257),
+        },
     ] {
         assert!(client.execute(&command).is_err());
     }

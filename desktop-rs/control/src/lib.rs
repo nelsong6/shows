@@ -89,6 +89,7 @@ pub enum Command {
     Volume { level: f64 },
     Fullscreen {},
     PlayShow { show_id: String },
+    SelectPlaylist { playlist: String },
 }
 
 impl Command {
@@ -102,6 +103,9 @@ impl Command {
             }
             Self::PlayShow { show_id } if show_id.is_empty() || show_id.len() > 256 => {
                 Err("show_id must contain 1 to 256 bytes".into())
+            }
+            Self::SelectPlaylist { playlist } if playlist.is_empty() || playlist.len() > 256 => {
+                Err("playlist must contain 1 to 256 bytes".into())
             }
             _ => Ok(()),
         }

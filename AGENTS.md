@@ -27,10 +27,10 @@ desktop-rs/           Cargo workspace
   core/               shows-core; pure Rust, #![forbid(unsafe_code)]
     src/
       ordering.rs     SHA-256 path ordering
-      roundlogic.rs   round helpers and playlist parsing
       scan.rs         folder scanning and episode discovery
       replica.rs      authoritative SQLite schema, reads, and transactions
       pending.rs      local list of watched marks on their way to the database
+      playlist.rs     the playlist this computer plays
       engine.rs       pure round/advance/defer engine
       runner.rs       round-robin runner and local media cache orchestration
       model.rs        persisted row types

@@ -23,8 +23,8 @@ Client UI, transport, packaging and installation belong to the remote repository
   when a token names a key it hasn't seen. Browser Origin headers are refused. An open
   status stream outlives its token. Traffic is plain HTTP: the token proves who the
   remote is, and a token seen on the home network is usable until it expires.
-- `POST /remote/control` accepts typed playback and fullscreen commands, requires
-  JSON, and rejects browser Origin headers. It exposes no filesystem browsing,
+- `POST /remote/control` accepts typed playback, playlist and fullscreen commands,
+  requires JSON, and rejects browser Origin headers. It exposes no filesystem browsing,
   shell execution, library import or other window actions.
 - The desktop creates no client command, PATH entry or binary.
 
@@ -37,6 +37,10 @@ Client UI, transport, packaging and installation belong to the remote repository
   pause/volume values. An unloaded episode fails; no action succeeds as a no-op.
 - Seek acknowledges mpv command acceptance; navigation acknowledges the runner
   result. Live SSE status establishes the resulting selected episode and position.
+- `select_playlist` switches the controlled desktop to another playlist by the
+  [playlist invariants](round-and-advance.md#playlists); the choices are the status
+  `playlists` field. Like fullscreen, it needs no loaded episode, so a drained
+  playlist can be left from the remote.
 - Fullscreen posts the toggle only to the controlled desktop window. A missing
   window or failed post returns an error; `window_fullscreen` in SSE confirms the
   resulting state. It requires no loaded episode and changes no playback state.

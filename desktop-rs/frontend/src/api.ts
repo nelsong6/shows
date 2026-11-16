@@ -85,7 +85,9 @@ export type FileSyncStatus = {
 export type Status = {
   phase: Phase;
   message: string;
+  // The playlist this computer plays, and every playlist it could switch to.
   playlist: string;
+  playlists?: string[];
   round?: RoundEntry[];
   // Index into `round` of the entry currently playing (mpv playlist-pos).
   round_pos?: number;
@@ -211,6 +213,11 @@ export async function skip(): Promise<ControlResult> {
 // back never marks anything watched).
 export async function previous(): Promise<ControlResult> {
   return postControl('/prev');
+}
+
+// Play another playlist on this computer, from where it was left.
+export async function selectPlaylist(playlist: string): Promise<ControlResult> {
+  return postControl('/playlist', {playlist});
 }
 
 export async function playShow(showId: string): Promise<ControlResult> {

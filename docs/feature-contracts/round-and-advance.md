@@ -80,7 +80,7 @@ The only local write path is the pending-watch list under
 - The local media-file cache remains disposable. It does not contain library or
   watch-state authority.
 
-- **Empty playlist (no active shows)**: `engine.next_round` returns `[]`; the runner treats the playlist as drained and parks until shutdown.
+- **Empty playlist (no active shows)**: `engine.next_round` returns `[]`; the runner treats the playlist as drained and waits until another playlist is chosen (L4).
 - **Database unreachable**: see [Database outages](#database-outages). Previously cached media is not treated as database state.
 - **Crash mid-round**: per-episode advances already committed on EOF remain watched; an unfinished episode remains unwatched.
 
@@ -131,16 +131,17 @@ Invariants:
 - **M2. Manual play is pure navigation.** Selecting a show to play simply moves the player's active playlist position directly to the show's stable index in the player (`playlist-pos`).
 - **M3. One entry is playing.** A round has at most one `"playing"` entry per playlist: the episode whose file loaded last, however playback got there (natural advance, skip, previous, defer or Play Show). A file load moves `"playing"` to its entry in one transaction; the entry it leaves returns to `"watched"` if its episode is watched, otherwise `"pending"`. A partial unique index on `round_queue` enforces it. Startup resumes at the `"playing"` entry, even when that episode is already watched, and falls back to the first `"pending"` entry. Watched status itself is untouched by navigation.
 
-## Cross-playlist rounds
+## Playlists
 
-Single-playlist is the primary path; cross-playlist is purely additive — set `SHOWS_PLAYLISTS=a,b,c` to interleave several playlists in one rotation.
-
-`engine.next_round` over the **union** of active shows across the named playlists returns one episode per active show, ordered by the same SHA-256-of-path key as I1 over the merged candidate set. Each entry carries its own `playlist`. Drained or unknown playlists contribute nothing; if every named playlist is drained the round is `[]`.
+Every show belongs to one playlist (`shows.playlist`), and a round is drawn from one playlist. Each computer plays the playlist chosen on it, in the overlay's settings sidebar or with the remote's `select_playlist` command (`runner.select_playlist`, `POST /playlist` on the loopback listener). The choice is saved in `%APPDATA%\shows\playlist.txt`, so the TV and the desk can play different playlists. A computer that has never chosen plays the first playlist by name. A show moves to another playlist from its overview in the overlay (`/library/update`).
 
 Invariants:
 
-- **X1. Cross-playlist order is the single-playlist order over the union.** Hashing is per absolute path, so a cross-playlist round is identical to sorting the concatenation of each playlist's candidates — playlist membership never affects an episode's key.
-- **X2. Advance stays per-show.** Each entry's advance touches only its own show (per-episode, A1); there is no cross-playlist transaction, and re-applying any entry is safe by I3.
+- **L1. Each playlist keeps its own round.** Starting a round replaces only that playlist's `round_queue` rows (`replica.save_round_queue`), so switching away and back resumes at the `"playing"` entry by M3. The same save drops any entry whose show has since moved to another playlist or left the library.
+- **L2. A switch saves before it moves.** The choice is written before playback changes, and the current episode's resume position is saved; a choice that can't be written changes nothing and reports why. Only a playlist holding a show can be chosen, so selecting needs the database (O6).
+- **L3. A switch reloads at once.** The loaded round is interrupted and the next round is read for the new playlist, as `/round/reload` does. Nothing is marked watched.
+- **L4. Nothing to play waits for a switch.** A drained playlist, a round that can't be read, and a round with no playable media wait for another playlist to be chosen, not for a restart.
+- **L5. A moved show leaves its old round.** A round being loaded skips entries whose show is no longer in that playlist.
 
 ## Advance timing (per-episode)
 
@@ -156,7 +157,7 @@ Consequence: closing the app partway through a round keeps precisely the episode
 
 An episode advances **only** on a natural end (A1) or an explicit skip (I7). Every other way a file can end leaves it unwatched — a non-watch is never recorded as a watch:
 
-- **Load failure** (`end-file` reason `ERROR`): a file that can't be opened is passed over, never marked watched. If *nothing* in a round opens, the runner treats it as "media unreachable" — it surfaces an error and parks rather than re-queuing the same unplayable round (which would spin and, before this rule, error-stormed entire rounds into a falsely-watched state).
+- **Load failure** (`end-file` reason `ERROR`): a file that can't be opened is passed over, never marked watched. If *nothing* in a round opens, the runner treats it as "media unreachable" — it surfaces an error and waits for another playlist (L4) rather than re-queuing the same unplayable round (which would spin and, before this rule, error-stormed entire rounds into a falsely-watched state).
 - **Defer** (D1–D3) and **closing mid-episode**: the forced or early end isn't an `EOF`, so the episode stays the show's next pick (defer also bumps its position to the back of the queue).
 
 This is the invariant the user's model turns on ("if I finished the Simpsons but missed Malcolm, don't make me re-watch the Simpsons, and don't skip Malcolm"). Mechanism: `shows/player.py` keys the advance callback on the `EOF` reason; `shows/runner.py` advances the now-playing entry on that callback. Locked by `desktop-qt/tests/test_runner.py`.

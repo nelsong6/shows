@@ -8,8 +8,8 @@
 pub mod engine;
 pub mod ordering;
 pub mod pending;
+pub mod playlist;
 pub mod remote_token;
 pub mod replica;
-pub mod roundlogic;
 pub mod runner;
 pub mod scan;

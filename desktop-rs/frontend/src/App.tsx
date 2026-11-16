@@ -34,6 +34,8 @@ import {
   type NextRoundEpisode,
   removeShow,
   rescanShow,
+  selectPlaylist,
+  updateShow,
   rescanWatchedShow,
   type Status,
   type Show,
@@ -788,6 +790,14 @@ function App() {
               showControlToast(`added ${result.added} episode${result.added === 1 ? '' : 's'}`, 'info');
             });
           }}
+          playlists={status.playlists ?? []}
+          onMove={(playlist) => {
+            void runLibraryAction(async () => {
+              await updateShow(selectedShow.id, {playlist});
+              setSelected(null);
+              await refreshShows();
+            }, `moved ${selectedShow.name} to ${playlist}`);
+          }}
         />
       ) : (
         <>
@@ -1539,10 +1549,6 @@ function BottomControlBar({
 function Queue({ round, pos, onSelectShow }: { round: Status['round']; pos: number; onSelectShow: (showId: string) => void }) {
   const entries = round ?? [];
   if (entries.length === 0) return null;
-  // Show the playlist tag only when the round interleaves more than one
-  // (a cross-playlist round); for a single playlist it's just noise.
-  const multiPlaylist =
-    new Set(entries.map((e) => e.playlist).filter(Boolean)).size > 1;
   return (
     <div className="section">
       <h3>queue</h3>
@@ -1554,7 +1560,6 @@ function Queue({ round, pos, onSelectShow }: { round: Status['round']; pos: numb
             onClick={() => onSelectShow(r.show_id)}
           >
             <span className="q-mark">{i < pos ? '✓' : ''}</span>
-            {multiPlaylist && r.playlist && <span className="q-pl">{r.playlist}</span>}
             <span className="q-show">{r.show_name}</span>
             <span className="q-ep">{shortPath(r.absolute_path)}</span>
           </li>
@@ -1573,6 +1578,8 @@ function ShowOverview({
   onMarkUnwatched,
   onRemove,
   onRescan,
+  playlists,
+  onMove,
 }: {
   show: Show;
   details: ShowDetailsResponse;
@@ -1582,8 +1589,12 @@ function ShowOverview({
   onMarkUnwatched: () => void;
   onRemove: () => void;
   onRescan: () => void;
+  playlists: string[];
+  onMove: (playlist: string) => void;
 }) {
   const [view, setView] = useState<'all' | 'previous' | 'upcoming' | 'history'>('all');
+  const [moveTo, setMoveTo] = useState('');
+  const target = moveTo.trim();
 
   return (
     <div className="section">
@@ -1621,6 +1632,27 @@ function ShowOverview({
       <div className="meta" style={{ margin: '0 0 12px' }}>
         {shortPath(show.root_path)}
       </div>
+      <form
+        className="move-playlist"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (target && target !== show.playlist) onMove(target);
+        }}
+      >
+        <span className="meta">playlist: {show.playlist}</span>
+        <input
+          placeholder="move to playlist"
+          list="known-playlists"
+          value={moveTo}
+          onChange={(e) => setMoveTo(e.target.value)}
+        />
+        <datalist id="known-playlists">
+          {playlists.filter((p) => p !== show.playlist).map((p) => <option key={p} value={p} />)}
+        </datalist>
+        <button className="gb" type="submit" disabled={!target || target === show.playlist}>
+          move
+        </button>
+      </form>
 
       <div style={{ display: 'flex', gap: '8px', marginBottom: '16px' }}>
         <button className="gb" style={{ opacity: view === 'all' ? 1 : 0.5 }} onClick={() => setView('all')}>
@@ -1705,7 +1737,7 @@ function AddShowForm({
   // Manual state
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
-  const [pl, setPl] = useState(playlist || 'nelson');
+  const [pl, setPl] = useState(playlist);
   const [msg, setMsg] = useState('');
   const [busy, setBusy] = useState(false);
   const [previewData, setPreviewData] = useState<string[] | null>(null);
@@ -1750,7 +1782,7 @@ function AddShowForm({
     const cleanPath = path.trim().replace(/^["']|["']$/g, '');
     setBusy(true);
     setMsg('saving…');
-    addShow(name.trim(), cleanPath, (pl || 'nelson').trim())
+    addShow(name.trim(), cleanPath, pl.trim())
       .then((r) => {
         const message = `added ${r.episodes} episode${r.episodes === 1 ? '' : 's'}`;
         setMsg(message);
@@ -2179,6 +2211,17 @@ function SettingsPanel({
   overviewContent: React.ReactNode;
 }) {
   const [activeTab, setActiveTab] = useState<'overview' | 'stats' | 'library' | 'add_show' | 'next_round' | 'general' | 'appearance'>('overview');
+  const [switchingTo, setSwitchingTo] = useState<string | null>(null);
+  const playlists = status.playlists ?? [];
+
+  const handleSelectPlaylist = (playlist: string) => {
+    if (playlist === status.playlist || switchingTo) return;
+    setSwitchingTo(playlist);
+    setSelected(null);
+    selectPlaylist(playlist)
+      .catch((e) => onToast(e instanceof Error ? e.message : `${playlist} was not selected`, 'danger'))
+      .finally(() => setSwitchingTo(null));
+  };
 
   const statsHeader = stats && stats.total_shows ? (() => {
     const pct = stats.episodes_total
@@ -2227,6 +2270,24 @@ function SettingsPanel({
   return (
     <div className="settings-panel">
       <div className="settings-sidebar">
+        {playlists.length > 0 && (
+          <>
+            <h3>playlist</h3>
+            <nav className="settings-nav playlist-nav" aria-label="Playlists">
+              {playlists.map((p) => (
+                <button
+                  key={p}
+                  aria-current={p === status.playlist ? 'true' : undefined}
+                  className={`nav-btn${p === status.playlist ? ' active' : ''}`}
+                  disabled={switchingTo !== null}
+                  onClick={() => handleSelectPlaylist(p)}
+                >
+                  {switchingTo === p ? `${p}…` : p}
+                </button>
+              ))}
+            </nav>
+          </>
+        )}
         <h3>settings</h3>
         <nav className="settings-nav" aria-label="Settings sections">
           <button aria-current={activeTab === 'overview' ? 'page' : undefined} className={`nav-btn${activeTab === 'overview' ? ' active' : ''}`} onClick={() => setActiveTab('overview')}>overview</button>

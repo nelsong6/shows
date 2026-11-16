@@ -326,21 +326,27 @@ impl Replica {
     }
 
     // ── reads ───────────────────────────────────────────────────────────
-    /// Non-removed shows in the given playlists, with episodes — the input to
-    /// [`engine::next_round`] (pass several playlists for a cross-playlist round).
-    pub fn active_shows(&self, playlists: &[String]) -> DbResult<Vec<Show>> {
-        if playlists.is_empty() {
-            return Ok(vec![]);
-        }
+    /// Non-removed shows in `playlist`, with episodes — the input to
+    /// [`engine::next_round`].
+    pub fn active_shows(&self, playlist: &str) -> DbResult<Vec<Show>> {
         self.with_conn(|conn| {
-            let marks = vec!["?"; playlists.len()].join(",");
-            let sql =
-                format!("SELECT id FROM shows WHERE removed_at IS NULL AND playlist IN ({marks})");
-            let mut stmt = conn.prepare(&sql)?;
+            let mut stmt =
+                conn.prepare("SELECT id FROM shows WHERE removed_at IS NULL AND playlist=?1")?;
             let ids = stmt
-                .query_map(params_from_iter(playlists.iter()), |r| r.get::<_, String>(0))?
+                .query_map(params![playlist], |r| r.get::<_, String>(0))?
                 .collect::<DbResult<Vec<_>>>()?;
             load_shows(conn, &ids)
+        })
+    }
+
+    /// Every playlist holding a non-removed show, by name.
+    pub fn playlists(&self) -> DbResult<Vec<String>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT playlist FROM shows WHERE removed_at IS NULL ORDER BY playlist",
+            )?;
+            stmt.query_map([], |r| r.get::<_, String>(0))?
+                .collect::<DbResult<Vec<_>>>()
         })
     }
 
@@ -772,29 +778,33 @@ impl Replica {
         })
     }
 
+    /// Replace `playlist`'s round with `entries` (episode, show, play order,
+    /// state). Other playlists keep their rounds, except entries for a show that
+    /// has since moved to another playlist or left the library: those go too.
     pub fn save_round_queue(
         &self,
-        entries: &[(String, String, i32, String, String)],
+        playlist: &str,
+        entries: &[(String, String, i32, String)],
         updated_at: &str,
     ) -> DbResult<()> {
         self.with_conn(|conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            tx.execute("DELETE FROM round_queue", [])?;
-            let mut playlists = HashSet::new();
+            tx.execute(
+                "DELETE FROM round_queue WHERE playlist=?1 OR NOT EXISTS \
+                 (SELECT 1 FROM shows s WHERE s.id=round_queue.show_id AND s.playlist=round_queue.playlist)",
+                params![playlist],
+            )?;
             for entry in entries {
-                playlists.insert(entry.4.clone());
                 tx.execute(
                     "INSERT INTO round_queue (episode_id, show_id, play_order, state, playlist, updated_at, dirty) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-                    params![entry.0, entry.1, entry.2, entry.3, entry.4, updated_at],
+                    params![entry.0, entry.1, entry.2, entry.3, playlist, updated_at],
                 )?;
             }
-            for playlist in playlists {
-                tx.execute(
-                    "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
-                    params![format!("queue_updated:{playlist}"), updated_at],
-                )?;
-            }
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+                params![format!("queue_updated:{playlist}"), updated_at],
+            )?;
             tx.commit()
         })
     }
@@ -821,35 +831,27 @@ impl Replica {
     }
 
     /// Make `episode_id` the one `playing` entry (M3): the entry it replaces in
-    /// any of `playlists` returns to `watched` or `pending` by its episode's
-    /// watched status, in the same transaction.
-    pub fn set_round_playing(&self, episode_id: &str, playlists: &[String]) -> DbResult<()> {
+    /// `playlist` returns to `watched` or `pending` by its episode's watched
+    /// status, in the same transaction.
+    pub fn set_round_playing(&self, episode_id: &str, playlist: &str) -> DbResult<()> {
         let now = now();
         self.with_conn(|conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            let marks = (3..playlists.len() + 3)
-                .map(|i| format!("?{i}"))
-                .collect::<Vec<_>>()
-                .join(",");
-            let mut args: Vec<&str> = vec![now.as_str(), episode_id];
-            args.extend(playlists.iter().map(String::as_str));
             tx.execute(
                 &format!(
                     "UPDATE round_queue SET state={DEMOTED_STATE}, updated_at=?1, dirty=0 \
-                     WHERE state='playing' AND episode_id<>?2 AND playlist IN ({marks})"
+                     WHERE state='playing' AND episode_id<>?2 AND playlist=?3"
                 ),
-                params_from_iter(args.iter()),
+                params![now, episode_id, playlist],
             )?;
             tx.execute(
                 "UPDATE round_queue SET state='playing', updated_at=?1, dirty=0 WHERE episode_id=?2",
                 params![now, episode_id],
             )?;
-            for playlist in playlists {
-                tx.execute(
-                    "UPDATE round_queue SET updated_at=?1, dirty=0 WHERE playlist=?2",
-                    params![now, playlist],
-                )?;
-            }
+            tx.execute(
+                "UPDATE round_queue SET updated_at=?1, dirty=0 WHERE playlist=?2",
+                params![now, playlist],
+            )?;
             tx.commit()
         })
     }
@@ -886,9 +888,9 @@ impl Replica {
     }
     // ── dashboard payloads ───────────────────────────────────────────────
     /// Active shows for the dashboard sidebar (no episodes).
-    pub fn overlay_shows(&self, playlists: &[String]) -> DbResult<Vec<Value>> {
+    pub fn overlay_shows(&self, playlist: &str) -> DbResult<Vec<Value>> {
         Ok(self
-            .active_shows(playlists)?
+            .active_shows(playlist)?
             .into_iter()
             .map(|s| {
                 json!({
@@ -948,18 +950,12 @@ impl Replica {
 
     /// Library + watch stats for the dashboard: totals, per-show progress,
     /// recent activity, and per-day heatmap.
-    pub fn stats(&self, playlists: &[String]) -> DbResult<Value> {
-        if playlists.is_empty() {
-            return Ok(json!({}));
-        }
+    pub fn stats(&self, playlist: &str) -> DbResult<Value> {
         self.with_conn(|conn| {
-            let marks = vec!["?"; playlists.len()].join(",");
-
-            let mut stmt = conn.prepare(&format!(
-                "SELECT id, name, playlist, removed_at FROM shows WHERE playlist IN ({marks})"
-            ))?;
+            let mut stmt =
+                conn.prepare("SELECT id, name, playlist, removed_at FROM shows WHERE playlist=?1")?;
             let shows: Vec<(String, String, String, Option<String>)> = stmt
-                .query_map(params_from_iter(playlists.iter()), |r| {
+                .query_map(params![playlist], |r| {
                     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
                 })?
                 .collect::<DbResult<_>>()?;
@@ -990,14 +986,14 @@ impl Replica {
 
             // Recent + heatmap come from episodes.watched_at (pulled in /library), so
             // they reflect the FULL history, not just this client's local rows.
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare(
                 "SELECT e.show_id, e.relative_path, e.watched_at FROM episodes e \
                  JOIN shows s ON e.show_id = s.id \
-                 WHERE e.watched_at IS NOT NULL AND s.playlist IN ({marks}) \
-                 ORDER BY e.watched_at DESC LIMIT 25"
-            ))?;
+                 WHERE e.watched_at IS NOT NULL AND s.playlist=?1 \
+                 ORDER BY e.watched_at DESC LIMIT 25",
+            )?;
             let recent: Vec<Value> = stmt
-                .query_map(params_from_iter(playlists.iter()), |r| {
+                .query_map(params![playlist], |r| {
                     let sid: String = r.get(0)?;
                     let rp: String = r.get(1)?;
                     let wa: String = r.get(2)?;
@@ -1009,16 +1005,14 @@ impl Replica {
                 .collect::<DbResult<_>>()?;
 
             let cutoff = (chrono::Utc::now() - chrono::Duration::days(140)).to_rfc3339();
-            let mut day_params: Vec<String> = playlists.to_vec();
-            day_params.push(cutoff);
-            let mut stmt = conn.prepare(&format!(
+            let mut stmt = conn.prepare(
                 "SELECT substr(e.watched_at,1,10) d, COUNT(*) c FROM episodes e \
                  JOIN shows s ON e.show_id = s.id \
-                 WHERE e.watched_at IS NOT NULL AND s.playlist IN ({marks}) AND e.watched_at >= ? \
-                 GROUP BY d"
-            ))?;
+                 WHERE e.watched_at IS NOT NULL AND s.playlist=?1 AND e.watched_at >= ?2 \
+                 GROUP BY d",
+            )?;
             let mut by_day = serde_json::Map::new();
-            for row in stmt.query_map(params_from_iter(day_params.iter()), |r| {
+            for row in stmt.query_map(params![playlist, cutoff], |r| {
                 Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
             })? {
                 let row = row?;
@@ -1205,7 +1199,7 @@ mod tests {
     fn seed_and_next_round() {
         let r = Replica::new(":memory:");
         seed(&r);
-        let shows = r.active_shows(&["nelson".into()]).unwrap();
+        let shows = r.active_shows("nelson").unwrap();
         assert_eq!(ids(&shows), ["s1", "s2"].into_iter().collect());
         let rnd = next_round(&shows);
         let rids: BTreeSet<&str> = rnd.iter().map(|o| o.show_id.as_str()).collect();
@@ -1232,7 +1226,7 @@ mod tests {
                 .watched_at
                 .is_some()
         );
-        let nr = next_round(&r.active_shows(&["nelson".into()]).unwrap());
+        let nr = next_round(&r.active_shows("nelson").unwrap());
         assert_eq!(
             nr.iter().find(|o| o.show_id == "s1").unwrap().episode_id,
             "b"
@@ -1248,7 +1242,7 @@ mod tests {
         assert_eq!(removed, ["s2"]);
         assert!(r.show("s2").unwrap().unwrap().removed_at.is_some());
         assert_eq!(
-            ids(&r.active_shows(&["nelson".into()]).unwrap()),
+            ids(&r.active_shows("nelson").unwrap()),
             ["s1"].into_iter().collect()
         );
     }
@@ -1326,7 +1320,7 @@ mod tests {
         ).unwrap();
         assert!(!sid.is_empty());
         let me = r
-            .active_shows(&["nelson".into()]).unwrap()
+            .active_shows("nelson").unwrap()
             .into_iter()
             .find(|s| s.id == sid)
             .unwrap();
@@ -1339,7 +1333,7 @@ mod tests {
         let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into()]).unwrap();
         assert!(r.remove_show(&sid).unwrap());
         assert!(
-            r.active_shows(&["nelson".into()]).unwrap()
+            r.active_shows("nelson").unwrap()
                 .iter()
                 .all(|s| s.id != sid)
         );
@@ -1351,10 +1345,8 @@ mod tests {
         let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into()]).unwrap();
         let show = r.show(&sid).unwrap().unwrap();
         let eid = show.episodes[0].id.clone();
-        r.save_round_queue(
-            &[(eid, sid.clone(), 0, "pending".into(), "nelson".into())],
-            T0,
-        ).unwrap();
+        r.save_round_queue("nelson", &[(eid, sid.clone(), 0, "pending".into())], T0)
+            .unwrap();
 
         assert!(r.remove_show(&sid).unwrap());
         assert!(
@@ -1407,7 +1399,7 @@ mod tests {
         let a0 = r.show(&a).unwrap().unwrap().episodes[0].id.clone();
         let b0 = r.show(&b).unwrap().unwrap().episodes[0].id.clone();
         r.advance(&[(a, a0), (b, b0)]).unwrap(); // b drains -> finished
-        let s = r.stats(&["nelson".into()]).unwrap();
+        let s = r.stats("nelson").unwrap();
         assert_eq!(s["total_shows"], 2);
         assert_eq!(s["episodes_total"], 3);
         assert_eq!(s["episodes_watched"], 2);
@@ -1430,17 +1422,15 @@ mod tests {
                 "s1".to_string(),
                 0,
                 "pending".to_string(),
-                "nelson".to_string(),
             ),
             (
                 "ep2".to_string(),
                 "s2".to_string(),
                 1,
                 "pending".to_string(),
-                "nelson".to_string(),
             ),
         ];
-        r.save_round_queue(&entries, "2026-05-31T00:00:00Z").unwrap();
+        r.save_round_queue("nelson", &entries, "2026-05-31T00:00:00Z").unwrap();
 
         assert_eq!(
             r.remove_round_entry("ep1").unwrap(),
@@ -1475,11 +1465,44 @@ mod tests {
                     show.to_string(),
                     i as i32,
                     state.to_string(),
-                    "nelson".to_string(),
                 )
             })
             .collect();
-        r.save_round_queue(&entries, T0).unwrap();
+        r.save_round_queue("nelson", &entries, T0).unwrap();
+    }
+
+    #[test]
+    fn saving_a_round_keeps_other_playlists_rounds() {
+        let r = Replica::new(":memory:");
+        let a = r.create_show("background", "A", "D:\\A", &["a1.mkv".into()]).unwrap();
+        let b = r.create_show("interesting", "B", "D:\\B", &["b1.mkv".into()]).unwrap();
+        let ep = |sid: &str| r.show(sid).unwrap().unwrap().episodes[0].id.clone();
+        let (a1, b1) = (ep(&a), ep(&b));
+        r.save_round_queue("background", &[(a1.clone(), a.clone(), 0, "playing".into())], T0)
+            .unwrap();
+        r.save_round_queue("interesting", &[(b1.clone(), b.clone(), 0, "pending".into())], T0)
+            .unwrap();
+        assert_eq!(
+            queue_states(&r),
+            vec![(a1.clone(), "playing".into()), (b1.clone(), "pending".into())]
+        );
+
+        // A show moved to another playlist leaves its old playlist's round when
+        // any round is next saved.
+        r.update_show(&b, None, None, Some("background")).unwrap();
+        r.save_round_queue("background", &[(a1.clone(), a.clone(), 0, "pending".into())], T0)
+            .unwrap();
+        assert_eq!(queue_states(&r), vec![(a1, "pending".into())]);
+    }
+
+    #[test]
+    fn playlists_lists_those_with_active_shows() {
+        let r = Replica::new(":memory:");
+        r.create_show("interesting", "B", "D:\\B", &["b.mkv".into()]).unwrap();
+        r.create_show("background", "A", "D:\\A", &["a.mkv".into()]).unwrap();
+        let gone = r.create_show("finished", "C", "D:\\C", &["c.mkv".into()]).unwrap();
+        r.remove_show(&gone).unwrap();
+        assert_eq!(r.playlists().unwrap(), ["background", "interesting"]);
     }
 
     #[test]
@@ -1487,13 +1510,11 @@ mod tests {
         let r = Replica::new(":memory:");
         seed(&r);
         queue(&r, &[("a", "s1", "pending"), ("c", "s2", "pending")]);
-        let playlists = ["nelson".to_string()];
-
-        r.set_round_playing("a", &playlists).unwrap();
+        r.set_round_playing("a", "nelson").unwrap();
         r.advance(&[("s1".into(), "a".into())]).unwrap();
         // Revisit the finished episode, then move on.
-        r.set_round_playing("a", &playlists).unwrap();
-        r.set_round_playing("c", &playlists).unwrap();
+        r.set_round_playing("a", "nelson").unwrap();
+        r.set_round_playing("c", "nelson").unwrap();
 
         assert_eq!(
             queue_states(&r),
@@ -1588,10 +1609,10 @@ mod tests {
         let (r, _) = on_disk(&dir);
         r.drop_connection_for_test();
 
-        assert!(r.active_shows(&["nelson".to_string()]).is_err());
+        assert!(r.active_shows("nelson").is_err());
         assert!(r.get_round_queue().is_err());
         assert!(r.show("s1").is_err());
-        assert!(r.stats(&["nelson".to_string()]).is_err());
+        assert!(r.stats("nelson").is_err());
     }
 
     #[test]

@@ -14,6 +14,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
+use shows_core::playlist::PlaylistChoice;
 use shows_core::remote_token::TokenChecker;
 use shows_core::replica::{DbError, Replica};
 use shows_core::runner::{ControlOutcome, Runner};
@@ -175,6 +176,20 @@ impl StatusPatch {
         StatusPatch { fields }
     }
 
+    /// The playlist the runner is about to play.
+    pub fn playlist(name: &str) -> StatusPatch {
+        let mut fields = serde_json::Map::new();
+        fields.insert("playlist".into(), json!(name));
+        StatusPatch { fields }
+    }
+
+    /// Every playlist holding a show, the choices for the picker.
+    pub fn playlists(names: Vec<String>) -> StatusPatch {
+        let mut fields = serde_json::Map::new();
+        fields.insert("playlists".into(), json!(names));
+        StatusPatch { fields }
+    }
+
     pub fn drained() -> StatusPatch {
         let mut patch = StatusPatch::phase(StatusPhase::Drained, "every show finished");
         patch.fields.insert("round".into(), json!([]));
@@ -243,7 +258,7 @@ type StayOnTopCb = Box<dyn Fn(bool) + Send + Sync>;
 pub type PreviewCb = Box<dyn Fn() -> Result<shows_control::preview::VideoPreview, String> + Send + Sync>;
 
 pub struct ControlServer {
-    playlists: Vec<String>,
+    choice: Arc<PlaylistChoice>,
     replica: Arc<Replica>,
     status: Mutex<serde_json::Map<String, Value>>,
     status_events: StatusBroadcaster,
@@ -259,14 +274,12 @@ pub struct ControlServer {
 }
 
 impl ControlServer {
-    pub fn new(
-        replica: Arc<Replica>,
-        playlists: Vec<String>,
-    ) -> Arc<ControlServer> {
+    pub fn new(replica: Arc<Replica>, choice: Arc<PlaylistChoice>) -> Arc<ControlServer> {
         let mut status = serde_json::Map::new();
         status.insert("phase".into(), json!("initializing"));
         status.insert("message".into(), json!("starting up"));
-        status.insert("playlist".into(), json!(playlists.join(", ")));
+        status.insert("playlist".into(), json!(""));
+        status.insert("playlists".into(), json!([]));
         status.insert("round".into(), json!([]));
         status.insert("round_pos".into(), json!(0));
         status.insert("round_id".into(), json!(null));
@@ -276,7 +289,7 @@ impl ControlServer {
         status.insert("window_fullscreen".into(), json!(false));
         status.insert("window_on_top".into(), json!(false));
         Arc::new(ControlServer {
-            playlists,
+            choice,
             replica,
             status: Mutex::new(status),
             status_events: StatusBroadcaster::default(),
@@ -427,11 +440,17 @@ impl ControlServer {
             (Method::Get, "/status/stream") => self.status_stream(request),
             (Method::Get, "/remote/preview") => self.video_preview(request),
             (Method::Get, "/shows") => {
-                let v = json!(from_database!(request, self.replica.overlay_shows(&self.playlists)));
-                respond_json(request, 200, &v)
+                let shows = match from_database!(request, self.choice.resolve(&self.replica)) {
+                    Some(playlist) => from_database!(request, self.replica.overlay_shows(&playlist)),
+                    None => vec![],
+                };
+                respond_json(request, 200, &json!(shows))
             }
             (Method::Get, "/stats") => {
-                let stats = from_database!(request, self.replica.stats(&self.playlists));
+                let stats = match from_database!(request, self.choice.resolve(&self.replica)) {
+                    Some(playlist) => from_database!(request, self.replica.stats(&playlist)),
+                    None => json!({}),
+                };
                 respond_json(request, 200, &stats)
             }
             (Method::Get, "/history") => {
@@ -596,6 +615,11 @@ impl ControlServer {
                     }),
                 );
             }
+            "/playlist" => {
+                let b = read_body(&mut request);
+                let playlist = b.get("playlist").and_then(Value::as_str).unwrap_or("").to_string();
+                self.respond_runner_outcome(request, |r| r.select_playlist(&playlist));
+            }
             "/round/reload" => {
                 self.push_status(StatusPatch::phase(
                     StatusPhase::Fetching,
@@ -742,11 +766,23 @@ impl ControlServer {
                         }),
                     );
                 };
+                let playlist = b.get("playlist").and_then(Value::as_str).map(str::trim);
+                if playlist == Some("") {
+                    return respond_json(
+                        request,
+                        400,
+                        &json!({
+                            "ok": false,
+                            "status": "missing_playlist",
+                            "message": "a show's playlist can't be blank",
+                        }),
+                    );
+                }
                 from_database!(request, self.replica.update_show(
                     id,
                     b.get("name").and_then(Value::as_str),
                     b.get("root_path").and_then(Value::as_str),
-                    b.get("playlist").and_then(Value::as_str),
+                    playlist,
                 ));
                 self.notify_database_change();
                 respond_control_ok(request, "show_updated", "show updated");
@@ -819,7 +855,9 @@ impl ControlServer {
             return respond_json(request, 400, &json!({"ok": false, "message": message}));
         }
         let status = self.status_json();
-        if !matches!(&command, Command::Fullscreen {}) && !shows_control::playback_ready(&status) {
+        if !matches!(&command, Command::Fullscreen {} | Command::SelectPlaylist { .. })
+            && !shows_control::playback_ready(&status)
+        {
             return respond_json(request, 503, &json!({"ok": false, "message": "Shows has no playable episode loaded; check status"}));
         }
         log::info!("remote control: {command:?}");
@@ -829,6 +867,9 @@ impl ControlServer {
             Command::Previous {} => self.respond_runner_outcome(request, |r| r.previous()),
             Command::Defer {} => self.respond_runner_outcome(request, |r| r.defer()),
             Command::PlayShow { show_id } => self.respond_runner_outcome(request, |r| r.play_show(&show_id)),
+            Command::SelectPlaylist { playlist } => {
+                self.respond_runner_outcome(request, |r| r.select_playlist(&playlist))
+            }
             Command::Play {} | Command::Pause {} | Command::Seek { .. } | Command::Volume { .. } => {
                 let result = {
                     let player = self.player.lock().unwrap();
@@ -873,14 +914,14 @@ impl ControlServer {
         let playlist = b
             .get("playlist")
             .and_then(Value::as_str)
-            .unwrap_or("nelson")
+            .unwrap_or("")
             .trim()
             .to_string();
-        if name.is_empty() || root.is_empty() {
+        if name.is_empty() || root.is_empty() || playlist.is_empty() {
             return respond_json(
                 request,
                 400,
-                &json!({"error":"name and root_path are required"}),
+                &json!({"error":"name, root_path and playlist are required"}),
             );
         }
         let eps = scan::scan_episodes(&root);
@@ -920,9 +961,10 @@ impl ControlServer {
     }
 
     fn library_next_round(self: &Arc<Self>, request: Request) {
-        // We assume playlist "nelson" for now, or take it from query params.
-        // Let's just use the active shows for all playlists we know about, or default to nelson.
-        let shows = from_database!(request, self.replica.active_shows(&["nelson".to_string()]));
+        let shows = match from_database!(request, self.choice.resolve(&self.replica)) {
+            Some(playlist) => from_database!(request, self.replica.active_shows(&playlist)),
+            None => vec![],
+        };
         let round = shows_core::engine::next_round(&shows);
 
         let mut results = Vec::new();
@@ -1634,7 +1676,7 @@ mod tests {
     fn remote_fullscreen_needs_a_window_but_not_a_loaded_episode() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         for available in [None, Some(false), Some(true)] {
-            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
             let calls = Arc::new(AtomicUsize::new(0));
             if let Some(success) = available {
                 let calls = calls.clone();
@@ -1662,7 +1704,7 @@ mod tests {
 
     #[test]
     fn native_remote_reports_unavailable_player_without_mutating_shared_state() {
-        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec!["nelson".into()]);
+        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
         let revision = control.replica.revision().unwrap();
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();
@@ -1681,7 +1723,7 @@ mod tests {
     #[test]
     fn preview_reads_are_bounded_cached_and_do_not_change_playback_or_database() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
         let calls = Arc::new(AtomicUsize::new(0));
         let capture_calls = calls.clone();
         control.set_on_preview(Box::new(move || {
@@ -1709,7 +1751,7 @@ mod tests {
     #[test]
     fn the_network_port_serves_only_the_remotes_routes_and_only_with_a_token() {
         use std::io::Write;
-        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();
         let requests = [
@@ -1745,7 +1787,7 @@ mDuMrlN4kCyK6H6Zctd4R+n5AAmhRANCAAS5N+qDIf54e0j5JWN5q2/oG8JJm9YN
 RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
 -----END PRIVATE KEY-----
 ";
-        let mut control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+        let mut control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
         Arc::get_mut(&mut control).unwrap().remote_tokens = TokenChecker::with_fetch(Box::new(|| {
             serde_json::from_value(json!({"keys":[{"kty":"EC","crv":"P-256","use":"sig","alg":"ES256","kid":"k1",
                 "x":"uTfqgyH-eHtI-SVjeatv6BvCSZvWDUV3BJcMeDc8yI4","y":"t405O4-jzrRWb1wqKOBc8LFqbBj5_gu3fa4P82q6sBY"}]}))
@@ -1786,7 +1828,7 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
     fn remote_rejects_browser_requests_before_applying_controls() {
         use std::io::Write;
         for headers in ["Content-Type: text/plain\r\n", "Content-Type: application/json\r\nOrigin: https://example.com\r\n"] {
-            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), vec![]);
+            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
             let listener = Server::http("127.0.0.1:0").unwrap();
             let address = listener.server_addr().to_string();
             let worker = std::thread::spawn(move || {
@@ -1862,9 +1904,7 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
 
     #[test]
     fn identical_shell_state_is_rebroadcast_as_an_acknowledgement() {
-        let server = ControlServer::new(Arc::new(Replica::new(":memory:")),
-            vec!["nelson".to_string()],
-        );
+        let server = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
 
         server.push_raw(json!({"window_on_top": false}));
         let after_first = server.status_seq.load(Ordering::Relaxed);
@@ -1889,14 +1929,13 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
 
     #[test]
     fn initial_status_snapshot_has_frontend_contract_fields() {
-        let server = ControlServer::new(Arc::new(Replica::new(":memory:")),
-            vec!["nelson".to_string()],
-        );
+        let server = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
         let value = server.status_json();
 
         assert_eq!(value["phase"], "initializing");
         assert_eq!(value["message"], "starting up");
-        assert_eq!(value["playlist"], "nelson");
+        assert_eq!(value["playlist"], "");
+        assert_eq!(value["playlists"], json!([]));
         assert!(value["round"].is_array());
         assert_eq!(value["round_pos"], 0);
         assert!(value["round_id"].is_null());
@@ -1924,7 +1963,7 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
     fn database_routes_answer_an_outage_with_a_message_not_an_empty_500() {
         let control = ControlServer::new(
             Arc::new(Replica::connect("missing-directory/shows.db")),
-            vec!["nelson".into()],
+            Arc::new(PlaylistChoice::in_memory(Some("nelson"))),
         );
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();

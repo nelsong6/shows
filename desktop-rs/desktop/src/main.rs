@@ -21,8 +21,8 @@ use std::sync::{Arc, mpsc::sync_channel};
 use std::time::{Duration, Instant};
 
 use shows_core::pending::PendingWatches;
+use shows_core::playlist::PlaylistChoice;
 use shows_core::replica::Replica;
-use shows_core::roundlogic::parse_playlists;
 use shows_core::runner::{Callbacks, PlayerOps, Runner, StopFlag};
 use webserver::{
     StatusFileSync, StatusFileSyncProblem, StatusPatch, StatusPhase, StatusRemovedShow,
@@ -100,7 +100,22 @@ fn database_publisher(
     path: String,
 ) -> Arc<dyn Fn(Option<i64>) + Send + Sync> {
     let last = std::sync::Mutex::new((0, serde_json::Value::Null));
+    // The revision the playlist list was last read at: any library edit can
+    // add or empty a playlist, and every edit moves the revision.
+    let listed = std::sync::Mutex::new(None);
     Arc::new(move |revision| {
+        if let Some(revision) = revision {
+            let mut listed = listed.lock().unwrap();
+            if *listed != Some(revision) {
+                match replica.playlists() {
+                    Ok(names) => {
+                        server.push_status(StatusPatch::playlists(names));
+                        *listed = Some(revision);
+                    }
+                    Err(e) => log::warn!("playlists could not be listed: {e}"),
+                }
+            }
+        }
         let mut last = last.lock().unwrap();
         let known = revision.unwrap_or(last.0);
         let next = serde_json::json!({
@@ -163,10 +178,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let playlists = parse_playlists(
-        &std::env::var("SHOWS_PLAYLISTS").unwrap_or_default(),
-        &["nelson"],
-    );
+    let choice = Arc::new(PlaylistChoice::open(data_dir().join("playlist.txt")));
     // Every computer opens the NAS database directly. SQLite commit order is
     // authoritative; there is no independently-owned local database to merge.
     let shared_db_path = std::env::var("SHOWS_SHARED_DB")
@@ -178,7 +190,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let pending = Arc::new(PendingWatches::for_database(&data_dir(), &shared_db_path));
 
     // Releases embed the overlay. Debug builds use the tracked Vite server.
-    let server = ControlServer::new(replica.clone(), playlists.clone());
+    let server = ControlServer::new(replica.clone(), choice.clone());
     let publish_database = database_publisher(
         server.clone(),
         replica.clone(),
@@ -215,7 +227,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Runner pushes phase/round/advance into the control server's status.
     let stop = StopFlag::new();
     let cb = {
-        let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status) = (
+        let (s_round, s_adv, s_drn, s_err, s_file_sync, s_status, s_playlist) = (
+            server.clone(),
             server.clone(),
             server.clone(),
             server.clone(),
@@ -306,13 +319,16 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 s_status.push_status(StatusPatch::phase(phase, message));
             })),
             on_database: Some(Box::new(move || on_database(None))),
+            on_playlist: Some(Box::new(move |name| {
+                s_playlist.push_status(StatusPatch::playlist(name));
+            })),
         }
     };
     let runner = Arc::new(Runner::new(
         replica.clone(),
         pending.clone(),
         player.clone() as Arc<dyn PlayerOps>,
-        playlists.clone(),
+        choice,
         stop.clone(),
         cb,
     ));
