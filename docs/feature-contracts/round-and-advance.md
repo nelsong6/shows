@@ -46,6 +46,8 @@ Advancing an already-watched `(show_id, episode_id)` is a no-op for that entry �
 
 Appending episodes — `replica.add_episodes`, or a folder rescan via `shows/scan.py` — gives each new episode `position = max(position) + 1`. Since the round picks the lowest-`position` episode with `watched_at IS NULL`, newly-appended episodes only become "next" after all earlier-position unwatched episodes are watched. New episodes never jump the queue.
 
+A show's bonus material is not episodes. The scan (`scan::scan_episodes`) skips extras folders by Jellyfin's names (Behind the Scenes, Clips, Deleted Scenes, Extras, Featurettes, Interviews, Other, Samples, Scenes, Shorts, Trailers) and Specials, and a rescan removes episodes already stored from such a folder, with their round entries. Their watch history stays.
+
 ### I6. Round size never exceeds the count of active shows
 
 One episode per active show per round. This is structural, not a soft limit — `engine.next_round` takes exactly one `first_unwatched(show.episodes)` per active show. Two episodes from the same show in one round would violate the round-robin meaning of the feature.

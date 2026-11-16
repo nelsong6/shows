@@ -679,6 +679,10 @@ impl Replica {
         })
     }
 
+    /// Bring a show's episodes in line with a scan: new files are added and
+    /// every file takes its scanned position. Episodes in extras folders
+    /// ([`crate::scan::is_extra`]) are removed with their round entries, so a
+    /// show added before the scan skipped them stops playing them.
     pub fn rescan_episodes(&self, show_id: &str, sorted_rels: &[String]) -> DbResult<Vec<String>> {
         if sorted_rels.is_empty() {
             return Ok(Vec::new());
@@ -709,6 +713,23 @@ impl Replica {
                         params![i as i64, now, show_id, rel],
                     )?;
                 }
+            }
+
+            let extras: Vec<String> = {
+                let mut stmt =
+                    tx.prepare("SELECT id, relative_path FROM episodes WHERE show_id=?1")?;
+                stmt.query_map(params![show_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<DbResult<Vec<_>>>()?
+                .into_iter()
+                .filter(|(_, rel)| crate::scan::is_extra(rel))
+                .map(|(id, _)| id)
+                .collect()
+            };
+            for id in &extras {
+                tx.execute("DELETE FROM round_queue WHERE episode_id=?1", params![id])?;
+                tx.execute("DELETE FROM episodes WHERE id=?1", params![id])?;
             }
 
             tx.commit()?;
@@ -1373,6 +1394,23 @@ mod tests {
             .find(|e| e.relative_path == "c.mkv")
             .unwrap();
         assert_eq!(c.position, 2); // continues after a(0), b(1)
+    }
+
+    #[test]
+    fn rescan_removes_episodes_in_extras_folders_and_their_round_entries() {
+        let r = Replica::new(":memory:");
+        let eps = ["S01\\Featurettes\\Clip.mkv".to_string(), "S01\\S01E01.mkv".to_string()];
+        let sid = r.create_show("nelson", "X", "D:\\X", &eps).unwrap();
+        let clip = r.show(&sid).unwrap().unwrap().episodes[0].id.clone();
+        r.save_round_queue("nelson", &[(clip, sid.clone(), 0, "pending".into())], T0)
+            .unwrap();
+
+        r.rescan_episodes(&sid, &["S01\\S01E01.mkv".to_string()]).unwrap();
+
+        let left = r.show(&sid).unwrap().unwrap().episodes;
+        assert_eq!(left.len(), 1);
+        assert_eq!((left[0].relative_path.as_str(), left[0].position), ("S01\\S01E01.mkv", 0));
+        assert!(r.get_round_queue().unwrap().is_empty());
     }
 
     #[test]

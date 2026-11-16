@@ -11,6 +11,35 @@ const VIDEO_EXTS: &[&str] = &[
     "mp4", "mkv", "avi", "mov", "m4v", "webm", "wmv", "flv", "mpg", "mpeg", "ts", "m2ts", "ogv",
 ];
 
+/// Folders holding a show's bonus material rather than its episodes: Jellyfin's
+/// extras folder names, plus `specials`, so behind-the-scenes clips never play
+/// between episodes.
+const EXTRAS_DIRS: &[&str] = &[
+    "behind the scenes",
+    "clips",
+    "deleted scenes",
+    "extras",
+    "featurettes",
+    "interviews",
+    "other",
+    "samples",
+    "scenes",
+    "shorts",
+    "specials",
+    "trailers",
+];
+
+fn is_extras_dir(name: &str) -> bool {
+    EXTRAS_DIRS.contains(&name.to_lowercase().as_str())
+}
+
+/// Whether a backslash-joined relative path lies in an extras folder.
+pub fn is_extra(relative_path: &str) -> bool {
+    let mut folders = relative_path.split('\\');
+    folders.next_back();
+    folders.any(is_extras_dir)
+}
+
 fn is_video(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -59,7 +88,7 @@ fn natural_key(s: &str) -> Vec<Token> {
 }
 
 /// Backslash-joined relative paths of video files under `root_path`,
-/// recursively, natural-sorted. Non-video files are ignored.
+/// recursively, natural-sorted. Non-video files and extras folders are ignored.
 pub fn scan_episodes(root_path: &str) -> Vec<String> {
     let root = Path::new(root_path);
     let mut found: Vec<String> = Vec::new();
@@ -72,7 +101,13 @@ pub fn scan_episodes(root_path: &str) -> Vec<String> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                stack.push(path);
+                let extras = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(is_extras_dir);
+                if !extras {
+                    stack.push(path);
+                }
             } else if is_video(&path) {
                 if let Ok(rel) = path.strip_prefix(root) {
                     found.push(rel.to_string_lossy().replace('/', "\\"));
@@ -90,6 +125,28 @@ pub fn scan_episodes(root_path: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn extras_folders_are_not_episodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let season = root.join("Show S01");
+        fs::create_dir_all(season.join("Featurettes").join("Extra Footage")).unwrap();
+        fs::create_dir_all(season.join("Deleted Scenes")).unwrap();
+        fs::write(season.join("Show - S01E01.mkv"), "x").unwrap();
+        fs::write(season.join("Featurettes").join("Adapting.mkv"), "x").unwrap();
+        fs::write(season.join("Featurettes").join("Extra Footage").join("Clip.mkv"), "x").unwrap();
+        fs::write(season.join("Deleted Scenes").join("Cut.mkv"), "x").unwrap();
+        assert_eq!(scan_episodes(root.to_str().unwrap()), ["Show S01\\Show - S01E01.mkv"]);
+    }
+
+    #[test]
+    fn is_extra_reads_folders_not_file_names() {
+        assert!(is_extra("Show S01\\FEATURETTES\\Adapting.mkv"));
+        assert!(is_extra("Specials\\S00E01.mkv"));
+        assert!(!is_extra("Show S01\\Show - S01E01 - Featurettes.mkv"));
+        assert!(!is_extra("Season 1\\Extras Are People Too.mkv"));
+    }
 
     #[test]
     fn finds_videos_natural_sorted() {
