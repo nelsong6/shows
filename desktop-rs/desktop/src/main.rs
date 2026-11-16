@@ -13,6 +13,7 @@
 mod audio_monitor;
 mod compositor;
 mod gl;
+mod info;
 mod mpv;
 mod player;
 mod webserver;

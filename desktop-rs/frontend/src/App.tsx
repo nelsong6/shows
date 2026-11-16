@@ -47,6 +47,8 @@ import {
   type ShowDetailsResponse,
 } from './api';
 import {PinSyncController} from './pinSync';
+import {CommandPalette, InfoPanel, type PaletteAnchor} from './CommandPalette';
+import {keyCommand, paletteCommands, PALETTE_KEY, type CommandState} from './commands';
 import './App.css';
 
 const VOLUME_MIN = 0;
@@ -124,6 +126,8 @@ function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState<ShowDetailsResponse | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [palette, setPalette] = useState<{anchor: PaletteAnchor; from: HTMLInputElement | HTMLTextAreaElement | null} | null>(null);
+  const [infoOpen, setInfoOpen] = useState(false);
   const [stats, setStats] = useState<Stats | null>(null);
   const [controlsIdle, setControlsIdle] = useState(false);
   const [controlsHovered, setControlsHovered] = useState(false);
@@ -433,92 +437,62 @@ function App() {
     requestStayOnTop(!onTopRef.current);
   }, [requestStayOnTop]);
 
-  // Keyboard controls. Bound on window so they work whenever the overlay has
-  // focus (the WebView2 overlay holds focus over the video). space=pause/play,
-  // n=next show, p=previous show, d=defer, f=fullscreen, i=stay on top, h=hide all chrome,
-  // c=toggle closed captions, ←/→ (or j/l)=seek -/+10s, ↑/↓=volume, v/Tab=dashboard,
-  // Esc=hide dashboard.
+  // Shortcuts. Each key runs a palette command (src/commands.ts), so `/` lists every
+  // one with its key. Bound on window so they work whenever the overlay has focus (the
+  // WebView2 overlay holds focus over the video). A key the open palette or info view
+  // took (fzt marks it handled) is theirs.
+  const runCommandRef = useRef<(id: string) => void>(() => {});
+  const paletteRef = useRef(palette);
+  paletteRef.current = palette;
+  const infoOpenRef = useRef(infoOpen);
+  infoOpenRef.current = infoOpen;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
-      if (isInput && e.key !== 'Escape') {
+      if (e.defaultPrevented || paletteRef.current || infoOpenRef.current) return;
+      const input = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement ? e.target : null;
+      if (e.key === PALETTE_KEY && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        // From a text field the palette opens at it, and the text stays as typed.
+        e.preventDefault();
+        const box = input?.getBoundingClientRect();
+        input?.blur();
+        setPalette({anchor: box ? {left: box.left, top: box.bottom + 4} : null, from: input});
         return;
       }
-
-      switch (e.key) {
-        case ' ':
-          e.preventDefault();
-          requestPause(!pauseRef.current);
-          break;
-        case 'n':
-          void runControl(skip);
-          break;
-        case 'p':
-          void runControl(previous);
-          break;
-        case 'd':
-          void runControl(defer);
-          break;
-        case 'f':
-          void runControl(toggleFullscreen);
-          break;
-        case 'i':
-          togglePin();
-          break;
-
-        case 'c': {
-          e.preventDefault();
-          const pb = pbRef.current;
-          if (pb && pb.sub_tracks.length > 0) {
-            const currentSid = pb.sid;
-            const isOff = currentSid === null || currentSid === undefined || currentSid === 'no';
-            if (isOff) {
-              const firstTrack = pb.sub_tracks[0];
-              if (firstTrack) {
-                void setSub(firstTrack.id);
-              }
-            } else {
-              void setSub('no');
-            }
-          }
-          break;
-        }
-        case 'ArrowLeft':
-        case 'j':
-          e.preventDefault();
-          void runControl(() => seekRelative(-10));
-          break;
-        case 'ArrowRight':
-        case 'l':
-          e.preventDefault();
-          void runControl(() => seekRelative(10));
-          break;
-        case 'ArrowUp': {
-          e.preventDefault();
-          adjustVolume(VOLUME_STEP);
-          break;
-        }
-        case 'ArrowDown': {
-          e.preventDefault();
-          adjustVolume(-VOLUME_STEP);
-          break;
-        }
-        case 'Tab':
-          e.preventDefault();
-          setShowSettings((v) => !v);
-          break;
-        case 'Escape':
-          setShowSettings(false);
-          break;
-      }
+      if (input && e.key !== 'Escape') return;
+      const id = keyCommand(e.key);
+      if (!id) return;
+      if (e.key !== 'Escape') e.preventDefault();
+      runCommandRef.current(id);
+    };
+    // Opened from a text field, a second `/` writes the slash there instead. Capture
+    // runs before fzt's own key listener.
+    const onSlash = (e: KeyboardEvent) => {
+      const from = paletteRef.current?.from;
+      if (!from || e.key !== PALETTE_KEY || e.ctrlKey || e.altKey || e.metaKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPalette(null);
+      from.focus();
+      from.setRangeText(PALETTE_KEY, from.selectionStart ?? from.value.length, from.selectionEnd ?? from.value.length, 'end');
+      from.dispatchEvent(new Event('input', {bubbles: true}));
     };
     window.addEventListener('keydown', onKey);
+    window.addEventListener('keydown', onSlash, true);
     return () => {
       window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keydown', onSlash, true);
       window.clearTimeout(volOsdTimer.current);
       window.clearTimeout(controlsIdleTimer.current);
     };
-  }, [adjustVolume, runControl, togglePin]);
+  }, []);
+
+  const closePalette = useCallback(() => {
+    setPalette((open) => {
+      open?.from?.focus();
+      return null;
+    });
+  }, []);
+  const closeInfo = useCallback(() => setInfoOpen(false), []);
 
 
 
@@ -632,6 +606,98 @@ function App() {
     ? (status.file_sync?.problems ?? [])
     : [];
   const hasRepairedRoundEntries = repairedRoundEntries.size > 0;
+
+  const playback = status.playback;
+  const commandState: CommandState = {
+    roundActive,
+    hasPlayback: !!playback,
+    paused: displayPaused,
+    hasSubtitles: (playback?.sub_tracks.length ?? 0) > 0,
+    captionsOn: playback ? playback.sid !== 'no' && playback.sid != null : false,
+    onTop: pinned,
+    fullscreen: !!status.window_fullscreen,
+    maximized: !!status.window_maximized,
+    dashboardOpen: showSettings,
+    playlist: status.playlist,
+    playlists: status.playlists ?? [],
+    round,
+    pos,
+  };
+  const commands = paletteCommands(commandState);
+
+  const runCommand = (id: string) => {
+    const command = commands.find((c) => c.id === id);
+    if (command?.unavailable) {
+      showControlToast(`${command.name}: ${command.unavailable}`, 'danger');
+      return;
+    }
+    if (id.startsWith('playlist:')) {
+      setSelected(null);
+      void runControl(() => selectPlaylist(id.slice('playlist:'.length)));
+      return;
+    }
+    if (id.startsWith('show:')) {
+      handlePlayShow(id.slice('show:'.length));
+      return;
+    }
+    switch (id) {
+      case 'pause':
+        requestPause(!pauseRef.current);
+        break;
+      case 'next':
+        void runControl(skip);
+        break;
+      case 'previous':
+        void runControl(previous);
+        break;
+      case 'defer':
+        void runControl(defer);
+        break;
+      case 'back':
+        void runControl(() => seekRelative(-10));
+        break;
+      case 'forward':
+        void runControl(() => seekRelative(10));
+        break;
+      case 'louder':
+        adjustVolume(VOLUME_STEP);
+        break;
+      case 'quieter':
+        adjustVolume(-VOLUME_STEP);
+        break;
+      case 'captions': {
+        const firstTrack = playback?.sub_tracks[0];
+        if (commandState.captionsOn) void runControl(() => setSub('no'));
+        else if (firstTrack) void runControl(() => setSub(firstTrack.id));
+        break;
+      }
+      case 'fullscreen':
+        void runControl(toggleFullscreen);
+        break;
+      case 'pin':
+        togglePin();
+        break;
+      case 'dashboard':
+        setShowSettings((v) => !v);
+        break;
+      case 'hide-dashboard':
+        setShowSettings(false);
+        break;
+      case 'minimize':
+        void runControl(minimizeWindow);
+        break;
+      case 'maximize':
+        void runControl(maximizeWindow);
+        break;
+      case 'close':
+        void runControl(closeWindow);
+        break;
+      case 'info':
+        setInfoOpen(true);
+        break;
+    }
+  };
+  runCommandRef.current = runCommand;
 
   // Library edits mutate the database but don't change phase/advance, so re-fetch
   // the sidebar shows explicitly after add/remove/rescan.
@@ -922,6 +988,14 @@ function App() {
       />
       <VolumeOsd volume={volOsd} />
       {controlToast && <ControlToast message={controlToast.message} level={controlToast.level} />}
+      <CommandPalette
+        open={palette !== null}
+        anchor={palette?.anchor ?? null}
+        commands={commands}
+        onRun={(id) => runCommandRef.current(id)}
+        onClose={closePalette}
+      />
+      {infoOpen && <InfoPanel onClose={closeInfo} />}
       {overlayVisible ? (
         <div className={`layout${roundActive ? ' over-video' : ''}`}>
 
@@ -976,6 +1050,7 @@ function App() {
         onDefer={() => runControl(defer)}
         onToggleStayOnTop={togglePin}
         onToggleFullscreen={() => runControl(toggleFullscreen)}
+        onOpenPalette={() => setPalette({anchor: null, from: null})}
       />
     </div>
   );
@@ -1158,6 +1233,7 @@ function BottomControlBar({
   onDefer,
   onToggleStayOnTop,
   onToggleFullscreen,
+  onOpenPalette,
 }: {
   status: Status;
   pos: number;
@@ -1181,6 +1257,7 @@ function BottomControlBar({
   onDefer: () => void;
   onToggleStayOnTop: () => void;
   onToggleFullscreen: () => void;
+  onOpenPalette: () => void;
 }) {
   const pb = status.playback;
   const pct = playbackProgressPercent(pb);
@@ -1340,6 +1417,13 @@ function BottomControlBar({
             title={onTop ? 'Stop Staying on Top (i)' : 'Stay on Top (i)'}
           >
             <PinIcon />
+          </button>
+          <button
+            className="control-btn palette-btn"
+            onClick={onOpenPalette}
+            title="Commands (/)"
+          >
+            /
           </button>
         </div>
       </div>
@@ -1529,6 +1613,13 @@ function BottomControlBar({
             title={onTop ? 'Stop Staying on Top (i)' : 'Stay on Top (i)'}
           >
             <PinIcon />
+          </button>
+          <button
+            className="control-btn palette-btn"
+            onClick={onOpenPalette}
+            title="Commands (/)"
+          >
+            /
           </button>
 
           <button

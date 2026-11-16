@@ -97,8 +97,13 @@ jobs:
 
       - name: Build React overlay
         working-directory: desktop-rs/frontend
+        env:
+          FORGEJO_TOKEN: ${{ secrets.PIPELINE_DISPATCH_TOKEN }}
         run: |
+          if (-not $env:FORGEJO_TOKEN) { throw 'PIPELINE_DISPATCH_TOKEN is not set' }
           npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run fetch-fzt
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run build
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
@@ -138,6 +143,7 @@ jobs:
         env:
           SHOWS_VERSION: ${{ steps.version.outputs.version }}
         run: |
+          $env:SHOWS_BUILD_TIME = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           cargo build --release --locked -p shows-desktop
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 

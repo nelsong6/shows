@@ -437,6 +437,7 @@ impl ControlServer {
             }
             (Method::Get, "/status") => respond_json(request, 200, &self.status_json()),
             (Method::Get, "/remote/info") => respond_json(request, 200, &Self::remote_info()),
+            (Method::Get, "/info") => respond_json(request, 200, &crate::info::info()),
             (Method::Get, "/status/stream") => self.status_stream(request),
             (Method::Get, "/remote/preview") => self.video_preview(request),
             (Method::Get, "/shows") => {
@@ -1402,6 +1403,7 @@ fn content_type(p: &Path) -> String {
         "woff2" => "font/woff2",
         "woff" => "font/woff",
         "ico" => "image/x-icon",
+        "wasm" => "application/wasm",
         _ => "application/octet-stream",
     };
     ct.to_string()

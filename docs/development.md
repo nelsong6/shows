@@ -33,6 +33,10 @@ SSH child ends the preview process so devctl's bounded restart policy owns
 recovery. `devctl list`, `devctl logs <name>` and `devctl stop <name>` remain
 authoritative; no separate tunnel or dev-server process is left untracked.
 
+The `/` command palette's fzt files are not checked in. `ui` fetches the latest
+fzt-browser release into `frontend/public/fzt` when they are missing, with the
+Forgejo credential git already holds; `npm run fetch-fzt` refreshes them.
+
 ## Rust edits
 
 The terminal remote has its own [repository and development entry point](https://forgejo.romaine.life/nelsong6/shows-remote).

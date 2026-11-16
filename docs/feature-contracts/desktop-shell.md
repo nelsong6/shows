@@ -156,6 +156,22 @@ until the first frame's params are known. Windowed mode keeps free resizing.
 - A same-position `WM_MOUSEMOVE` (synthesized by keyboard/media input) does not
   reveal the idle-hidden cursor; only real displacement does (`CursorMotion`).
 
+## Commands and the `/` palette
+
+- `/` opens the command palette, fzt's browser build (fzt-browser's release, fetched
+  into `frontend/public/fzt` by `npm run fetch-fzt` and embedded with the bundle).
+  The control bar's `/` button opens it too, so its key is on screen.
+- `frontend/src/commands.ts` is the one list of commands. Every shortcut runs one
+  of them, and each palette row names its key; a key with no listed command is a
+  test failure. Other playlists, the rest of the round and **info** are commands
+  too.
+- A command that can't run now stays listed with the reason, and choosing it
+  shows that reason instead of failing silently.
+- From a text field, `/` opens the palette at the field and the text stays as
+  typed; a second `/` closes it and writes the slash.
+- **info** shows the repo link, version and build time CI stamped, the running
+  executable's path and the local checkout, from `GET /info` (loopback only).
+
 ## Controls visibility — single owner
 
 The overlay owns exactly one visible/hidden state and one idle timer. No native

@@ -505,3 +505,21 @@ export async function fetchShowDetails(show_id: string): Promise<ShowDetailsResp
   }
   return r.json();
 }
+
+// What the palette's info view shows. Each value is read from the build stamp or the
+// running process; one the desktop could not read arrives as a sentence saying so.
+export type AppInfo = {
+  repo: string;
+  repo_url: string | null;
+  version: string;
+  built_unix: number | null;
+  built: string;
+  executable: string;
+  checkout: string;
+};
+
+export async function getInfo(): Promise<AppInfo> {
+  const r = await fetch('/info');
+  if (!r.ok) throw new Error(`/info ${r.status}`);
+  return r.json();
+}

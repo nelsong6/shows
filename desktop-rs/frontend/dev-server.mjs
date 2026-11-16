@@ -62,7 +62,7 @@ export async function showsDevelopment() {
     apply: 'serve',
     config() {
       return {server: {host: '127.0.0.1', proxy: {
-        '^/(status|shows|stats|history|health|pause|skip|prev|defer|seek|volume|sub|audio|fullscreen|stay-on-top|window|library|round|play-show|remote)(/|\\?|$)': {
+        '^/(status|info|shows|stats|history|health|pause|skip|prev|defer|seek|volume|sub|audio|fullscreen|stay-on-top|window|library|round|play-show|remote)(/|\\?|$)': {
           target: `http://127.0.0.1:${port}`,
           proxyTimeout: 0,
           timeout: 0,

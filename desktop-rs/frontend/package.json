@@ -8,7 +8,8 @@
     "prebuild": "npm test",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "tsc --target ES2022 --module ESNext --moduleResolution Node --outDir .test-dist --rootDir src --skipLibCheck src/pinSync.ts && node --test test/pinSync.test.mjs"
+    "test": "tsc --target ES2022 --module ESNext --moduleResolution Node --outDir .test-dist --rootDir src --skipLibCheck src/pinSync.ts src/commands.ts && node --test test/pinSync.test.mjs test/commands.test.mjs",
+    "fetch-fzt": "node scripts/fetch-fzt.mjs"
   },
   "dependencies": {
     "react": "^18.2.0",

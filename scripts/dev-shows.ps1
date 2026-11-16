@@ -100,6 +100,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $frontend 'node_modules\vite\bin\vit
   try { & npm.cmd ci; if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency install failed' } }
   finally { Pop-Location }
 }
+if (-not (Test-Path -LiteralPath (Join-Path $frontend 'public/fzt/fzt.wasm'))) {
+  Push-Location $frontend
+  try { & npm.cmd run fetch-fzt; if ($LASTEXITCODE -ne 0) { throw 'Fetching the fzt command palette failed' } }
+  finally { Pop-Location }
+}
 $env:SHOWS_DEV_TARGET = $Target
 & devctl.exe clean $Name | Out-Null
 & devctl.exe up frontend -Name $Name -Cwd $frontend -Project shows

@@ -1995,3 +1995,93 @@ button.gb.toggle-view-btn {
     animation: none;
   }
 }
+
+/* `/` command palette. fzt draws the list (fzt-terminal.css, loaded with it); this
+   only places its window over the overlay. */
+.palette-btn {
+  font-family: var(--font-code);
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+
+.palette-backdrop.hidden {
+  display: none;
+}
+
+.palette {
+  position: absolute;
+  left: 50%;
+  top: 12vh;
+  transform: translateX(-50%);
+  width: min(760px, calc(100vw - 32px));
+  height: min(440px, calc(100vh - 24vh));
+}
+
+.palette-terminal {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.palette-failure {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg-deep);
+  color: var(--state-danger-fg);
+  font-size: 13px;
+  text-align: center;
+  user-select: text;
+}
+
+.info-panel {
+  position: absolute;
+  left: 50%;
+  top: 12vh;
+  transform: translateX(-50%);
+  width: min(640px, calc(100vw - 32px));
+  padding: 18px 22px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font-size: 13px;
+  user-select: text;
+}
+
+.info-panel h3 {
+  margin: 0 0 12px;
+}
+
+.info-panel .palette-failure {
+  position: static;
+  padding: 0;
+  background: none;
+}
+
+.info-row {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.info-row dt {
+  color: var(--fg-dim);
+}
+
+.info-row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
