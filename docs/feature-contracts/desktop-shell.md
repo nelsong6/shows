@@ -7,8 +7,8 @@ Win32 host forwards pointer input into it and owns hit-testing, cursor, and
 window state. This contract fixes the behavior at that seam so the window *feels*
 like a native video player.
 
-The shell state lives in `desktop-rs/desktop/src/compositor.rs`; the overlay
-behavior lives in `desktop-rs/frontend/src/App.tsx`. Field changes are mirrored
+The shell state lives in `desktop/src/compositor.rs`; the overlay
+behavior lives in `frontend/src/App.tsx`. Field changes are mirrored
 in [`desktop-status.md`](desktop-status.md).
 
 ## Window modes

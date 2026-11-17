@@ -9,10 +9,10 @@ param(
 $ErrorActionPreference = 'Stop'
 if (-not $RepoRoot) {
   $checkout = & git.exe rev-parse --show-toplevel 2>$null
-  if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $checkout 'desktop-rs\desktop\Cargo.toml'))) { $RepoRoot = $checkout }
+  if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath (Join-Path $checkout 'desktop\Cargo.toml'))) { $RepoRoot = $checkout }
   else { $RepoRoot = Split-Path -Parent $PSScriptRoot }
 }
-$workspace = Join-Path $RepoRoot 'desktop-rs'
+$workspace = $RepoRoot
 $frontend = Join-Path $workspace 'frontend'
 $cache = if ($env:SHOWS_DEV_TARGET_DIR) { $env:SHOWS_DEV_TARGET_DIR } else { 'D:\build\shows\cargo' }
 

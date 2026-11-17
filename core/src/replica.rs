@@ -136,6 +136,8 @@ pub struct EpisodePlaybackPreferences {
 
 pub type DbError = rusqlite::Error;
 pub type DbResult<T> = Result<T, DbError>;
+/// A round_queue row: episode_id, show_id, play_order, state, playlist, updated_at, dirty.
+pub type RoundQueueRow = (String, String, i32, String, String, String, i32);
 
 pub struct Replica {
     path: String,
@@ -291,7 +293,11 @@ impl Replica {
             }
         }
         self.with_conn(|conn| {
-            conn.query_row("SELECT CAST(value AS INTEGER) FROM meta WHERE key='revision'", [], |r| r.get(0))
+            conn.query_row(
+                "SELECT CAST(value AS INTEGER) FROM meta WHERE key='revision'",
+                [],
+                |r| r.get(0),
+            )
         })
     }
 
@@ -779,7 +785,7 @@ impl Replica {
         })
     }
 
-    pub fn get_round_queue(&self) -> DbResult<Vec<(String, String, i32, String, String, String, i32)>> {
+    pub fn get_round_queue(&self) -> DbResult<Vec<RoundQueueRow>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT episode_id, show_id, play_order, state, playlist, updated_at, dirty FROM round_queue ORDER BY play_order",
@@ -1101,15 +1107,18 @@ fn load_shows(conn: &Connection, ids: &[String]) -> DbResult<Vec<Show>> {
     Ok(shows)
 }
 
+/// id, playlist, name, root_path, date_added, removed_at.
+type ShowRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
 fn load_show(conn: &Connection, show_id: &str) -> DbResult<Option<Show>> {
-    let base: Option<(
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-    )> = conn
+    let base: Option<ShowRow> = conn
         .query_row(
             "SELECT id,playlist,name,root_path,date_added,removed_at FROM shows WHERE id=?1",
             params![show_id],
@@ -1204,16 +1213,25 @@ mod tests {
         let path = path.to_string_lossy();
         let first = Replica::new(&path);
         let second = Replica::new(&path);
-        let show_id = first.create_show("nelson", "original", r"S:\Shows\Original", &[]).unwrap();
+        let show_id = first
+            .create_show("nelson", "original", r"S:\Shows\Original", &[])
+            .unwrap();
         let after_create = second.revision().unwrap();
 
         assert_eq!(second.show(&show_id).unwrap().unwrap().name, "original");
-        second.update_show(&show_id, Some("second app"), None, None).unwrap();
+        second
+            .update_show(&show_id, Some("second app"), None, None)
+            .unwrap();
         assert_eq!(first.show(&show_id).unwrap().unwrap().name, "second app");
         assert!(first.revision().unwrap() > after_create);
 
-        first.update_show(&show_id, Some("first app last"), None, None).unwrap();
-        assert_eq!(second.show(&show_id).unwrap().unwrap().name, "first app last");
+        first
+            .update_show(&show_id, Some("first app last"), None, None)
+            .unwrap();
+        assert_eq!(
+            second.show(&show_id).unwrap().unwrap().name,
+            "first app last"
+        );
     }
 
     #[test]
@@ -1333,15 +1351,18 @@ mod tests {
     #[test]
     fn create_show_is_in_round() {
         let r = Replica::new(":memory:");
-        let sid = r.create_show(
-            "nelson",
-            "New",
-            "D:\\New",
-            &["e1.mkv".into(), "e2.mkv".into()],
-        ).unwrap();
+        let sid = r
+            .create_show(
+                "nelson",
+                "New",
+                "D:\\New",
+                &["e1.mkv".into(), "e2.mkv".into()],
+            )
+            .unwrap();
         assert!(!sid.is_empty());
         let me = r
-            .active_shows("nelson").unwrap()
+            .active_shows("nelson")
+            .unwrap()
             .into_iter()
             .find(|s| s.id == sid)
             .unwrap();
@@ -1351,10 +1372,13 @@ mod tests {
     #[test]
     fn remove_show_tombstones() {
         let r = Replica::new(":memory:");
-        let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into()]).unwrap();
+        let sid = r
+            .create_show("nelson", "X", "D:\\X", &["a.mkv".into()])
+            .unwrap();
         assert!(r.remove_show(&sid).unwrap());
         assert!(
-            r.active_shows("nelson").unwrap()
+            r.active_shows("nelson")
+                .unwrap()
                 .iter()
                 .all(|s| s.id != sid)
         );
@@ -1363,7 +1387,9 @@ mod tests {
     #[test]
     fn remove_show_preserves_queued_round_entry() {
         let r = Replica::new(":memory:");
-        let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into()]).unwrap();
+        let sid = r
+            .create_show("nelson", "X", "D:\\X", &["a.mkv".into()])
+            .unwrap();
         let show = r.show(&sid).unwrap().unwrap();
         let eid = show.episodes[0].id.clone();
         r.save_round_queue("nelson", &[(eid, sid.clone(), 0, "pending".into())], T0)
@@ -1371,7 +1397,8 @@ mod tests {
 
         assert!(r.remove_show(&sid).unwrap());
         assert!(
-            r.get_round_queue().unwrap()
+            r.get_round_queue()
+                .unwrap()
                 .iter()
                 .any(|(_, show_id, ..)| show_id == &sid)
         );
@@ -1380,14 +1407,18 @@ mod tests {
     #[test]
     fn rescan_episodes_appends_positions() {
         let r = Replica::new(":memory:");
-        let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()]).unwrap();
+        let sid = r
+            .create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()])
+            .unwrap();
         assert_eq!(
-            r.rescan_episodes(&sid, &["a.mkv".into(), "b.mkv".into(), "c.mkv".into()]).unwrap()
+            r.rescan_episodes(&sid, &["a.mkv".into(), "b.mkv".into(), "c.mkv".into()])
+                .unwrap()
                 .len(),
             1
         );
         let c = r
-            .show(&sid).unwrap()
+            .show(&sid)
+            .unwrap()
             .unwrap()
             .episodes
             .into_iter()
@@ -1399,31 +1430,43 @@ mod tests {
     #[test]
     fn rescan_removes_episodes_in_extras_folders_and_their_round_entries() {
         let r = Replica::new(":memory:");
-        let eps = ["S01\\Featurettes\\Clip.mkv".to_string(), "S01\\S01E01.mkv".to_string()];
+        let eps = [
+            "S01\\Featurettes\\Clip.mkv".to_string(),
+            "S01\\S01E01.mkv".to_string(),
+        ];
         let sid = r.create_show("nelson", "X", "D:\\X", &eps).unwrap();
         let clip = r.show(&sid).unwrap().unwrap().episodes[0].id.clone();
         r.save_round_queue("nelson", &[(clip, sid.clone(), 0, "pending".into())], T0)
             .unwrap();
 
-        r.rescan_episodes(&sid, &["S01\\S01E01.mkv".to_string()]).unwrap();
+        r.rescan_episodes(&sid, &["S01\\S01E01.mkv".to_string()])
+            .unwrap();
 
         let left = r.show(&sid).unwrap().unwrap().episodes;
         assert_eq!(left.len(), 1);
-        assert_eq!((left[0].relative_path.as_str(), left[0].position), ("S01\\S01E01.mkv", 0));
+        assert_eq!(
+            (left[0].relative_path.as_str(), left[0].position),
+            ("S01\\S01E01.mkv", 0)
+        );
         assert!(r.get_round_queue().unwrap().is_empty());
     }
 
     #[test]
     fn episode_paths_and_update_show() {
         let r = Replica::new(":memory:");
-        let sid = r.create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()]).unwrap();
+        let sid = r
+            .create_show("nelson", "X", "D:\\X", &["a.mkv".into(), "b.mkv".into()])
+            .unwrap();
         assert_eq!(
             r.episode_paths(&sid).unwrap(),
             ["a.mkv".to_string(), "b.mkv".to_string()]
                 .into_iter()
                 .collect()
         );
-        assert!(r.update_show(&sid, Some("Y"), None, Some("couple")).unwrap());
+        assert!(
+            r.update_show(&sid, Some("Y"), None, Some("couple"))
+                .unwrap()
+        );
         let s = r.show(&sid).unwrap().unwrap();
         assert_eq!(s.name, "Y");
         assert_eq!(s.playlist, "couple");
@@ -1432,8 +1475,12 @@ mod tests {
     #[test]
     fn stats_counts_progress_and_finished() {
         let r = Replica::new(":memory:");
-        let a = r.create_show("nelson", "A", "D:\\A", &["a1.mkv".into(), "a2.mkv".into()]).unwrap();
-        let b = r.create_show("nelson", "B", "D:\\B", &["b1.mkv".into()]).unwrap();
+        let a = r
+            .create_show("nelson", "A", "D:\\A", &["a1.mkv".into(), "a2.mkv".into()])
+            .unwrap();
+        let b = r
+            .create_show("nelson", "B", "D:\\B", &["b1.mkv".into()])
+            .unwrap();
         let a0 = r.show(&a).unwrap().unwrap().episodes[0].id.clone();
         let b0 = r.show(&b).unwrap().unwrap().episodes[0].id.clone();
         r.advance(&[(a, a0), (b, b0)]).unwrap(); // b drains -> finished
@@ -1468,7 +1515,8 @@ mod tests {
                 "pending".to_string(),
             ),
         ];
-        r.save_round_queue("nelson", &entries, "2026-05-31T00:00:00Z").unwrap();
+        r.save_round_queue("nelson", &entries, "2026-05-31T00:00:00Z")
+            .unwrap();
 
         assert_eq!(
             r.remove_round_entry("ep1").unwrap(),
@@ -1487,7 +1535,8 @@ mod tests {
     }
 
     fn queue_states(r: &Replica) -> Vec<(String, String)> {
-        r.get_round_queue().unwrap()
+        r.get_round_queue()
+            .unwrap()
             .into_iter()
             .map(|(episode_id, _, _, state, ..)| (episode_id, state))
             .collect()
@@ -1512,33 +1561,56 @@ mod tests {
     #[test]
     fn saving_a_round_keeps_other_playlists_rounds() {
         let r = Replica::new(":memory:");
-        let a = r.create_show("background", "A", "D:\\A", &["a1.mkv".into()]).unwrap();
-        let b = r.create_show("interesting", "B", "D:\\B", &["b1.mkv".into()]).unwrap();
+        let a = r
+            .create_show("background", "A", "D:\\A", &["a1.mkv".into()])
+            .unwrap();
+        let b = r
+            .create_show("interesting", "B", "D:\\B", &["b1.mkv".into()])
+            .unwrap();
         let ep = |sid: &str| r.show(sid).unwrap().unwrap().episodes[0].id.clone();
         let (a1, b1) = (ep(&a), ep(&b));
-        r.save_round_queue("background", &[(a1.clone(), a.clone(), 0, "playing".into())], T0)
-            .unwrap();
-        r.save_round_queue("interesting", &[(b1.clone(), b.clone(), 0, "pending".into())], T0)
-            .unwrap();
+        r.save_round_queue(
+            "background",
+            &[(a1.clone(), a.clone(), 0, "playing".into())],
+            T0,
+        )
+        .unwrap();
+        r.save_round_queue(
+            "interesting",
+            &[(b1.clone(), b.clone(), 0, "pending".into())],
+            T0,
+        )
+        .unwrap();
         assert_eq!(
             queue_states(&r),
-            vec![(a1.clone(), "playing".into()), (b1.clone(), "pending".into())]
+            vec![
+                (a1.clone(), "playing".into()),
+                (b1.clone(), "pending".into())
+            ]
         );
 
         // A show moved to another playlist leaves its old playlist's round when
         // any round is next saved.
         r.update_show(&b, None, None, Some("background")).unwrap();
-        r.save_round_queue("background", &[(a1.clone(), a.clone(), 0, "pending".into())], T0)
-            .unwrap();
+        r.save_round_queue(
+            "background",
+            &[(a1.clone(), a.clone(), 0, "pending".into())],
+            T0,
+        )
+        .unwrap();
         assert_eq!(queue_states(&r), vec![(a1, "pending".into())]);
     }
 
     #[test]
     fn playlists_lists_those_with_active_shows() {
         let r = Replica::new(":memory:");
-        r.create_show("interesting", "B", "D:\\B", &["b.mkv".into()]).unwrap();
-        r.create_show("background", "A", "D:\\A", &["a.mkv".into()]).unwrap();
-        let gone = r.create_show("finished", "C", "D:\\C", &["c.mkv".into()]).unwrap();
+        r.create_show("interesting", "B", "D:\\B", &["b.mkv".into()])
+            .unwrap();
+        r.create_show("background", "A", "D:\\A", &["a.mkv".into()])
+            .unwrap();
+        let gone = r
+            .create_show("finished", "C", "D:\\C", &["c.mkv".into()])
+            .unwrap();
         r.remove_show(&gone).unwrap();
         assert_eq!(r.playlists().unwrap(), ["background", "interesting"]);
     }

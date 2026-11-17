@@ -29,9 +29,14 @@ struct Asset;
 
 fn embedded_asset(path: &str) -> Option<Vec<u8>> {
     #[cfg(not(debug_assertions))]
-    { Asset::get(path).map(|file| file.data.into_owned()) }
+    {
+        Asset::get(path).map(|file| file.data.into_owned())
+    }
     #[cfg(debug_assertions)]
-    { let _ = path; None }
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// The value of a database call, or the handler answers 503 and returns.
@@ -255,7 +260,8 @@ type FullscreenCb = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
 // Takes the desired pin state, not a flip — the overlay sends the target it
 // wants so duplicate POSTs from one click converge instead of cancelling out.
 type StayOnTopCb = Box<dyn Fn(bool) + Send + Sync>;
-pub type PreviewCb = Box<dyn Fn() -> Result<shows_control::preview::VideoPreview, String> + Send + Sync>;
+pub type PreviewCb =
+    Box<dyn Fn() -> Result<shows_control::preview::VideoPreview, String> + Send + Sync>;
 
 pub struct ControlServer {
     choice: Arc<PlaylistChoice>,
@@ -391,16 +397,29 @@ impl ControlServer {
     /// Library, window and overlay routes stay on the loopback port.
     fn handle_remote(self: &Arc<Self>, request: Request) {
         if request.headers().iter().any(|h| h.field.equiv("Origin")) {
-            return respond_json(request, 403, &json!({"ok": false, "message": "remote controls require a native client"}));
+            return respond_json(
+                request,
+                403,
+                &json!({"ok": false, "message": "remote controls require a native client"}),
+            );
         }
-        let token = request.headers().iter()
+        let token = request
+            .headers()
+            .iter()
             .find(|h| h.field.equiv("Authorization"))
             .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
             .unwrap_or("")
             .to_owned();
         if let Err(message) = self.remote_tokens.check(&token) {
-            log::warn!("remote request refused from {:?}: {message}", request.remote_addr());
-            return respond_json(request, 401, &json!({"ok": false, "message": format!("Shows refused this remote: {message}")}));
+            log::warn!(
+                "remote request refused from {:?}: {message}",
+                request.remote_addr()
+            );
+            return respond_json(
+                request,
+                401,
+                &json!({"ok": false, "message": format!("Shows refused this remote: {message}")}),
+            );
         }
         let method = request.method().clone();
         let path = request.url().split('?').next().unwrap_or("").to_string();
@@ -410,7 +429,11 @@ impl ControlServer {
             (Method::Get, "/status/stream") => self.status_stream(request),
             (Method::Get, "/remote/preview") => self.video_preview(request),
             (Method::Post, "/remote/control") => self.remote_control(request),
-            _ => respond_json(request, 404, &json!({"ok": false, "message": "not a remote route"})),
+            _ => respond_json(
+                request,
+                404,
+                &json!({"ok": false, "message": "not a remote route"}),
+            ),
         }
     }
 
@@ -418,7 +441,7 @@ impl ControlServer {
         json!({
             "application": "shows-desktop",
             "protocol": shows_control::PROTOCOL_VERSION,
-            "build": option_env!("SHOWS_VERSION").unwrap_or("dev"),
+            "build": option_env!("VERSION").unwrap_or("dev"),
             "computer": std::env::var("COMPUTERNAME").unwrap_or_default(),
             "pid": std::process::id(),
         })
@@ -442,7 +465,9 @@ impl ControlServer {
             (Method::Get, "/remote/preview") => self.video_preview(request),
             (Method::Get, "/shows") => {
                 let shows = match from_database!(request, self.choice.resolve(&self.replica)) {
-                    Some(playlist) => from_database!(request, self.replica.overlay_shows(&playlist)),
+                    Some(playlist) => {
+                        from_database!(request, self.replica.overlay_shows(&playlist))
+                    }
                     None => vec![],
                 };
                 respond_json(request, 200, &json!(shows))
@@ -594,7 +619,9 @@ impl ControlServer {
                         }),
                     );
                 };
-                let Some((_show_id, playlist)) = from_database!(request, self.replica.remove_round_entry(episode_id)) else {
+                let Some((_show_id, playlist)) =
+                    from_database!(request, self.replica.remove_round_entry(episode_id))
+                else {
                     return respond_json(
                         request,
                         404,
@@ -618,7 +645,11 @@ impl ControlServer {
             }
             "/playlist" => {
                 let b = read_body(&mut request);
-                let playlist = b.get("playlist").and_then(Value::as_str).unwrap_or("").to_string();
+                let playlist = b
+                    .get("playlist")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 self.respond_runner_outcome(request, |r| r.select_playlist(&playlist));
             }
             "/round/reload" => {
@@ -640,10 +671,10 @@ impl ControlServer {
                 let on_top = b.get("on_top").and_then(Value::as_bool);
                 let from = b.get("from").and_then(Value::as_bool);
                 log::info!("/stay-on-top POST on_top={on_top:?} from={from:?}");
-                if let Some(on_top) = on_top {
-                    if let Some(cb) = self.on_stay_on_top.lock().unwrap().as_ref() {
-                        cb(on_top);
-                    }
+                if let Some(on_top) = on_top
+                    && let Some(cb) = self.on_stay_on_top.lock().unwrap().as_ref()
+                {
+                    cb(on_top);
                 }
                 respond_control_ok(request, "stay_on_top_set", "stay on top set");
             }
@@ -779,12 +810,15 @@ impl ControlServer {
                         }),
                     );
                 }
-                from_database!(request, self.replica.update_show(
-                    id,
-                    b.get("name").and_then(Value::as_str),
-                    b.get("root_path").and_then(Value::as_str),
-                    playlist,
-                ));
+                from_database!(
+                    request,
+                    self.replica.update_show(
+                        id,
+                        b.get("name").and_then(Value::as_str),
+                        b.get("root_path").and_then(Value::as_str),
+                        playlist,
+                    )
+                );
                 self.notify_database_change();
                 respond_control_ok(request, "show_updated", "show updated");
             }
@@ -800,34 +834,60 @@ impl ControlServer {
     }
 
     fn respond_fullscreen(&self, request: Request) {
-        let result = self.on_fullscreen.lock().unwrap().as_ref()
+        let result = self
+            .on_fullscreen
+            .lock()
+            .unwrap()
+            .as_ref()
             .ok_or_else(|| "The Shows window is unavailable".to_string())
             .and_then(|callback| callback());
         match result {
-            Ok(()) => respond_control_ok(request, "fullscreen_requested", "fullscreen toggle requested; window status confirms the result"),
+            Ok(()) => respond_control_ok(
+                request,
+                "fullscreen_requested",
+                "fullscreen toggle requested; window status confirms the result",
+            ),
             Err(message) => respond_json(request, 503, &json!({"ok": false, "message": message})),
         }
     }
 
     fn video_preview(&self, request: Request) {
         if request.headers().iter().any(|h| h.field.equiv("Origin")) {
-            return respond_json(request, 403, &json!({"ok":false,"message":"Video preview requires a native client"}));
+            return respond_json(
+                request,
+                403,
+                &json!({"ok":false,"message":"Video preview requires a native client"}),
+            );
         }
         let Ok(mut cache) = self.preview_cache.try_lock() else {
-            return respond_json(request, 429, &json!({"ok":false,"message":"Video preview is busy"}));
+            return respond_json(
+                request,
+                429,
+                &json!({"ok":false,"message":"Video preview is busy"}),
+            );
         };
-        if let Some((at, frame)) = cache.as_ref() {
-            if at.elapsed() < shows_control::preview::INTERVAL {
-                return respond_json(request, 200, &json!(frame));
-            }
+        if let Some((at, frame)) = cache.as_ref()
+            && at.elapsed() < shows_control::preview::INTERVAL
+        {
+            return respond_json(request, 200, &json!(frame));
         }
-        let result = self.on_preview.lock().unwrap().as_ref()
+        let result = self
+            .on_preview
+            .lock()
+            .unwrap()
+            .as_ref()
             .ok_or_else(|| "The target video window is unavailable".to_string())
             .and_then(|capture| capture());
         match result {
             Ok(frame) => {
-                log::debug!("video preview: capture {:.2} ms, {} characters", frame.capture_ms, shows_control::preview::WIDTH * shows_control::preview::HEIGHT);
-                if frame.capture_ms > 20.0 { log::warn!("Slow video preview capture: {:.2} ms", frame.capture_ms); }
+                log::debug!(
+                    "video preview: capture {:.2} ms, {} characters",
+                    frame.capture_ms,
+                    shows_control::preview::WIDTH * shows_control::preview::HEIGHT
+                );
+                if frame.capture_ms > 20.0 {
+                    log::warn!("Slow video preview capture: {:.2} ms", frame.capture_ms);
+                }
                 respond_json(request, 200, &json!(frame));
                 *cache = Some((std::time::Instant::now(), frame));
             }
@@ -840,26 +900,56 @@ impl ControlServer {
 
     fn remote_control(&self, mut request: Request) {
         use shows_control::Command;
-        if request.headers().iter().any(|h| h.field.equiv("Origin")) ||
-            !request.headers().iter().any(|h| h.field.equiv("Content-Type") && h.value.as_str() == "application/json") {
-            return respond_json(request, 403, &json!({"ok": false, "message": "remote controls require a native JSON client"}));
+        if request.headers().iter().any(|h| h.field.equiv("Origin"))
+            || !request
+                .headers()
+                .iter()
+                .any(|h| h.field.equiv("Content-Type") && h.value.as_str() == "application/json")
+        {
+            return respond_json(
+                request,
+                403,
+                &json!({"ok": false, "message": "remote controls require a native JSON client"}),
+            );
         }
         let mut body = Vec::new();
-        if request.as_reader().take(shows_control::MAX_FRAME + 1).read_to_end(&mut body).is_err() || body.len() as u64 > shows_control::MAX_FRAME {
-            return respond_json(request, 413, &json!({"ok": false, "message": "control body unreadable or larger than 1 MiB"}));
+        if request
+            .as_reader()
+            .take(shows_control::MAX_FRAME + 1)
+            .read_to_end(&mut body)
+            .is_err()
+            || body.len() as u64 > shows_control::MAX_FRAME
+        {
+            return respond_json(
+                request,
+                413,
+                &json!({"ok": false, "message": "control body unreadable or larger than 1 MiB"}),
+            );
         }
         let command: Command = match serde_json::from_slice(&body) {
             Ok(command) => command,
-            Err(e) => return respond_json(request, 400, &json!({"ok": false, "message": e.to_string()})),
+            Err(e) => {
+                return respond_json(
+                    request,
+                    400,
+                    &json!({"ok": false, "message": e.to_string()}),
+                );
+            }
         };
         if let Err(message) = command.validate() {
             return respond_json(request, 400, &json!({"ok": false, "message": message}));
         }
         let status = self.status_json();
-        if !matches!(&command, Command::Fullscreen {} | Command::SelectPlaylist { .. })
-            && !shows_control::playback_ready(&status)
+        if !matches!(
+            &command,
+            Command::Fullscreen {} | Command::SelectPlaylist { .. }
+        ) && !shows_control::playback_ready(&status)
         {
-            return respond_json(request, 503, &json!({"ok": false, "message": "Shows has no playable episode loaded; check status"}));
+            return respond_json(
+                request,
+                503,
+                &json!({"ok": false, "message": "Shows has no playable episode loaded; check status"}),
+            );
         }
         log::info!("remote control: {command:?}");
         match command {
@@ -867,11 +957,16 @@ impl ControlServer {
             Command::Skip {} => self.respond_runner_outcome(request, |r| r.skip()),
             Command::Previous {} => self.respond_runner_outcome(request, |r| r.previous()),
             Command::Defer {} => self.respond_runner_outcome(request, |r| r.defer()),
-            Command::PlayShow { show_id } => self.respond_runner_outcome(request, |r| r.play_show(&show_id)),
+            Command::PlayShow { show_id } => {
+                self.respond_runner_outcome(request, |r| r.play_show(&show_id))
+            }
             Command::SelectPlaylist { playlist } => {
                 self.respond_runner_outcome(request, |r| r.select_playlist(&playlist))
             }
-            Command::Play {} | Command::Pause {} | Command::Seek { .. } | Command::Volume { .. } => {
+            Command::Play {}
+            | Command::Pause {}
+            | Command::Seek { .. }
+            | Command::Volume { .. } => {
                 let result = {
                     let player = self.player.lock().unwrap();
                     match player.as_ref() {
@@ -887,14 +982,26 @@ impl ControlServer {
                 };
                 match result {
                     Ok(()) => {
-                        if let Command::Volume { level } = command { self.save_volume(level); }
+                        if let Command::Volume { level } = command {
+                            self.save_volume(level);
+                        }
                         self.notify();
-                        respond_control_ok(request, "control_applied", "control applied by the target player");
+                        respond_control_ok(
+                            request,
+                            "control_applied",
+                            "control applied by the target player",
+                        );
                     }
-                    Err(message) => respond_json(request, 503, &json!({"ok": false, "message": message})),
+                    Err(message) => {
+                        respond_json(request, 503, &json!({"ok": false, "message": message}))
+                    }
                 }
             }
-            _ => respond_json(request, 400, &json!({"ok": false, "message": "use the status and stream endpoints for reads"})),
+            _ => respond_json(
+                request,
+                400,
+                &json!({"ok": false, "message": "use the status and stream endpoints for reads"}),
+            ),
         }
     }
 
@@ -933,7 +1040,10 @@ impl ControlServer {
                 &json!({"error":"no video files found under root_path"}),
             );
         }
-        let sid = from_database!(request, self.replica.create_show(&playlist, &name, &root, &eps));
+        let sid = from_database!(
+            request,
+            self.replica.create_show(&playlist, &name, &root, &eps)
+        );
         self.notify_database_change();
         respond_json(request, 200, &json!({"id": sid, "episodes": eps.len()}));
     }
@@ -1002,25 +1112,24 @@ impl ControlServer {
         if let Ok(entries) = std::fs::read_dir(&parent) {
             let existing_shows = from_database!(request, self.replica.all_shows());
             for entry in entries.flatten() {
-                if let Ok(file_type) = entry.file_type() {
-                    if file_type.is_dir() {
-                        let path = entry.path();
-                        let path_str = path.to_string_lossy().to_string();
-                        // Check if any existing show has a matching folder name
-                        // This handles the migration from D:\Downloads\Group-Nelson to S:\Group-Nelson
-                        let is_added = existing_shows.iter().any(|s| {
-                            let s_path = std::path::Path::new(&s.root_path);
-                            if let (Some(s_name), Some(p_name)) =
-                                (s_path.file_name(), path.file_name())
-                            {
-                                s_name == p_name
-                            } else {
-                                s_path == path.as_path()
-                            }
-                        });
-                        if !is_added {
-                            unadded.push(path_str);
+                if let Ok(file_type) = entry.file_type()
+                    && file_type.is_dir()
+                {
+                    let path = entry.path();
+                    let path_str = path.to_string_lossy().to_string();
+                    // Check if any existing show has a matching folder name
+                    // This handles the migration from D:\Downloads\Group-Nelson to S:\Group-Nelson
+                    let is_added = existing_shows.iter().any(|s| {
+                        let s_path = std::path::Path::new(&s.root_path);
+                        if let (Some(s_name), Some(p_name)) = (s_path.file_name(), path.file_name())
+                        {
+                            s_name == p_name
+                        } else {
+                            s_path == path.as_path()
                         }
+                    });
+                    if !is_added {
+                        unadded.push(path_str);
                     }
                 }
             }
@@ -1063,10 +1172,8 @@ impl ControlServer {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        if !sid.is_empty() {
-            if from_database!(request, self.replica.remove_show(&sid)) {
-                self.notify_database_change();
-            }
+        if !sid.is_empty() && from_database!(request, self.replica.remove_show(&sid)) {
+            self.notify_database_change();
         }
         respond_json(request, 200, &json!({}));
     }
@@ -1088,7 +1195,8 @@ impl ControlServer {
         if let Some(show) = from_database!(request, self.replica.show(&sid)) {
             let full_sorted: Vec<String> =
                 specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
-            let added_ids = from_database!(request, self.replica.rescan_episodes(&sid, &full_sorted));
+            let added_ids =
+                from_database!(request, self.replica.rescan_episodes(&sid, &full_sorted));
             added = added_ids.len();
             self.notify_database_change();
         }
@@ -1112,10 +1220,14 @@ impl ControlServer {
         if let Some(show) = from_database!(request, self.replica.show(&sid)) {
             let full_sorted: Vec<String> =
                 specific_episodes.unwrap_or_else(|| scan::scan_episodes(&show.root_path));
-            let added_ids = from_database!(request, self.replica.rescan_episodes(&sid, &full_sorted));
+            let added_ids =
+                from_database!(request, self.replica.rescan_episodes(&sid, &full_sorted));
             added = added_ids.len();
             if added > 0 {
-                from_database!(request, self.replica.mark_episodes_watched(&sid, &added_ids));
+                from_database!(
+                    request,
+                    self.replica.mark_episodes_watched(&sid, &added_ids)
+                );
             }
             self.notify_database_change();
         }
@@ -1426,14 +1538,14 @@ fn urlencoding_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
-                if let Ok(val) = u8::from_str_radix(hex, 16) {
-                    result.push(val);
-                    i += 3;
-                    continue;
-                }
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
+            && let Ok(val) = u8::from_str_radix(hex, 16)
+        {
+            result.push(val);
+            i += 3;
+            continue;
         }
         if bytes[i] == b'+' {
             result.push(b' ');
@@ -1539,62 +1651,61 @@ fn status_alerts(status: &serde_json::Map<String, Value>) -> Value {
         .get("error_kind")
         .and_then(Value::as_str)
         .is_some_and(|kind| kind == "round_unplayable");
-    if let Some(file_sync) = status.get("file_sync").and_then(Value::as_object) {
-        if file_sync
+    if let Some(file_sync) = status.get("file_sync").and_then(Value::as_object)
+        && file_sync
             .get("incomplete")
             .and_then(Value::as_bool)
             .unwrap_or(false)
-        {
-            let summary = file_sync
-                .get("summary")
-                .and_then(Value::as_str)
-                .unwrap_or("some files were not ready");
-            let mut detail_parts = Vec::new();
-            if let Some(problems) = file_sync.get("problems").and_then(Value::as_array) {
-                for problem in problems.iter().take(3) {
-                    let show = problem
-                        .get("show_name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown show");
-                    let reason = problem
-                        .get("reason")
-                        .and_then(Value::as_str)
-                        .unwrap_or("file unavailable");
-                    let source = problem
-                        .get("source_path")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    if source.is_empty() {
-                        detail_parts.push(format!("{show}: {reason}"));
-                    } else {
-                        detail_parts.push(format!("{show}: {reason} ({source})"));
-                    }
+    {
+        let summary = file_sync
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("some files were not ready");
+        let mut detail_parts = Vec::new();
+        if let Some(problems) = file_sync.get("problems").and_then(Value::as_array) {
+            for problem in problems.iter().take(3) {
+                let show = problem
+                    .get("show_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown show");
+                let reason = problem
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("file unavailable");
+                let source = problem
+                    .get("source_path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if source.is_empty() {
+                    detail_parts.push(format!("{show}: {reason}"));
+                } else {
+                    detail_parts.push(format!("{show}: {reason} ({source})"));
                 }
             }
-            let detail = if detail_parts.is_empty() {
-                "Check the show paths in library or open the log for exact file paths.".to_string()
-            } else {
-                detail_parts.join("\n")
-            };
-            if round_unplayable {
-                alerts.push(json!({
-                    "level": "danger",
-                    "title": "Round has no playable media",
-                    "message": status
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("No files in this round could be opened."),
-                    "detail": detail,
-                }));
-                return Value::Array(alerts);
-            }
+        }
+        let detail = if detail_parts.is_empty() {
+            "Check the show paths in library or open the log for exact file paths.".to_string()
+        } else {
+            detail_parts.join("\n")
+        };
+        if round_unplayable {
             alerts.push(json!({
-                "level": "warning",
-                "title": "Round file sync incomplete",
-                "message": summary,
+                "level": "danger",
+                "title": "Round has no playable media",
+                "message": status
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("No files in this round could be opened."),
                 "detail": detail,
             }));
+            return Value::Array(alerts);
         }
+        alerts.push(json!({
+            "level": "warning",
+            "title": "Round file sync incomplete",
+            "message": summary,
+            "detail": detail,
+        }));
     }
 
     Value::Array(alerts)
@@ -1678,13 +1789,20 @@ mod tests {
     fn remote_fullscreen_needs_a_window_but_not_a_loaded_episode() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         for available in [None, Some(false), Some(true)] {
-            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
+            let control = ControlServer::new(
+                Arc::new(Replica::new(":memory:")),
+                Arc::new(PlaylistChoice::in_memory(None)),
+            );
             let calls = Arc::new(AtomicUsize::new(0));
             if let Some(success) = available {
                 let calls = calls.clone();
                 control.set_on_fullscreen(Box::new(move || {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    if success { Ok(()) } else { Err("UI message failed".into()) }
+                    if success {
+                        Ok(())
+                    } else {
+                        Err("UI message failed".into())
+                    }
                 }));
             }
             let revision = control.replica.revision().unwrap();
@@ -1692,12 +1810,22 @@ mod tests {
             let address = listener.server_addr().to_string();
             let copy = control.clone();
             let worker = std::thread::spawn(move || {
-                for _ in 0..2 { copy.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap()); }
+                for _ in 0..2 {
+                    copy.handle(
+                        listener
+                            .recv_timeout(Duration::from_secs(3))
+                            .unwrap()
+                            .unwrap(),
+                    );
+                }
             });
             let client = shows_control::Client::connect_to(&address).unwrap();
             let result = client.execute(&shows_control::Command::Fullscreen {});
             assert_eq!(result.is_ok(), available == Some(true));
-            assert_eq!(calls.load(Ordering::SeqCst), usize::from(available.is_some()));
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                usize::from(available.is_some())
+            );
             assert_eq!(control.status_json()["window_fullscreen"], false);
             assert_eq!(control.replica.revision().unwrap(), revision);
             worker.join().unwrap();
@@ -1706,18 +1834,31 @@ mod tests {
 
     #[test]
     fn native_remote_reports_unavailable_player_without_mutating_shared_state() {
-        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
+        let control = ControlServer::new(
+            Arc::new(Replica::new(":memory:")),
+            Arc::new(PlaylistChoice::in_memory(None)),
+        );
         let revision = control.replica.revision().unwrap();
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();
         let copy = control.clone();
         let worker = std::thread::spawn(move || {
             for _ in 0..2 {
-                copy.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+                copy.handle(
+                    listener
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap()
+                        .unwrap(),
+                );
             }
         });
         let client = shows_control::Client::connect_to(&address).unwrap();
-        assert!(client.execute(&shows_control::Command::Play {}).unwrap_err().contains("no playable episode"));
+        assert!(
+            client
+                .execute(&shows_control::Command::Play {})
+                .unwrap_err()
+                .contains("no playable episode")
+        );
         worker.join().unwrap();
         assert_eq!(control.replica.revision().unwrap(), revision);
     }
@@ -1725,7 +1866,10 @@ mod tests {
     #[test]
     fn preview_reads_are_bounded_cached_and_do_not_change_playback_or_database() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
+        let control = ControlServer::new(
+            Arc::new(Replica::new(":memory:")),
+            Arc::new(PlaylistChoice::in_memory(None)),
+        );
         let calls = Arc::new(AtomicUsize::new(0));
         let capture_calls = calls.clone();
         control.set_on_preview(Box::new(move || {
@@ -1738,7 +1882,14 @@ mod tests {
         let address = listener.server_addr().to_string();
         let copy = control.clone();
         let worker = std::thread::spawn(move || {
-            for _ in 0..3 { copy.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap()); }
+            for _ in 0..3 {
+                copy.handle(
+                    listener
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
         });
         let client = shows_control::Client::connect_to(&address).unwrap();
         let first = client.execute(&shows_control::Command::Preview {}).unwrap();
@@ -1753,7 +1904,10 @@ mod tests {
     #[test]
     fn the_network_port_serves_only_the_remotes_routes_and_only_with_a_token() {
         use std::io::Write;
-        let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
+        let control = ControlServer::new(
+            Arc::new(Replica::new(":memory:")),
+            Arc::new(PlaylistChoice::in_memory(None)),
+        );
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();
         let requests = [
@@ -1765,16 +1919,26 @@ mod tests {
         let copy = control.clone();
         let worker = std::thread::spawn(move || {
             for _ in 0..requests.len() {
-                copy.handle_remote(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+                copy.handle_remote(
+                    listener
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap()
+                        .unwrap(),
+                );
             }
         });
         for (line, headers, code) in requests {
             let mut socket = std::net::TcpStream::connect(&address).unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
             write!(socket, "{line} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{headers}Content-Length: 0\r\n\r\n").unwrap();
             let mut response = String::new();
             socket.read_to_string(&mut response).unwrap();
-            assert!(response.starts_with(&format!("HTTP/1.1 {code}")), "{line}: {response}");
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {code}")),
+                "{line}: {response}"
+            );
         }
         worker.join().unwrap();
     }
@@ -1789,16 +1953,26 @@ mDuMrlN4kCyK6H6Zctd4R+n5AAmhRANCAAS5N+qDIf54e0j5JWN5q2/oG8JJm9YN
 RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
 -----END PRIVATE KEY-----
 ";
-        let mut control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
-        Arc::get_mut(&mut control).unwrap().remote_tokens = TokenChecker::with_fetch(Box::new(|| {
-            serde_json::from_value(json!({"keys":[{"kty":"EC","crv":"P-256","use":"sig","alg":"ES256","kid":"k1",
+        let mut control = ControlServer::new(
+            Arc::new(Replica::new(":memory:")),
+            Arc::new(PlaylistChoice::in_memory(None)),
+        );
+        Arc::get_mut(&mut control).unwrap().remote_tokens = TokenChecker::with_fetch(Box::new(
+            || {
+                serde_json::from_value(json!({"keys":[{"kty":"EC","crv":"P-256","use":"sig","alg":"ES256","kid":"k1",
                 "x":"uTfqgyH-eHtI-SVjeatv6BvCSZvWDUV3BJcMeDc8yI4","y":"t405O4-jzrRWb1wqKOBc8LFqbBj5_gu3fa4P82q6sBY"}]}))
                 .map_err(|e| e.to_string())
-        }));
+            },
+        ));
         let mut header = Header::new(Algorithm::ES256);
         header.kid = Some("k1".into());
         let claims = json!({"aud":"shows","iss":shows_core::remote_token::ISSUER,"exp":chrono::Utc::now().timestamp() + 300});
-        let token = encode(&header, &claims, &EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap()).unwrap();
+        let token = encode(
+            &header,
+            &claims,
+            &EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap(),
+        )
+        .unwrap();
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();
         let requests = [
@@ -1812,16 +1986,26 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
         let copy = control.clone();
         let worker = std::thread::spawn(move || {
             for _ in 0..requests.len() {
-                copy.handle_remote(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+                copy.handle_remote(
+                    listener
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap()
+                        .unwrap(),
+                );
             }
         });
         for (line, code) in requests {
             let mut socket = std::net::TcpStream::connect(&address).unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
             write!(socket, "{line} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n").unwrap();
             let mut response = String::new();
             socket.read_to_string(&mut response).unwrap();
-            assert!(response.starts_with(&format!("HTTP/1.1 {code}")), "{line}: {response}");
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {code}")),
+                "{line}: {response}"
+            );
         }
         worker.join().unwrap();
     }
@@ -1829,15 +2013,28 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
     #[test]
     fn remote_rejects_browser_requests_before_applying_controls() {
         use std::io::Write;
-        for headers in ["Content-Type: text/plain\r\n", "Content-Type: application/json\r\nOrigin: https://example.com\r\n"] {
-            let control = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
+        for headers in [
+            "Content-Type: text/plain\r\n",
+            "Content-Type: application/json\r\nOrigin: https://example.com\r\n",
+        ] {
+            let control = ControlServer::new(
+                Arc::new(Replica::new(":memory:")),
+                Arc::new(PlaylistChoice::in_memory(None)),
+            );
             let listener = Server::http("127.0.0.1:0").unwrap();
             let address = listener.server_addr().to_string();
             let worker = std::thread::spawn(move || {
-                control.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+                control.handle(
+                    listener
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap()
+                        .unwrap(),
+                );
             });
             let mut socket = std::net::TcpStream::connect(address).unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
             let body = r#"{"action":"skip"}"#;
             write!(socket, "POST /remote/control HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{headers}Content-Length: {}\r\n\r\n{body}", body.len()).unwrap();
             let mut response = String::new();
@@ -1897,7 +2094,10 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
         assert_eq!(&frame, b"frame");
 
         let flush = flush_comment();
-        assert!(flush.len() > 1024, "comment must exceed the 1024-byte BufWriter");
+        assert!(
+            flush.len() > 1024,
+            "comment must exceed the 1024-byte BufWriter"
+        );
         assert!(flush.starts_with(b":") && flush.ends_with(b"\n\n"));
         let mut buf = vec![0u8; flush.len()];
         stream.read_exact(&mut buf).unwrap();
@@ -1906,7 +2106,10 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
 
     #[test]
     fn identical_shell_state_is_rebroadcast_as_an_acknowledgement() {
-        let server = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
+        let server = ControlServer::new(
+            Arc::new(Replica::new(":memory:")),
+            Arc::new(PlaylistChoice::in_memory(None)),
+        );
 
         server.push_raw(json!({"window_on_top": false}));
         let after_first = server.status_seq.load(Ordering::Relaxed);
@@ -1931,7 +2134,10 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
 
     #[test]
     fn initial_status_snapshot_has_frontend_contract_fields() {
-        let server = ControlServer::new(Arc::new(Replica::new(":memory:")), Arc::new(PlaylistChoice::in_memory(None)));
+        let server = ControlServer::new(
+            Arc::new(Replica::new(":memory:")),
+            Arc::new(PlaylistChoice::in_memory(None)),
+        );
         let value = server.status_json();
 
         assert_eq!(value["phase"], "initializing");
@@ -1969,23 +2175,38 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
         );
         let listener = Server::http("127.0.0.1:0").unwrap();
         let address = listener.server_addr().to_string();
-        let requests = ["GET /stats", "GET /shows", "GET /library/next-round", "POST /library/mark-watched"];
+        let requests = [
+            "GET /stats",
+            "GET /shows",
+            "GET /library/next-round",
+            "POST /library/mark-watched",
+        ];
         let copy = control.clone();
         let worker = std::thread::spawn(move || {
             for _ in 0..requests.len() {
-                copy.handle(listener.recv_timeout(Duration::from_secs(3)).unwrap().unwrap());
+                copy.handle(
+                    listener
+                        .recv_timeout(Duration::from_secs(3))
+                        .unwrap()
+                        .unwrap(),
+                );
             }
         });
         for line in requests {
             use std::io::Write;
             let body = "{\"show_id\":\"s1\"}";
             let mut socket = std::net::TcpStream::connect(&address).unwrap();
-            socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
             write!(socket, "{line} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
             let mut response = String::new();
             socket.read_to_string(&mut response).unwrap();
             assert!(response.starts_with("HTTP/1.1 503"), "{line}: {response}");
-            assert!(response.contains("database_unavailable"), "{line}: {response}");
+            assert!(
+                response.contains("database_unavailable"),
+                "{line}: {response}"
+            );
         }
         worker.join().unwrap();
     }
@@ -1993,17 +2214,28 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
     #[test]
     fn status_alerts_report_an_unreachable_database_and_what_is_waiting() {
         let mut status = serde_json::Map::new();
-        status.insert("database".into(), json!({
-            "reachable": false, "pending_watches": 3, "error": "disk I/O error",
-        }));
+        status.insert(
+            "database".into(),
+            json!({
+                "reachable": false, "pending_watches": 3, "error": "disk I/O error",
+            }),
+        );
 
         let alerts = status_alerts(&status);
 
         assert_eq!(alerts[0]["title"], "NAS database unreachable");
-        assert!(alerts[0]["message"].as_str().unwrap().contains("waiting here: 3"));
+        assert!(
+            alerts[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("waiting here: 3")
+        );
         assert_eq!(alerts[0]["detail"], "disk I/O error");
 
-        status.insert("database".into(), json!({"reachable": true, "pending_watches": 0}));
+        status.insert(
+            "database".into(),
+            json!({"reachable": true, "pending_watches": 0}),
+        );
         assert_eq!(status_alerts(&status), json!([]));
     }
 

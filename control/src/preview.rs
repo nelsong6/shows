@@ -34,9 +34,13 @@ impl VideoPreview {
         }
         let ramp = b" .:-=+*#%@";
         let rows = pixels
-            .as_chunks::<{ WIDTH * 4 }>().0.iter()
+            .as_chunks::<{ WIDTH * 4 }>()
+            .0
+            .iter()
             .map(|row| {
-                row.as_chunks::<4>().0.iter()
+                row.as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|p| {
                         let light =
                             (54 * p[0] as usize + 183 * p[1] as usize + 19 * p[2] as usize) / 256;
@@ -80,11 +84,7 @@ mod tests {
     fn preserves_top_down_surface_orientation_and_terminal_aspect() {
         let mut pixels = vec![0; WIDTH * HEIGHT * 4];
         // Unequal corner luminances expose vertical and horizontal mirroring.
-        for (x, y, light) in [
-            (0, 0, 255),
-            (WIDTH - 1, 0, 170),
-            (0, HEIGHT - 1, 85),
-        ] {
+        for (x, y, light) in [(0, 0, 255), (WIDTH - 1, 0, 170), (0, HEIGHT - 1, 85)] {
             let offset = (y * WIDTH + x) * 4;
             pixels[offset..offset + 4].fill(light);
         }
@@ -93,7 +93,10 @@ mod tests {
         assert_eq!(sample.rows[0].as_bytes()[WIDTH - 1], b'*');
         assert_eq!(sample.rows[HEIGHT - 1].as_bytes()[0], b'-');
         assert_eq!(sample.rows[HEIGHT - 1].as_bytes()[WIDTH - 1], b' ');
-        assert_eq!(sample.fit(WIDTH as u16, HEIGHT as u16)[0].as_bytes()[0], b'@');
+        assert_eq!(
+            sample.fit(WIDTH as u16, HEIGHT as u16)[0].as_bytes()[0],
+            b'@'
+        );
         let fitted = sample.fit(80, 30);
         assert_eq!((fitted[0].len(), fitted.len()), (80, 23));
         assert!(sample.fit(0, 1).is_empty());

@@ -108,10 +108,10 @@ pub fn scan_episodes(root_path: &str) -> Vec<String> {
                 if !extras {
                     stack.push(path);
                 }
-            } else if is_video(&path) {
-                if let Ok(rel) = path.strip_prefix(root) {
-                    found.push(rel.to_string_lossy().replace('/', "\\"));
-                }
+            } else if is_video(&path)
+                && let Ok(rel) = path.strip_prefix(root)
+            {
+                found.push(rel.to_string_lossy().replace('/', "\\"));
             }
         }
     }
@@ -135,9 +135,19 @@ mod tests {
         fs::create_dir_all(season.join("Deleted Scenes")).unwrap();
         fs::write(season.join("Show - S01E01.mkv"), "x").unwrap();
         fs::write(season.join("Featurettes").join("Adapting.mkv"), "x").unwrap();
-        fs::write(season.join("Featurettes").join("Extra Footage").join("Clip.mkv"), "x").unwrap();
+        fs::write(
+            season
+                .join("Featurettes")
+                .join("Extra Footage")
+                .join("Clip.mkv"),
+            "x",
+        )
+        .unwrap();
         fs::write(season.join("Deleted Scenes").join("Cut.mkv"), "x").unwrap();
-        assert_eq!(scan_episodes(root.to_str().unwrap()), ["Show S01\\Show - S01E01.mkv"]);
+        assert_eq!(
+            scan_episodes(root.to_str().unwrap()),
+            ["Show S01\\Show - S01E01.mkv"]
+        );
     }
 
     #[test]
@@ -153,7 +163,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::create_dir(root.join("S01")).unwrap();
-        for name in ["S01E02.mkv", "S01E10.mkv", "S01E01.mkv", "readme.txt", "poster.jpg"] {
+        for name in [
+            "S01E02.mkv",
+            "S01E10.mkv",
+            "S01E01.mkv",
+            "readme.txt",
+            "poster.jpg",
+        ] {
             fs::write(root.join("S01").join(name), "x").unwrap();
         }
         fs::write(root.join("extra.avi"), "x").unwrap();
@@ -161,7 +177,12 @@ mod tests {
         // video files only; natural order (E02 before E10); backslash relative paths
         assert_eq!(
             out,
-            ["extra.avi", "S01\\S01E01.mkv", "S01\\S01E02.mkv", "S01\\S01E10.mkv"]
+            [
+                "extra.avi",
+                "S01\\S01E01.mkv",
+                "S01\\S01E02.mkv",
+                "S01\\S01E10.mkv"
+            ]
         );
     }
 

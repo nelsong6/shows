@@ -2,7 +2,7 @@ $ErrorActionPreference='Stop'
 $tempBase=[IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $fixture=Join-Path $tempBase ('shows-desktop-distribution-' + [guid]::NewGuid().ToString('N'))
 $repo=Join-Path $fixture 'repo'
-$release=Join-Path $repo 'desktop-rs\target\release'
+$release=Join-Path $repo 'target\release'
 $nas=Join-Path $fixture 'nas'
 $install=Join-Path $fixture 'installed'
 New-Item -ItemType Directory -Path $release | Out-Null

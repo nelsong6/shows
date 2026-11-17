@@ -7,30 +7,30 @@
 //! renders on that same thread (the compositor's frame timer), so the context
 //! stays current throughout.
 
-use std::ffi::{c_char, c_int, c_void, CStr};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::ptr::null_mut;
 use std::sync::Arc;
 
-use windows::core::{Interface, PCSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Gdi::{GetDC, HDC};
 use windows::Win32::Graphics::OpenGL::{
-    wglCreateContext, wglGetProcAddress, wglMakeCurrent, ChoosePixelFormat, SetPixelFormat, HGLRC,
-    PFD_DOUBLEBUFFER, PFD_DRAW_TO_WINDOW, PFD_MAIN_PLANE, PFD_SUPPORT_OPENGL, PFD_TYPE_RGBA,
-    PIXELFORMATDESCRIPTOR,
+    ChoosePixelFormat, HGLRC, PFD_DOUBLEBUFFER, PFD_DRAW_TO_WINDOW, PFD_MAIN_PLANE,
+    PFD_SUPPORT_OPENGL, PFD_TYPE_RGBA, PIXELFORMATDESCRIPTOR, SetPixelFormat, wglCreateContext,
+    wglGetProcAddress, wglMakeCurrent,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, RegisterClassW, CW_USEDEFAULT, WNDCLASSW, WS_OVERLAPPED,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, RegisterClassW, WNDCLASSW, WS_OVERLAPPED,
 };
 use windows::core::w;
+use windows::core::{Interface, PCSTR};
 
-use crate::mpv::{Handle, MpvRenderParam, MPV_RENDER_PARAM_API_TYPE, MPV_RENDER_PARAM_INVALID};
+use crate::mpv::{Handle, MPV_RENDER_PARAM_API_TYPE, MPV_RENDER_PARAM_INVALID, MpvRenderParam};
 
 // GL / WGL constants (kept local so we don't depend on which the windows crate exposes).
 const GL_TEXTURE_2D: u32 = 0x0DE1;
@@ -77,10 +77,10 @@ unsafe fn gl_proc(name: *const c_char) -> *mut c_void {
             return addr as *mut c_void;
         }
     }
-    if let Ok(h) = LoadLibraryW(w!("opengl32.dll")) {
-        if let Some(f) = GetProcAddress(h, PCSTR(name as *const u8)) {
-            return f as *mut c_void;
-        }
+    if let Ok(h) = LoadLibraryW(w!("opengl32.dll"))
+        && let Some(f) = GetProcAddress(h, PCSTR(name as *const u8))
+    {
+        return f as *mut c_void;
     }
     null_mut()
 }
@@ -234,13 +234,18 @@ impl GlVideo {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
                 ..Default::default()
             };
             let mut texture: Option<ID3D11Texture2D> = None;
-            device.CreateTexture2D(&desc, None, Some(&mut texture)).map_err(|e| e.to_string())?;
+            device
+                .CreateTexture2D(&desc, None, Some(&mut texture))
+                .map_err(|e| e.to_string())?;
             let texture = texture.unwrap();
 
             // --- DX interop: register the D3D texture as a GL texture + FBO ---
@@ -263,7 +268,13 @@ impl GlVideo {
             let mut fbo: u32 = 0;
             (procs.gen_framebuffers)(1, &mut fbo);
             (procs.bind_framebuffer)(GL_FRAMEBUFFER, fbo);
-            (procs.framebuffer_texture_2d)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gl_tex, 0);
+            (procs.framebuffer_texture_2d)(
+                GL_FRAMEBUFFER,
+                GL_COLOR_ATTACHMENT0,
+                GL_TEXTURE_2D,
+                gl_tex,
+                0,
+            );
 
             // --- mpv OpenGL render context on the shared handle ---
             let mut init = MpvOpenglInitParams {
@@ -271,15 +282,22 @@ impl GlVideo {
                 get_proc_address_ctx: null_mut(),
             };
             let mut cparams = [
-                MpvRenderParam { kind: MPV_RENDER_PARAM_API_TYPE, data: c"opengl".as_ptr() as *mut c_void },
+                MpvRenderParam {
+                    kind: MPV_RENDER_PARAM_API_TYPE,
+                    data: c"opengl".as_ptr() as *mut c_void,
+                },
                 MpvRenderParam {
                     kind: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
                     data: &mut init as *mut _ as *mut c_void,
                 },
-                MpvRenderParam { kind: MPV_RENDER_PARAM_INVALID, data: null_mut() },
+                MpvRenderParam {
+                    kind: MPV_RENDER_PARAM_INVALID,
+                    data: null_mut(),
+                },
             ];
             let mut rctx: *mut c_void = null_mut();
-            let rc = (handle.api.render_context_create)(&mut rctx, handle.ctx, cparams.as_mut_ptr());
+            let rc =
+                (handle.api.render_context_create)(&mut rctx, handle.ctx, cparams.as_mut_ptr());
             if rc < 0 {
                 return Err(format!("mpv_render_context_create(opengl) failed: {rc}"));
             }
@@ -306,7 +324,12 @@ impl GlVideo {
     /// backing storage changes — re-registration against the same GL name
     /// refreshes the interop binding. Call on `WM_SIZE` after the swapchain is
     /// resized; subsequent renders write into the new texture at the new size.
-    pub fn resize(&mut self, device: &ID3D11Device, w: i32, h: i32) -> std::result::Result<(), String> {
+    pub fn resize(
+        &mut self,
+        device: &ID3D11Device,
+        w: i32,
+        h: i32,
+    ) -> std::result::Result<(), String> {
         if w <= 0 || h <= 0 || (w == self.w && h == self.h) {
             return Ok(());
         }
@@ -321,13 +344,18 @@ impl GlVideo {
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_DEFAULT,
                 BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
                 ..Default::default()
             };
             let mut new_tex: Option<ID3D11Texture2D> = None;
-            device.CreateTexture2D(&desc, None, Some(&mut new_tex)).map_err(|e| e.to_string())?;
+            device
+                .CreateTexture2D(&desc, None, Some(&mut new_tex))
+                .map_err(|e| e.to_string())?;
             let new_tex = new_tex.unwrap();
 
             let new_obj = (self.procs.dx_register_object)(
@@ -370,7 +398,11 @@ impl GlVideo {
     /// used to lock the window to the video in pin mode so there are no letterbox
     /// bars.
     pub fn video_aspect(&self) -> Option<f64> {
-        let a: f64 = self.handle.get_property("video-params/aspect")?.parse().ok()?;
+        let a: f64 = self
+            .handle
+            .get_property("video-params/aspect")?
+            .parse()
+            .ok()?;
         (a.is_finite() && a > 0.0).then_some(a)
     }
 
@@ -395,17 +427,52 @@ impl GlVideo {
             let mut framebuffer = 0;
             (p.gen_textures)(1, &mut texture);
             (p.bind_texture)(GL_TEXTURE_2D, texture);
-            (p.tex_image_2d)(GL_TEXTURE_2D, 0, GL_RGBA8 as i32, WIDTH as i32, HEIGHT as i32, 0, GL_RGBA, GL_UNSIGNED_BYTE, std::ptr::null());
+            (p.tex_image_2d)(
+                GL_TEXTURE_2D,
+                0,
+                GL_RGBA8 as i32,
+                WIDTH as i32,
+                HEIGHT as i32,
+                0,
+                GL_RGBA,
+                GL_UNSIGNED_BYTE,
+                std::ptr::null(),
+            );
             (p.gen_framebuffers)(1, &mut framebuffer);
             (p.bind_framebuffer)(GL_DRAW_FRAMEBUFFER, framebuffer);
-            (p.framebuffer_texture_2d)(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+            (p.framebuffer_texture_2d)(
+                GL_DRAW_FRAMEBUFFER,
+                GL_COLOR_ATTACHMENT0,
+                GL_TEXTURE_2D,
+                texture,
+                0,
+            );
             let complete = (p.check_framebuffer)(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
             let mut pixels = vec![0u8; WIDTH * HEIGHT * 4];
             if complete {
                 (p.bind_framebuffer)(GL_READ_FRAMEBUFFER, self.fbo);
-                (p.blit_framebuffer)(0, 0, self.w, self.h, 0, 0, WIDTH as i32, HEIGHT as i32, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+                (p.blit_framebuffer)(
+                    0,
+                    0,
+                    self.w,
+                    self.h,
+                    0,
+                    0,
+                    WIDTH as i32,
+                    HEIGHT as i32,
+                    GL_COLOR_BUFFER_BIT,
+                    GL_LINEAR,
+                );
                 (p.bind_framebuffer)(GL_READ_FRAMEBUFFER, framebuffer);
-                (p.read_pixels)(0, 0, WIDTH as i32, HEIGHT as i32, GL_RGBA, GL_UNSIGNED_BYTE, pixels.as_mut_ptr().cast());
+                (p.read_pixels)(
+                    0,
+                    0,
+                    WIDTH as i32,
+                    HEIGHT as i32,
+                    GL_RGBA,
+                    GL_UNSIGNED_BYTE,
+                    pixels.as_mut_ptr().cast(),
+                );
             }
             let error = (p.get_error)();
             (p.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo);
@@ -419,7 +486,11 @@ impl GlVideo {
             }
             // This D3D-shared surface already reads in display order, matching
             // render()'s FLIP_Y=0. Reversing its rows would invert the preview.
-            VideoPreview::from_rgba(&pixels, self.w as f64 / self.h as f64, started.elapsed().as_secs_f64() * 1000.0)
+            VideoPreview::from_rgba(
+                &pixels,
+                self.w as f64 / self.h as f64,
+                started.elapsed().as_secs_f64() * 1000.0,
+            )
         }
     }
 
@@ -431,19 +502,33 @@ impl GlVideo {
             (self.procs.bind_framebuffer)(GL_FRAMEBUFFER, self.fbo);
             (self.procs.viewport)(0, 0, self.w, self.h);
 
-            let mut fbo = MpvOpenglFbo { fbo: self.fbo as c_int, w: self.w, h: self.h, internal_format: 0 };
+            let mut fbo = MpvOpenglFbo {
+                fbo: self.fbo as c_int,
+                w: self.w,
+                h: self.h,
+                internal_format: 0,
+            };
             // WGL_NV_DX_interop2 already lands mpv's default GL output upright in the
             // D3D texture; an extra FLIP_Y inverts it (video shows upside down).
             let mut flip: c_int = 0;
             let mut block: c_int = 0;
             let mut params = [
-                MpvRenderParam { kind: MPV_RENDER_PARAM_OPENGL_FBO, data: &mut fbo as *mut _ as *mut c_void },
-                MpvRenderParam { kind: MPV_RENDER_PARAM_FLIP_Y, data: &mut flip as *mut _ as *mut c_void },
+                MpvRenderParam {
+                    kind: MPV_RENDER_PARAM_OPENGL_FBO,
+                    data: &mut fbo as *mut _ as *mut c_void,
+                },
+                MpvRenderParam {
+                    kind: MPV_RENDER_PARAM_FLIP_Y,
+                    data: &mut flip as *mut _ as *mut c_void,
+                },
                 MpvRenderParam {
                     kind: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME,
                     data: &mut block as *mut _ as *mut c_void,
                 },
-                MpvRenderParam { kind: MPV_RENDER_PARAM_INVALID, data: null_mut() },
+                MpvRenderParam {
+                    kind: MPV_RENDER_PARAM_INVALID,
+                    data: null_mut(),
+                },
             ];
             (self.handle.api.render_context_render)(self.rctx, params.as_mut_ptr());
             (self.procs.flush)();
@@ -477,15 +562,23 @@ mod tests {
         let mut device = None;
         unsafe {
             D3D11CreateDevice(
-                None, D3D_DRIVER_TYPE_HARDWARE, Default::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT, None, D3D11_SDK_VERSION,
-                Some(&mut device), None, None,
-            ).unwrap();
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                Default::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )
+            .unwrap();
         }
         let handle = Arc::new(Handle::create(crate::mpv::Api::load().unwrap()).unwrap());
         handle.set_property_checked("pause", "yes").unwrap();
         let video = GlVideo::create(&device.unwrap(), handle.clone(), 160, 90).unwrap();
-        let path = std::env::temp_dir().join(format!("shows-orientation-{}.ppm", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("shows-orientation-{}.ppm", std::process::id()));
         // This image's top half is white and bottom half is black.
         let mut image = b"P6\n160 90\n255\n".to_vec();
         image.extend(std::iter::repeat_n(255, 160 * 45 * 3));
@@ -505,10 +598,16 @@ mod tests {
             }
             Err("Timed out rendering the orientation fixture".to_string())
         })();
-        unsafe { (handle.api.render_context_free)(video.rctx); }
+        unsafe {
+            (handle.api.render_context_free)(video.rctx);
+        }
         std::fs::remove_file(path).unwrap();
         let captured = captured.unwrap();
         assert_eq!(captured.rows[10], "@".repeat(160), "white top of the video");
-        assert_eq!(captured.rows[80], " ".repeat(160), "black bottom of the video");
+        assert_eq!(
+            captured.rows[80],
+            " ".repeat(160),
+            "black bottom of the video"
+        );
     }
 }

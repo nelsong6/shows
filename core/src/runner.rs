@@ -157,7 +157,7 @@ pub fn get_local_path(show_name: &str, relative_path: &str) -> std::path::PathBu
         .unwrap_or_else(|_| r"d:\downloads\Watching".to_string());
     let mut path = std::path::PathBuf::from(base);
     path.push(show_name);
-    for part in relative_path.split(|c| c == '\\' || c == '/') {
+    for part in relative_path.split(['\\', '/']) {
         if !part.is_empty() {
             path.push(part);
         }
@@ -446,7 +446,9 @@ impl Runner {
                 Err(e) if self.replica.is_reachable() => {
                     log::error!("round could not be read: {e}");
                     if let Some(cb) = &self.cb.on_error {
-                        cb(&format!("the round could not be read from the database: {e}"));
+                        cb(&format!(
+                            "the round could not be read from the database: {e}"
+                        ));
                     }
                     self.wait_for_switch(switches);
                     continue;
@@ -458,7 +460,10 @@ impl Runner {
                 }
             };
             if round.is_empty() {
-                log::info!("playlist drained: {}", playlist.as_deref().unwrap_or("(none)"));
+                log::info!(
+                    "playlist drained: {}",
+                    playlist.as_deref().unwrap_or("(none)")
+                );
                 if let Some(cb) = &self.cb.on_drained {
                     cb();
                 }
@@ -647,10 +652,12 @@ impl Runner {
             return;
         }
         let playing = self.inner.lock().unwrap().playing.clone();
-        if let Some(cur) = playing {
-            if let Err(e) = self.replica.set_round_playing(&cur.episode_id, &cur.playlist) {
-                log::warn!("could not restore the playing entry: {e}");
-            }
+        if let Some(cur) = playing
+            && let Err(e) = self
+                .replica
+                .set_round_playing(&cur.episode_id, &cur.playlist)
+        {
+            log::warn!("could not restore the playing entry: {e}");
         }
     }
 
@@ -736,9 +743,9 @@ impl Runner {
             .unwrap()
             .deferred
             .insert(cur.episode_id.clone());
-        if let Err(e) = self
-            .replica
-            .update_round_entry_state(&cur.episode_id, "deferred", &cur.playlist)
+        if let Err(e) =
+            self.replica
+                .update_round_entry_state(&cur.episode_id, "deferred", &cur.playlist)
         {
             log::warn!("deferred entry state not saved: {e}");
         }
@@ -834,10 +841,10 @@ impl Runner {
         if let Some(aid) = prefs.audio_track.as_deref() {
             self.player.set_audio(aid);
         }
-        if let Ok(Some(pos)) = self.replica.resume_pos(&cur.episode_id) {
-            if pos > 1.0 {
-                self.player.seek_absolute(pos);
-            }
+        if let Ok(Some(pos)) = self.replica.resume_pos(&cur.episode_id)
+            && pos > 1.0
+        {
+            self.player.seek_absolute(pos);
         }
     }
 
@@ -855,7 +862,10 @@ impl Runner {
         if let Err(e) = self.record_watched(&cur) {
             log::error!("{} finished but was not recorded: {e}", cur.show_name);
             if let Some(cb) = &self.cb.on_error {
-                cb(&format!("{} was not recorded as watched: {e}", cur.show_name));
+                cb(&format!(
+                    "{} was not recorded as watched: {e}",
+                    cur.show_name
+                ));
             }
             return;
         }
@@ -868,12 +878,11 @@ impl Runner {
         let Some(cur) = self.current() else {
             return;
         };
-        if let Some(pos) = self.player.time_pos() {
-            if pos > 1.0 {
-                if let Err(e) = self.replica.set_resume(&cur.episode_id, Some(pos)) {
-                    log::debug!("resume position not saved: {e}");
-                }
-            }
+        if let Some(pos) = self.player.time_pos()
+            && pos > 1.0
+            && let Err(e) = self.replica.set_resume(&cur.episode_id, Some(pos))
+        {
+            log::debug!("resume position not saved: {e}");
         }
     }
 
@@ -888,7 +897,10 @@ impl Runner {
                 continue;
             }
             // A show moved to another playlist since this round began has left it.
-            let Some(show) = self.replica.show(&show_id)?.filter(|s| s.playlist == playlist)
+            let Some(show) = self
+                .replica
+                .show(&show_id)?
+                .filter(|s| s.playlist == playlist)
             else {
                 continue;
             };
@@ -1034,10 +1046,8 @@ impl Runner {
             applied = true;
             Ok(())
         });
-        if applied {
-            if let Some(cb) = &self.cb.on_advance {
-                cb(&result);
-            }
+        if applied && let Some(cb) = &self.cb.on_advance {
+            cb(&result);
         }
         self.database_changed();
         outcome.map(|_| ())
@@ -1104,7 +1114,7 @@ impl Runner {
             // Build the local path starting from canonical_base if possible
             let mut local_path = canonical_base.clone();
             local_path.push(&entry.show_name);
-            for part in entry.relative_path.split(|c| c == '\\' || c == '/') {
+            for part in entry.relative_path.split(['\\', '/']) {
                 if !part.is_empty() {
                     local_path.push(part);
                 }
@@ -1144,24 +1154,24 @@ impl Runner {
                 nas_path,
                 local_path
             );
-            if let Some(parent) = local_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    report.failed += 1;
-                    record_file_sync_problem(
-                        &mut report,
-                        entry,
-                        &local_path,
-                        format!("failed to create local folder: {e}"),
-                    );
-                    log::error!(
-                        "file sync mkdir failed: show={} episode={} parent={:?} error={}",
-                        entry.show_id,
-                        entry.episode_id,
-                        parent,
-                        e
-                    );
-                    continue;
-                }
+            if let Some(parent) = local_path.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                report.failed += 1;
+                record_file_sync_problem(
+                    &mut report,
+                    entry,
+                    &local_path,
+                    format!("failed to create local folder: {e}"),
+                );
+                log::error!(
+                    "file sync mkdir failed: show={} episode={} parent={:?} error={}",
+                    entry.show_id,
+                    entry.episode_id,
+                    parent,
+                    e
+                );
+                continue;
             }
 
             self.player
@@ -1230,10 +1240,10 @@ fn prune_unused_files(dir: &std::path::Path, active_paths: &std::collections::Ha
         if path.is_dir() {
             prune_unused_files(&path, active_paths);
             // If directory is now empty, delete it
-            if let Ok(mut rd) = std::fs::read_dir(&path) {
-                if rd.next().is_none() {
-                    let _ = std::fs::remove_dir(&path);
-                }
+            if let Ok(mut rd) = std::fs::read_dir(&path)
+                && rd.next().is_none()
+            {
+                let _ = std::fs::remove_dir(&path);
             }
         } else if path.is_file() {
             let cmp_path = comparable_path_key(&path);
@@ -1448,7 +1458,8 @@ mod tests {
         assert!(outcome.ok());
         assert_eq!(outcome.status(), "deferred");
         let ep = r
-            .show("s1").unwrap()
+            .show("s1")
+            .unwrap()
             .unwrap()
             .episodes
             .into_iter()
@@ -1608,7 +1619,11 @@ mod tests {
         run.defer(); // no round in progress -> no-op
         run.skip(); // skip still nudges the player
         assert_eq!(p.skips.load(Ordering::SeqCst), 1);
-        assert!(r.show("s1").unwrap().unwrap().episodes[0].watched_at.is_none());
+        assert!(
+            r.show("s1").unwrap().unwrap().episodes[0]
+                .watched_at
+                .is_none()
+        );
     }
 
     #[test]
@@ -1751,7 +1766,8 @@ mod tests {
         run.defer(); // bumps + marks deferred + player.skip()
         run.on_natural_end(); // a stray EOF for the deferred entry -> no-op
         let ep = r
-            .show("s1").unwrap()
+            .show("s1")
+            .unwrap()
             .unwrap()
             .episodes
             .into_iter()
@@ -1812,7 +1828,10 @@ mod tests {
     // ── playlist selection ───────────────────────────────────────────────
     #[test]
     fn a_computer_that_never_chose_plays_the_first_playlist_by_name() {
-        let r = replica(&[show("s1", "interesting", &["a"]), show("s2", "background", &["b"])]);
+        let r = replica(&[
+            show("s1", "interesting", &["a"]),
+            show("s2", "background", &["b"]),
+        ]);
         let run = Arc::new(Runner::new(
             r,
             pending(),
@@ -1834,9 +1853,16 @@ mod tests {
             show("s3", "interesting", &["c"]),
         ]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), "background", StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "background",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         let (_, round, _) = run.next_round_from_db().unwrap();
-        r.set_round_playing(&round[1].episode_id, "background").unwrap();
+        r.set_round_playing(&round[1].episode_id, "background")
+            .unwrap();
 
         let outcome = run.select_playlist("interesting");
         assert!(outcome.ok(), "{outcome:?}");
@@ -1854,7 +1880,13 @@ mod tests {
     fn an_unknown_playlist_is_not_selected() {
         let r = replica(&[show("s1", "background", &["a"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r, p.clone(), "background", StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r,
+            p.clone(),
+            "background",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         run.next_round_from_db().unwrap();
         let outcome = run.select_playlist("nelson");
         assert!(!outcome.ok() && !outcome.is_failure(), "{outcome:?}");
@@ -1871,14 +1903,22 @@ mod tests {
         let played = Arc::new(Mutex::new(None));
         let (p2, stop2) = (played.clone(), stop.clone());
         let cb = Callbacks {
-            on_drained: Some(Box::new(move || drained_tx.lock().unwrap().send(()).unwrap())),
+            on_drained: Some(Box::new(move || {
+                drained_tx.lock().unwrap().send(()).unwrap()
+            })),
             on_round: Some(Box::new(move |round, _| {
                 *p2.lock().unwrap() = Some(round[0].playlist.clone());
                 stop2.set();
             })),
             ..Default::default()
         };
-        let run = runner(r, Arc::new(FakePlayer::default()), "empty", stop.clone(), cb);
+        let run = runner(
+            r,
+            Arc::new(FakePlayer::default()),
+            "empty",
+            stop.clone(),
+            cb,
+        );
         let looping = {
             let run = run.clone();
             std::thread::spawn(move || run.run_loop())
@@ -2080,7 +2120,8 @@ mod tests {
                 )
             })
             .collect();
-        r.save_round_queue("nelson", &entries, "2026-05-31T00:00:00Z").unwrap();
+        r.save_round_queue("nelson", &entries, "2026-05-31T00:00:00Z")
+            .unwrap();
 
         // Populate inner.round and inner.pos (start playing "a")
         {
@@ -2157,7 +2198,13 @@ mod tests {
         let nas = Nas::new();
         let r = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&run);
         let cur = run.current().unwrap();
 
@@ -2202,7 +2249,13 @@ mod tests {
         let nas = Nas::new();
         let r = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&run);
         let cur = run.current().unwrap();
 
@@ -2221,12 +2274,15 @@ mod tests {
     #[test]
     fn the_playing_entry_is_restored_after_an_outage() {
         let nas = Nas::new();
-        let r = nas.replica(&[
-            show("s1", "nelson", &["a"]),
-            show("s2", "nelson", &["b"]),
-        ]);
+        let r = nas.replica(&[show("s1", "nelson", &["a"]), show("s2", "nelson", &["b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         let round = run.compute_and_save_new_round("nelson").unwrap();
         run.inner.lock().unwrap().round = Some(round.clone());
 
@@ -2246,12 +2302,15 @@ mod tests {
     #[test]
     fn navigation_works_during_an_outage_and_defer_fails_explicitly() {
         let nas = Nas::new();
-        let r = nas.replica(&[
-            show("s1", "nelson", &["a"]),
-            show("s2", "nelson", &["b"]),
-        ]);
+        let r = nas.replica(&[show("s1", "nelson", &["a"]), show("s2", "nelson", &["b"])]);
         let p = Arc::new(FakePlayer::default());
-        let run = runner(r.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&run);
         let other = run.inner.lock().unwrap().round.as_ref().unwrap()[1].clone();
 
@@ -2271,8 +2330,20 @@ mod tests {
         let first = nas.replica(&[show("s1", "nelson", &["a", "b"])]);
         let second = Arc::new(Replica::new(nas.path().to_str().unwrap()));
         let p = Arc::new(FakePlayer::default());
-        let on_first = runner(first.clone(), p.clone(), "nelson", StopFlag::new(), Callbacks::default());
-        let on_second = runner(second.clone(), p, "nelson", StopFlag::new(), Callbacks::default());
+        let on_first = runner(
+            first.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        let on_second = runner(
+            second.clone(),
+            p,
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
         set_round(&on_first);
         set_round(&on_second);
         first.drop_connection_for_test();
@@ -2314,7 +2385,11 @@ mod tests {
 
     fn holding_run(
         r: Arc<Replica>,
-    ) -> (Arc<Runner>, Arc<AtomicUsize>, std::sync::mpsc::Receiver<String>) {
+    ) -> (
+        Arc<Runner>,
+        Arc<AtomicUsize>,
+        std::sync::mpsc::Receiver<String>,
+    ) {
         let stop = StopFlag::new();
         let drained = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = std::sync::mpsc::channel();

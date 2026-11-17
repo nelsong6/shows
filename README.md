@@ -51,4 +51,4 @@ This reproduces the predecessor PowerShell ordering exactly. See the [round-and-
 
 ## Development
 
-The Rust workspace is under `desktop-rs/`; its React overlay is under `desktop-rs/frontend/`. See [desktop local testing](./docs/desktop-local-testing.md) for the build and test-install workflow.
+The Rust workspace is the repository root; its React overlay is under `frontend/`. See [desktop local testing](./docs/desktop-local-testing.md) for the build and test-install workflow.

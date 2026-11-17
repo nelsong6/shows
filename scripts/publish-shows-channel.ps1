@@ -65,7 +65,7 @@ if ($Channel -eq "stable") {
       if ((Get-Date) -gt $deadline) { throw "Timed out waiting for $Release" }
       if ($releaseSha) {
         $checks = Invoke-RestMethod "$repoApi/commits/$releaseSha/status" -Headers $releaseHeaders
-        $build = $checks.statuses | Where-Object { $_.context -like 'CI / build (*' -and $_.status -in @('failure','error') } | Select-Object -First 1
+        $build = $checks.statuses | Where-Object { $_.context -like 'Suite release / *' -and $_.status -in @('failure','error') } | Select-Object -First 1
         if ($build) { throw "Release build ended with $($build.status): $($build.target_url)" }
       }
       Write-Host "Waiting for CI release $(if ($Release) { $Release } else { "of $releaseSha" })"
@@ -89,24 +89,19 @@ if ($Channel -eq "stable") {
 } else {
   # A local build is never numbered: it is dev, made unique by when it was published.
   if (-not $Version) { $Version = "dev-$(Get-Date -Format 'yyyyMMddHHmmss')" }
-  $workspace = Join-Path $RepoRoot "desktop-rs"
-  $frontend = Join-Path $workspace "frontend"
-  $exe = Join-Path $workspace "target\release\shows-desktop.exe"
+  $exe = Join-Path $RepoRoot "target\release\shows-desktop.exe"
 }
 if ($Version -notmatch '^[A-Za-z0-9._-]+$') { throw "Invalid version: $Version" }
 
 if ($Channel -eq "dev" -and -not $SkipBuild) {
-  Push-Location $frontend
-  try { npm run build; if ($LASTEXITCODE -ne 0) { throw "Frontend build failed" } }
-  finally { Pop-Location }
-
-  Push-Location $workspace
+  # The release build embeds the React overlay, which desktop/build.rs builds.
+  Push-Location $RepoRoot
   try {
-    $env:SHOWS_VERSION = $Version
+    $env:VERSION = $Version
     cargo build --release -p shows-desktop
     if ($LASTEXITCODE -ne 0) { throw "Desktop build failed" }
   } finally {
-    Remove-Item Env:SHOWS_VERSION -ErrorAction SilentlyContinue
+    Remove-Item Env:VERSION -ErrorAction SilentlyContinue
     Pop-Location
   }
 }

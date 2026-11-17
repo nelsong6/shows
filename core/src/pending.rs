@@ -198,7 +198,13 @@ mod tests {
             list.add(&watch(id)).unwrap();
         }
 
-        let outcome = list.flush(|w| if w.episode_id == "e2" { Err("down") } else { Ok(()) });
+        let outcome = list.flush(|w| {
+            if w.episode_id == "e2" {
+                Err("down")
+            } else {
+                Ok(())
+            }
+        });
         assert_eq!(outcome, Err("down"));
         assert_eq!(list.count(), 2);
 
@@ -217,7 +223,8 @@ mod tests {
         let list = PendingWatches::open(dir.path().join("pending.jsonl"));
         list.add(&watch("e1")).unwrap();
 
-        list.flush(|_| list.add(&watch("e2")).map_err(|_| ())).unwrap();
+        list.flush(|_| list.add(&watch("e2")).map_err(|_| ()))
+            .unwrap();
 
         assert_eq!(list.count(), 1);
         let mut seen = Vec::new();
@@ -252,6 +259,9 @@ mod tests {
         let preview = PendingWatches::for_database(dir.path(), "D:\\preview.db");
         real.add(&watch("e1")).unwrap();
         assert_eq!(preview.count(), 0);
-        assert_eq!(PendingWatches::for_database(dir.path(), "S:\\shows.db").count(), 1);
+        assert_eq!(
+            PendingWatches::for_database(dir.path(), "S:\\shows.db").count(),
+            1
+        );
     }
 }

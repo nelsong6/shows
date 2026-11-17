@@ -7,7 +7,7 @@
 //! This is the only place that touches libmpv's C ABI; everything above it is
 //! safe Rust.
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr::null_mut;
 use std::sync::Arc;
 
@@ -99,7 +99,8 @@ impl Api {
             let lib = libloading::Library::new("libmpv-2.dll").map_err(|e| e.to_string())?;
             macro_rules! sym {
                 ($name:literal) => {
-                    *lib.get(concat!($name, "\0").as_bytes()).map_err(|e| e.to_string())?
+                    *lib.get(concat!($name, "\0").as_bytes())
+                        .map_err(|e| e.to_string())?
                 };
             }
             let api = Api {
@@ -194,17 +195,29 @@ impl Handle {
     pub fn set_property_checked(&self, name: &str, value: &str) -> Result<(), String> {
         let name = CString::new(name).map_err(|e| e.to_string())?;
         let value = CString::new(value).map_err(|e| e.to_string())?;
-        let result = unsafe { (self.api.set_property_string)(self.ctx, name.as_ptr(), value.as_ptr()) };
-        if result < 0 { Err(format!("mpv rejected property update ({result})")) } else { Ok(()) }
+        let result =
+            unsafe { (self.api.set_property_string)(self.ctx, name.as_ptr(), value.as_ptr()) };
+        if result < 0 {
+            Err(format!("mpv rejected property update ({result})"))
+        } else {
+            Ok(())
+        }
     }
 
     pub fn command_checked(&self, args: &[&str]) -> Result<(), String> {
-        let strings: Vec<CString> = args.iter().map(|s| CString::new(*s)).collect::<Result<_, _>>()
+        let strings: Vec<CString> = args
+            .iter()
+            .map(|s| CString::new(*s))
+            .collect::<Result<_, _>>()
             .map_err(|e| e.to_string())?;
         let mut pointers: Vec<*const c_char> = strings.iter().map(|s| s.as_ptr()).collect();
         pointers.push(std::ptr::null());
         let result = unsafe { (self.api.command)(self.ctx, pointers.as_ptr()) };
-        if result < 0 { Err(format!("mpv rejected command ({result})")) } else { Ok(()) }
+        if result < 0 {
+            Err(format!("mpv rejected command ({result})"))
+        } else {
+            Ok(())
+        }
     }
 
     /// Run an mpv command given as a NULL-terminated argument list.

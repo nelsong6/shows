@@ -23,37 +23,38 @@ There is no Cosmos or web-API source of truth in the current implementation.
 ## Layout
 
 ```text
-desktop-rs/           Cargo workspace
-  core/               shows-core; pure Rust, #![forbid(unsafe_code)]
-    src/
-      ordering.rs     SHA-256 path ordering
-      scan.rs         folder scanning and episode discovery
-      replica.rs      authoritative SQLite schema, reads, and transactions
-      pending.rs      local list of watched marks on their way to the database
-      playlist.rs     the playlist this computer plays
-      engine.rs       pure round/advance/defer engine
-      runner.rs       round-robin runner and local media cache orchestration
-      model.rs        persisted row types
-  control/            shows-control; typed control protocol and client
-  desktop/            shows-desktop; Windows shell and the only unsafe code
-    src/
-      main.rs         process wiring and shared/local database configuration
-      compositor.rs   DirectComposition window and WebView2 overlay
-      gl.rs           libmpv OpenGL to shared D3D texture
-      mpv.rs          dynamically loaded libmpv FFI
-      player.rs       player wrapper and event pump
-      webserver.rs    localhost overlay/status/control server
-  frontend/           Vite, React, and TypeScript overlay
+Cargo.toml            Cargo workspace (core, control, desktop)
+core/                 shows-core; pure Rust, #![forbid(unsafe_code)]
+  src/
+    ordering.rs       SHA-256 path ordering
+    scan.rs           folder scanning and episode discovery
+    replica.rs        authoritative SQLite schema, reads, and transactions
+    pending.rs        local list of watched marks on their way to the database
+    playlist.rs       the playlist this computer plays
+    engine.rs         pure round/advance/defer engine
+    runner.rs         round-robin runner and local media cache orchestration
+    model.rs          persisted row types
+control/              shows-control; typed control protocol and client
+desktop/              shows-desktop; Windows shell and the only unsafe code
+  build.rs            builds the React overlay into a release
+  src/
+    main.rs           process wiring and shared/local database configuration
+    compositor.rs     DirectComposition window and WebView2 overlay
+    gl.rs             libmpv OpenGL to shared D3D texture
+    mpv.rs            dynamically loaded libmpv FFI
+    player.rs         player wrapper and event pump
+    webserver.rs      localhost overlay/status/control server
+frontend/             Vite, React, and TypeScript overlay
 docs/
   feature-contracts/  durable behavior and UI contracts
 scripts/              NAS channel publisher, launcher, release install, and audits
 ```
 
-The root Go module and stale README descriptions are historical residue; do not infer a currently deployed Go API from them. Verify architecture against `desktop-rs/` and the feature contracts.
+The root Go module and stale README descriptions are historical residue; do not infer a currently deployed Go API from them. Verify architecture against the Cargo workspace and the feature contracts.
 
 ## Ordering invariant
 
-The deterministic round order is computed by `desktop-rs/core/src/ordering.rs`:
+The deterministic round order is computed by `core/src/ordering.rs`:
 
 ```text
 hash := SHA-256(UTF-8 bytes of: root_path + "\" + relative_path)
@@ -73,7 +74,7 @@ Library import is in-app. Folder scanning derives backslash-joined `relative_pat
 
 ## Desktop status and controls
 
-The localhost control server exposes `GET /status/stream` as the React overlay's live SSE feed, `GET /status` as an on-demand snapshot, and the playback/library control routes in `desktop-rs/desktop/src/webserver.rs`. Database status includes the authoritative path and shared revision.
+The localhost control server exposes `GET /status/stream` as the React overlay's live SSE feed, `GET /status` as an on-demand snapshot, and the playback/library control routes in `desktop/src/webserver.rs`. Database status includes the authoritative path and shared revision.
 
 Debug runs log to stderr. Release builds append to `%APPDATA%\shows\shows.log`. Every panic is logged there at error level with its message, location and thread.
 
@@ -115,8 +116,8 @@ Keep debug output warm across worktrees in `D:\build\shows\cargo` (override
 `SHOWS_DEV_TARGET_DIR`). Local Cargo builds use at most four jobs. Release
 compilation is not an edit-preview step on nelsonpc.
 
-PRs run the relevant frontend/debug tests; main produces the optimized, embedded
-release bundle. After CI and merge, publish and install the exact main release
+PRs run the workspace's debug tests and, when its inputs change, the release build,
+which runs the overlay's tests; main produces the optimized, embedded release bundle. After CI and merge, publish and install the exact main release
 on this PC and the TV in one operation:
 
 ```powershell
@@ -129,4 +130,4 @@ remains the hash-verified CI artifact; preview code never replaces it.
 
 ## Release
 
-The `build` job of `.forgejo/workflows/ci.yml` builds on Windows, embeds the React distribution, bundles `libmpv-2.dll`, and publishes a Forgejo Release. The independent remote is never compiled or bundled here. The desktop is not deployed to AKS.
+CI comes from pipeline-templates' suites (this repository's entry in its `fleet.json`). The release builds on Windows, where `desktop/build.rs` embeds the React distribution, packs `shows-desktop.exe` with `libmpv-2.dll` as `shows-desktop-windows-amd64.zip`, signs both, and publishes a Forgejo Release. The independent remote is never compiled or bundled here. The desktop is not deployed to AKS.

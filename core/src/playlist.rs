@@ -76,8 +76,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("playlist.txt");
         assert_eq!(PlaylistChoice::open(path.clone()).get(), None);
-        PlaylistChoice::open(path.clone()).save("background").unwrap();
-        assert_eq!(PlaylistChoice::open(path).get().as_deref(), Some("background"));
+        PlaylistChoice::open(path.clone())
+            .save("background")
+            .unwrap();
+        assert_eq!(
+            PlaylistChoice::open(path).get().as_deref(),
+            Some("background")
+        );
     }
 
     #[test]

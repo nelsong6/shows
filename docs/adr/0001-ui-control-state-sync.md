@@ -58,7 +58,7 @@ References: [optimistic UI pattern](https://www.freecodecamp.org/news/how-to-use
 - Every such control is an instance of one template, not a bespoke design. New
   controls follow it; reviewers reject toggles for remote-state controls.
 - The reference implementations **already in the tree** are `volumeSync` and
-  `pauseSync` in `desktop-rs/frontend/src/App.tsx` — `{ desired, inFlight }`, a
+  `pauseSync` in `frontend/src/App.tsx` — `{ desired, inFlight }`, a
   pump that re-sends on divergence, and a reconcile effect that protects
   `desired` from a stale echo. Read those before adding or changing a control.
 - Backend control endpoints for these controls take a desired value and are

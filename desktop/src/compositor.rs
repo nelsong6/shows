@@ -26,8 +26,8 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, ReleaseCapture, TME_LEAVE,
-    TRACKMOUSEEVENT, TrackMouseEvent, VK_F,
+    MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, ReleaseCapture, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent, VK_F,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
@@ -60,7 +60,8 @@ const WM_SET_STAY_ON_TOP: u32 = WM_APP + 5;
 const WM_BEGIN_DRAG: u32 = WM_APP + 6;
 const WM_VIDEO_PREVIEW: u32 = WM_APP + 7;
 
-type PreviewReply = mpsc::SyncSender<std::result::Result<shows_control::preview::VideoPreview, String>>;
+type PreviewReply =
+    mpsc::SyncSender<std::result::Result<shows_control::preview::VideoPreview, String>>;
 // Observability: id for the global Ctrl+Alt+F hotkey that stamps a monitor-flash
 // marker into the log. Global (not an overlay keybind) because the flash happens
 // while shows is backgrounded and another app holds focus.
@@ -294,7 +295,12 @@ mod tests {
     }
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
-        RECT { left, top, right, bottom }
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 
     // Dragging a side edge drives that axis; the perpendicular axis is derived
@@ -634,7 +640,9 @@ impl Compositor {
     /// thread. Wire into `ControlServer::set_on_fullscreen` so the overlay's
     /// `/fullscreen` endpoint and `f` keybind both work — the actual window
     /// style/size change happens on the message-loop thread that owns the HWND.
-    pub fn fullscreen_callback(&self) -> Box<dyn Fn() -> std::result::Result<(), String> + Send + Sync> {
+    pub fn fullscreen_callback(
+        &self,
+    ) -> Box<dyn Fn() -> std::result::Result<(), String> + Send + Sync> {
         let raw = self.hwnd.0 as usize;
         Box::new(move || unsafe {
             PostMessageW(
@@ -642,7 +650,8 @@ impl Compositor {
                 WM_TOGGLE_FULLSCREEN,
                 WPARAM(0),
                 LPARAM(0),
-            ).map_err(|e| format!("Could not request fullscreen: {e}"))
+            )
+            .map_err(|e| format!("Could not request fullscreen: {e}"))
         })
     }
 
@@ -652,12 +661,19 @@ impl Compositor {
         let raw = self.hwnd.0 as usize;
         Box::new(move || {
             let (reply, result) = mpsc::sync_channel(1);
-            tx.try_send(reply).map_err(|_| "Video preview is busy or its window has closed")?;
+            tx.try_send(reply)
+                .map_err(|_| "Video preview is busy or its window has closed")?;
             unsafe {
-                PostMessageW(Some(HWND(raw as *mut _)), WM_VIDEO_PREVIEW, WPARAM(0), LPARAM(0))
-                    .map_err(|e| format!("Could not request video preview: {e}"))?;
+                PostMessageW(
+                    Some(HWND(raw as *mut _)),
+                    WM_VIDEO_PREVIEW,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+                .map_err(|e| format!("Could not request video preview: {e}"))?;
             }
-            result.recv_timeout(std::time::Duration::from_millis(500))
+            result
+                .recv_timeout(std::time::Duration::from_millis(500))
                 .map_err(|_| "The target window did not provide a video preview within 500 ms")?
         })
     }
@@ -736,7 +752,7 @@ fn obs_heartbeat(hwnd: HWND, state: &State) {
     use std::sync::atomic::{AtomicU64, Ordering};
     static OBS_TICK: AtomicU64 = AtomicU64::new(0);
     // 16ms render pump → every 60th tick ≈ 1s.
-    if OBS_TICK.fetch_add(1, Ordering::Relaxed) % 60 != 0 {
+    if !OBS_TICK.fetch_add(1, Ordering::Relaxed).is_multiple_of(60) {
         return;
     }
     unsafe {
@@ -1133,15 +1149,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             WM_MOUSELEAVE => {
                 let cursor_in_window = is_cursor_in_window(hwnd);
                 STATE.with(|s| {
-                    if let Some(st) = s.borrow().as_ref() {
-                        if !cursor_in_window {
-                            let _ = st.controller.SendMouseInput(
-                                COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
-                                COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
-                                0,
-                                POINT { x: 0, y: 0 },
-                            );
-                        }
+                    if let Some(st) = s.borrow().as_ref()
+                        && !cursor_in_window
+                    {
+                        let _ = st.controller.SendMouseInput(
+                            COREWEBVIEW2_MOUSE_EVENT_KIND_LEAVE,
+                            COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS(0),
+                            0,
+                            POINT { x: 0, y: 0 },
+                        );
                     }
                 });
                 LRESULT(0)
@@ -1213,10 +1229,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 }
                 let is_max = w.0 as u32 == SIZE_MAXIMIZED;
                 STATE.with(|s| {
-                    if let Some(st) = s.borrow().as_ref() {
-                        if let Some(cb) = &st.status_callback {
-                            cb(serde_json::json!({ "window_maximized": is_max }));
-                        }
+                    if let Some(st) = s.borrow().as_ref()
+                        && let Some(cb) = &st.status_callback
+                    {
+                        cb(serde_json::json!({ "window_maximized": is_max }));
                     }
                 });
                 let lp = l.0 as u32;
@@ -1231,8 +1247,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             }
             m if m == WM_VIDEO_PREVIEW => {
                 STATE.with(|s| {
-                    if let Some(state) = s.borrow().as_ref() {
-                        if let Some(reply) = state.preview_requests.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                    if let Some(state) = s.borrow().as_ref()
+                        && let Some(reply) = state.preview_requests.as_ref().and_then(|rx| rx.try_recv().ok()) {
                             let result = if state.standby.get() || IsIconic(hwnd).as_bool() {
                                 Err("Video preview is unavailable while the TV window is minimized or covered".into())
                             } else {
@@ -1240,7 +1256,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
                             };
                             let _ = reply.send(result);
                         }
-                    }
                 });
                 LRESULT(0)
             }
@@ -1552,10 +1567,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESUL
             WM_DESTROY => {
                 save_window_placement(hwnd);
                 STATE.with(|s| {
-                    if let Some(state) = s.borrow().as_ref() {
-                        if let Some(cb) = &state.quit {
-                            cb();
-                        }
+                    if let Some(state) = s.borrow().as_ref()
+                        && let Some(cb) = &state.quit
+                    {
+                        cb();
                     }
                 });
                 let _ = KillTimer(Some(hwnd), 1);

@@ -194,7 +194,9 @@ impl Client {
         };
         let info = client.get("/remote/info")?;
         if info["application"] != "shows-desktop" || info["protocol"] != PROTOCOL_VERSION {
-            return Err(format!("This listener is not a compatible Shows desktop: the client requires control protocol {PROTOCOL_VERSION}."));
+            return Err(format!(
+                "This listener is not a compatible Shows desktop: the client requires control protocol {PROTOCOL_VERSION}."
+            ));
         }
         Ok(client)
     }
@@ -276,7 +278,10 @@ impl Client {
         }
         let response = request.call().map_err(|e| e.to_string())?;
         if !response.status().is_success() {
-            return Err(format!("Shows refused its status stream: {}", response.status()));
+            return Err(format!(
+                "Shows refused its status stream: {}",
+                response.status()
+            ));
         }
         let mut reader = BufReader::new(response.into_body().into_reader());
         let mut event = String::new();

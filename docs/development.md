@@ -49,7 +49,7 @@ Debug artifacts live in `D:\build\shows\cargo` across worktrees. Override with
 `SHOWS_DEV_TARGET_DIR`. Every local Cargo command uses four jobs. The command
 prints rebuild time; it never runs an optimized release build for a preview.
 
-The ASCII preview orientation also has a hardware smoke test. From `desktop-rs`,
+The ASCII preview orientation also has a hardware smoke test. From the repository root,
 with the installed bundle's `libmpv-2.dll` on PATH, run:
 
 ```powershell

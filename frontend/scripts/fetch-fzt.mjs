@@ -18,9 +18,10 @@ const ASSETS = [
 const API = 'https://forgejo.romaine.life/api/v1/repos/romaine-life/fzt-browser';
 const target = join(dirname(fileURLToPath(import.meta.url)), '..', 'public', 'fzt');
 
-// CI passes FORGEJO_TOKEN; on a home PC the Forgejo credential git already holds works.
+// CI's suites pass their Forgejo read token as PRIVATE_GIT_TOKEN; on a home PC the Forgejo
+// credential git already holds works.
 function token() {
-  if (process.env.FORGEJO_TOKEN) return process.env.FORGEJO_TOKEN;
+  if (process.env.PRIVATE_GIT_TOKEN) return process.env.PRIVATE_GIT_TOKEN;
   try {
     const filled = execFileSync('git', ['credential', 'fill'], {
       input: 'protocol=https\nhost=forgejo.romaine.life\n\n',
@@ -33,7 +34,7 @@ function token() {
   } catch {
     // Reported below.
   }
-  throw new Error('fetch-fzt needs FORGEJO_TOKEN or a Forgejo credential in git to read fzt-browser releases');
+  throw new Error('fetch-fzt needs PRIVATE_GIT_TOKEN or a Forgejo credential in git to read fzt-browser releases');
 }
 
 const headers = {Authorization: `token ${token()}`};

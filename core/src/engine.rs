@@ -7,7 +7,7 @@
 //! structs, no SQLite / GUI / network. The replica layer loads rows, calls
 //! these, and persists the results.
 
-use crate::ordering::{sort_round, Candidate, Ordered};
+use crate::ordering::{Candidate, Ordered, sort_round};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Episode {
@@ -81,7 +81,11 @@ pub fn next_round(shows: &[Show]) -> Vec<Ordered> {
 ///   `removed_at` and return `true`.
 ///
 /// Mutates `show` in place; the caller persists it + the returned history.
-pub fn advance(show: &mut Show, episode_ids: &[String], now: &str) -> (Vec<HistoryRow>, usize, bool) {
+pub fn advance(
+    show: &mut Show,
+    episode_ids: &[String],
+    now: &str,
+) -> (Vec<HistoryRow>, usize, bool) {
     let show_id = show.id.clone();
     let mut history = Vec::new();
     let mut advanced = 0usize;
@@ -151,7 +155,13 @@ mod tests {
         }
     }
 
-    fn show(id: &str, playlist: &str, root: &str, eps: Vec<Episode>, removed_at: Option<&str>) -> Show {
+    fn show(
+        id: &str,
+        playlist: &str,
+        root: &str,
+        eps: Vec<Episode>,
+        removed_at: Option<&str>,
+    ) -> Show {
         Show {
             id: id.into(),
             playlist: playlist.into(),
@@ -191,18 +201,36 @@ mod tests {
     // ── advance (I3 / I5 / I7) ───────────────────────────────────────
     #[test]
     fn advance_subset_only_named() {
-        let mut s = show("s1", "nelson", "D:\\A", vec![ep("a", 0, None), ep("b", 1, None)], None);
+        let mut s = show(
+            "s1",
+            "nelson",
+            "D:\\A",
+            vec![ep("a", 0, None), ep("b", 1, None)],
+            None,
+        );
         let (history, n, removed) = advance(&mut s, &["a".into()], NOW);
         assert_eq!(n, 1);
         assert!(!removed);
         assert_eq!(s.episodes[0].watched_at.as_deref(), Some(NOW));
         assert!(s.episodes[1].watched_at.is_none());
-        assert_eq!(history.iter().map(|h| h.episode_id.as_str()).collect::<Vec<_>>(), ["a"]);
+        assert_eq!(
+            history
+                .iter()
+                .map(|h| h.episode_id.as_str())
+                .collect::<Vec<_>>(),
+            ["a"]
+        );
     }
 
     #[test]
     fn advance_idempotent() {
-        let mut s = show("s1", "nelson", "D:\\A", vec![ep("a", 0, Some(EARLIER)), ep("b", 1, None)], None);
+        let mut s = show(
+            "s1",
+            "nelson",
+            "D:\\A",
+            vec![ep("a", 0, Some(EARLIER)), ep("b", 1, None)],
+            None,
+        );
         let (history, n, removed) = advance(&mut s, &["a".into()], NOW);
         assert_eq!(n, 0);
         assert!(!removed);
@@ -212,7 +240,13 @@ mod tests {
 
     #[test]
     fn advance_tombstones_when_drained() {
-        let mut s = show("s1", "nelson", "D:\\A", vec![ep("a", 0, Some(EARLIER)), ep("b", 1, None)], None);
+        let mut s = show(
+            "s1",
+            "nelson",
+            "D:\\A",
+            vec![ep("a", 0, Some(EARLIER)), ep("b", 1, None)],
+            None,
+        );
         let (_, n, removed) = advance(&mut s, &["b".into()], NOW);
         assert_eq!(n, 1);
         assert!(removed);
@@ -221,7 +255,13 @@ mod tests {
 
     #[test]
     fn advance_whole_round_drains() {
-        let mut s = show("s1", "nelson", "D:\\A", vec![ep("a", 0, None), ep("b", 1, None)], None);
+        let mut s = show(
+            "s1",
+            "nelson",
+            "D:\\A",
+            vec![ep("a", 0, None), ep("b", 1, None)],
+            None,
+        );
         let (history, n, removed) = advance(&mut s, &["a".into(), "b".into()], NOW);
         assert_eq!(n, 2);
         assert!(removed);
@@ -258,13 +298,20 @@ mod tests {
     #[test]
     fn next_round_one_per_active_show_skips_drained_and_removed() {
         let shows = vec![
-            show("s1", "nelson", "D:\\A", vec![ep("a", 0, None), ep("b", 1, Some(NOW))], None),
+            show(
+                "s1",
+                "nelson",
+                "D:\\A",
+                vec![ep("a", 0, None), ep("b", 1, Some(NOW))],
+                None,
+            ),
             show("s2", "nelson", "D:\\B", vec![ep("c", 0, Some(NOW))], None), // drained
             show("s3", "nelson", "D:\\C", vec![ep("d", 0, None)], Some(NOW)), // tombstoned
             show("s4", "couple", "D:\\D", vec![ep("e", 0, None)], None),      // other playlist
         ];
         let out = next_round(&shows);
-        let picked: std::collections::BTreeSet<&str> = out.iter().map(|o| o.show_id.as_str()).collect();
+        let picked: std::collections::BTreeSet<&str> =
+            out.iter().map(|o| o.show_id.as_str()).collect();
         assert_eq!(picked, ["s1", "s4"].into_iter().collect());
     }
 

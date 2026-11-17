@@ -136,10 +136,8 @@ impl Player {
                         let d = (*ev).data as *const MpvEventEndFile;
                         !d.is_null() && (*d).reason == MPV_END_FILE_REASON_EOF
                     };
-                    if natural {
-                        if let Some(cb) = self.on_natural_end.lock().unwrap().as_ref() {
-                            cb();
-                        }
+                    if natural && let Some(cb) = self.on_natural_end.lock().unwrap().as_ref() {
+                        cb();
                     }
                 }
                 MPV_EVENT_FILE_LOADED => {
@@ -163,23 +161,23 @@ impl Player {
                         && !(*prop).data.is_null()
                     {
                         let sptr = *((*prop).data as *const *const c_char);
-                        if !sptr.is_null() {
-                            if let Ok(i) = CStr::from_ptr(sptr).to_string_lossy().parse::<i64>() {
-                                // Feed the tracker: a -1 after real playback is
-                                // the round boundary that wakes
-                                // wait_for_round_end (keep-open=no lets the last
-                                // entry advance past its end so this fires
-                                // instead of pausing on the final frame). The
-                                // startup/idle -1 returns false and is ignored.
-                                let ended = self.shared.lock().unwrap().round.observe(i);
-                                if ended {
-                                    self.cv.notify_all();
-                                }
-                                if i >= 0 {
-                                    if let Some(cb) = self.on_pos.lock().unwrap().as_ref() {
-                                        cb(i as usize);
-                                    }
-                                }
+                        if !sptr.is_null()
+                            && let Ok(i) = CStr::from_ptr(sptr).to_string_lossy().parse::<i64>()
+                        {
+                            // Feed the tracker: a -1 after real playback is
+                            // the round boundary that wakes
+                            // wait_for_round_end (keep-open=no lets the last
+                            // entry advance past its end so this fires
+                            // instead of pausing on the final frame). The
+                            // startup/idle -1 returns false and is ignored.
+                            let ended = self.shared.lock().unwrap().round.observe(i);
+                            if ended {
+                                self.cv.notify_all();
+                            }
+                            if i >= 0
+                                && let Some(cb) = self.on_pos.lock().unwrap().as_ref()
+                            {
+                                cb(i as usize);
                             }
                         }
                     }
@@ -197,7 +195,8 @@ impl Player {
         self.handle.command(&["cycle", "pause"]);
     }
     pub fn set_pause(&self, paused: bool) {
-        self.handle.set_property("pause", if paused { "yes" } else { "no" });
+        self.handle
+            .set_property("pause", if paused { "yes" } else { "no" });
     }
     pub fn set_pause_confirmed(&self, paused: bool) -> Result<(), String> {
         let value = if paused { "yes" } else { "no" };
@@ -208,12 +207,18 @@ impl Player {
         Ok(())
     }
     pub fn seek_confirmed(&self, seconds: f64) -> Result<(), String> {
-        self.handle.command_checked(&["seek", &seconds.to_string(), "relative"])
+        self.handle
+            .command_checked(&["seek", &seconds.to_string(), "relative"])
     }
     pub fn set_volume_confirmed(&self, level: f64) -> Result<(), String> {
-        self.handle.set_property_checked("volume", &level.to_string())?;
-        let observed = self.prop_f64("volume").ok_or("mpv did not report its volume")?;
-        if (observed - level).abs() > 0.1 { return Err("mpv did not confirm the requested volume".into()); }
+        self.handle
+            .set_property_checked("volume", &level.to_string())?;
+        let observed = self
+            .prop_f64("volume")
+            .ok_or("mpv did not report its volume")?;
+        if (observed - level).abs() > 0.1 {
+            return Err("mpv did not confirm the requested volume".into());
+        }
         Ok(())
     }
     pub fn seek_relative(&self, seconds: f64) {
@@ -239,15 +244,15 @@ impl Player {
     }
     pub fn reload_audio_output(&self) {
         use std::sync::Mutex;
-        use std::time::{Instant, Duration};
+        use std::time::{Duration, Instant};
 
         static LAST_RELOAD: Mutex<Option<Instant>> = Mutex::new(None);
 
         let mut last = LAST_RELOAD.lock().unwrap();
-        if let Some(last_time) = *last {
-            if last_time.elapsed() < Duration::from_millis(500) {
-                return;
-            }
+        if let Some(last_time) = *last
+            && last_time.elapsed() < Duration::from_millis(500)
+        {
+            return;
         }
         *last = Some(Instant::now());
         self.handle.command(&["ao-reload"]);

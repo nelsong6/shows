@@ -143,14 +143,13 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // console, so stderr would be dropped on the floor without this.
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
-    if cfg!(not(debug_assertions)) {
-        if let Ok(file) = std::fs::OpenOptions::new()
+    if cfg!(not(debug_assertions))
+        && let Ok(file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(log_path())
-        {
-            builder.target(env_logger::Target::Pipe(Box::new(file)));
-        }
+    {
+        builder.target(env_logger::Target::Pipe(Box::new(file)));
     }
     builder.init();
     log_panics();
@@ -201,7 +200,9 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     publish_database(replica.revision().ok());
     let port = server.start();
     let development_url = std::env::var("SHOWS_DEV_URL").ok();
-    let overlay_url = shows_control::overlay_url(port, development_url.as_deref(), cfg!(debug_assertions)).map_err(to_err)?;
+    let overlay_url =
+        shows_control::overlay_url(port, development_url.as_deref(), cfg!(debug_assertions))
+            .map_err(to_err)?;
     log::info!("control server on {overlay_url}");
 
     // mpv + player + compositor. The render context (created in the compositor)
@@ -218,11 +219,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Test hook: play a file directly to verify the GPU video path (the runner
     // drives real playback; this just exercises mpv -> GL -> DComp).
-    if let Ok(v) = std::env::var("SHOWS_TEST_VIDEO") {
-        if !v.is_empty() {
-            log::info!("SHOWS_TEST_VIDEO: {v}");
-            player.play(&v, "replace");
-        }
+    if let Ok(v) = std::env::var("SHOWS_TEST_VIDEO")
+        && !v.is_empty()
+    {
+        log::info!("SHOWS_TEST_VIDEO: {v}");
+        player.play(&v, "replace");
     }
 
     // Runner pushes phase/round/advance into the control server's status.
@@ -242,15 +243,13 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             on_round: Some(Box::new(move |round, pos| {
                 let entries: Vec<_> = round
                     .iter()
-                    .map(|e| {
-                        StatusRoundEntry {
-                            show_id: e.show_id.clone(),
-                            show_name: e.show_name.clone(),
-                            episode_id: e.episode_id.clone(),
-                            playlist: e.playlist.clone(),
-                            order_value: e.order_value,
-                            absolute_path: e.absolute_path.clone(),
-                        }
+                    .map(|e| StatusRoundEntry {
+                        show_id: e.show_id.clone(),
+                        show_name: e.show_name.clone(),
+                        episode_id: e.episode_id.clone(),
+                        playlist: e.playlist.clone(),
+                        order_value: e.order_value,
+                        absolute_path: e.absolute_path.clone(),
                     })
                     .collect();
                 let round_id = round
@@ -265,13 +264,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 let removed: Vec<_> = res
                     .removed_shows
                     .iter()
-                    .map(|r| {
-                        StatusRemovedShow {
-                            id: r.id.clone(),
-                            name: r.name.clone(),
-                            date_added: r.date_added.clone(),
-                            last_played_at: r.last_played_at.clone(),
-                        }
+                    .map(|r| StatusRemovedShow {
+                        id: r.id.clone(),
+                        name: r.name.clone(),
+                        date_added: r.date_added.clone(),
+                        last_played_at: r.last_played_at.clone(),
                     })
                     .collect();
                 s_adv.push_status(StatusPatch::advance(removed, res.advanced_count));
@@ -291,14 +288,12 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 let problems: Vec<_> = report
                     .problems
                     .iter()
-                    .map(|p| {
-                        StatusFileSyncProblem {
-                            episode_id: p.episode_id.clone(),
-                            show_name: p.show_name.clone(),
-                            source_path: p.source_path.clone(),
-                            local_path: p.local_path.clone(),
-                            reason: p.reason.clone(),
-                        }
+                    .map(|p| StatusFileSyncProblem {
+                        episode_id: p.episode_id.clone(),
+                        show_name: p.show_name.clone(),
+                        source_path: p.source_path.clone(),
+                        local_path: p.local_path.clone(),
+                        reason: p.reason.clone(),
                     })
                     .collect();
                 s_file_sync.push_status(StatusPatch::file_sync(StatusFileSync {
@@ -347,7 +342,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     }));
 
     // Push initial window states
-    server.push_status(StatusPatch::window_state(compositor.maximized(), false, false));
+    server.push_status(StatusPatch::window_state(
+        compositor.maximized(),
+        false,
+        false,
+    ));
 
     // Player events (mpv's thread) -> runner.
     {
@@ -362,11 +361,11 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!c.has_saved()));
         player.set_on_file_loaded(Box::new(move || {
             r.on_file_loaded();
-            if auto_fit_needed.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                if let Some((vw, vh)) = p.video_dimensions() {
-                    log::info!("Auto-fitting window to video resolution: {vw}x{vh}");
-                    c.auto_fit(vw, vh);
-                }
+            if auto_fit_needed.swap(false, std::sync::atomic::Ordering::Relaxed)
+                && let Some((vw, vh)) = p.video_dimensions()
+            {
+                log::info!("Auto-fitting window to video resolution: {vw}x{vh}");
+                c.auto_fit(vw, vh);
             }
         }));
     }

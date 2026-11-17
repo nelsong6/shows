@@ -3,13 +3,13 @@
 //! changes and re-initialize the mpv audio output context immediately.
 
 use std::sync::Weak;
-use windows::core::{implement, PCWSTR, Result};
-use windows::Win32::Media::Audio::{
-    eConsole, eMultimedia, eRender, IMMDeviceEnumerator, IMMNotificationClient,
-    IMMNotificationClient_Impl, MMDeviceEnumerator, EDataFlow, ERole, DEVICE_STATE,
-};
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 use windows::Win32::Foundation::PROPERTYKEY;
+use windows::Win32::Media::Audio::{
+    DEVICE_STATE, EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient,
+    IMMNotificationClient_Impl, MMDeviceEnumerator, eConsole, eMultimedia, eRender,
+};
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+use windows::core::{PCWSTR, Result, implement};
 
 use crate::player::Player;
 
@@ -25,7 +25,11 @@ impl AudioDeviceNotificationClient {
 }
 
 impl IMMNotificationClient_Impl for AudioDeviceNotificationClient_Impl {
-    fn OnDeviceStateChanged(&self, _pwstrdeviceid: &PCWSTR, _dwnewstate: DEVICE_STATE) -> Result<()> {
+    fn OnDeviceStateChanged(
+        &self,
+        _pwstrdeviceid: &PCWSTR,
+        _dwnewstate: DEVICE_STATE,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -45,9 +49,16 @@ impl IMMNotificationClient_Impl for AudioDeviceNotificationClient_Impl {
     ) -> Result<()> {
         // We only care about playback (eRender) devices and console/multimedia roles.
         if flow == eRender && (role == eConsole || role == eMultimedia) {
-            let id_str = unsafe { pwstrdefaultdeviceid.to_string().unwrap_or_else(|_| "unknown".to_string()) };
+            let id_str = unsafe {
+                pwstrdefaultdeviceid
+                    .to_string()
+                    .unwrap_or_else(|_| "unknown".to_string())
+            };
             if let Some(player) = self.player.upgrade() {
-                log::info!("Default audio playback device changed in Windows to {}. Reloading mpv audio output...", id_str);
+                log::info!(
+                    "Default audio playback device changed in Windows to {}. Reloading mpv audio output...",
+                    id_str
+                );
                 std::thread::spawn(move || {
                     player.reload_audio_output();
                 });
@@ -73,12 +84,13 @@ impl AudioMonitor {
     pub fn start(player: Weak<Player>) -> Result<Self> {
         unsafe {
             // Note: COM is initialized as STA on the main thread in compositor.rs.
-            let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
             let client: IMMNotificationClient = AudioDeviceNotificationClient::new(player).into();
-            
+
             enumerator.RegisterEndpointNotificationCallback(&client)?;
             log::info!("Audio device change monitor successfully registered.");
-            
+
             Ok(Self { enumerator, client })
         }
     }
@@ -87,7 +99,10 @@ impl AudioMonitor {
 impl Drop for AudioMonitor {
     fn drop(&mut self) {
         unsafe {
-            if let Err(e) = self.enumerator.UnregisterEndpointNotificationCallback(&self.client) {
+            if let Err(e) = self
+                .enumerator
+                .UnregisterEndpointNotificationCallback(&self.client)
+            {
                 log::error!("failed to unregister audio notification callback: {:?}", e);
             } else {
                 log::info!("Audio device change monitor unregistered.");

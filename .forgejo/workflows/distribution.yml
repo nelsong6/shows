@@ -1,0 +1,30 @@
+# The check no suite runs here: the desktop's NAS channel publisher and launcher, run against
+# a fixture install. The suites test, build and release the rest (pipeline-templates
+# fleet.json).
+name: Distribution
+'on':
+  pull_request:
+concurrency:
+  group: distribution-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  test:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh -NoLogo -NoProfile -NonInteractive -Command "$ErrorActionPreference = 'Stop'; . ([scriptblock]::Create([IO.File]::ReadAllText('{0}'))); if (Test-Path variable:LASTEXITCODE) { exit $LASTEXITCODE }"
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        persist-credentials: false
+    - id: diff
+      env:
+        BASE: ${{ github.event.pull_request.base.sha }}
+      run: |
+        $files = git diff --name-only "$env:BASE...HEAD"
+        if ($LASTEXITCODE) { exit $LASTEXITCODE }
+        if ($files -match '^scripts/|^\.forgejo/workflows/distribution\.yml$') { "run=true" >> $env:GITHUB_OUTPUT }
+    - run: ./scripts/test-desktop-distribution.ps1
+      if: steps.diff.outputs.run == 'true'

@@ -93,18 +93,37 @@ fn a_remote_client_sends_its_token_on_every_request_and_stops_when_it_cant_get_o
     let address = server.server_addr().to_string();
     let worker = std::thread::spawn(move || {
         for path in ["/remote/info", "/status"] {
-            let request = server.recv_timeout(Duration::from_secs(3)).unwrap().unwrap();
+            let request = server
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap()
+                .unwrap();
             assert_eq!(request.url(), path);
-            let token = request.headers().iter().find(|h| h.field.equiv("Authorization"));
+            let token = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"));
             assert_eq!(token.unwrap().value.as_str(), "Bearer signed");
-            let body = if path == "/status" { json!({"phase":"playing"}) } else { identity() };
-            request.respond(tiny_http::Response::from_string(body.to_string())).unwrap();
+            let body = if path == "/status" {
+                json!({"phase":"playing"})
+            } else {
+                identity()
+            };
+            request
+                .respond(tiny_http::Response::from_string(body.to_string()))
+                .unwrap();
         }
     });
-    let client = Client::connect_remote(&address, std::sync::Arc::new(|| Ok("signed".into()))).unwrap();
-    assert_eq!(client.execute(&Command::Status {}).unwrap()["phase"], "playing");
+    let client =
+        Client::connect_remote(&address, std::sync::Arc::new(|| Ok("signed".into()))).unwrap();
+    assert_eq!(
+        client.execute(&Command::Status {}).unwrap()["phase"],
+        "playing"
+    );
     worker.join().unwrap();
-    let failed = Client::connect_remote(&address, std::sync::Arc::new(|| Err("OpenBao is down".into())));
+    let failed = Client::connect_remote(
+        &address,
+        std::sync::Arc::new(|| Err("OpenBao is down".into())),
+    );
     assert_eq!(failed.err().unwrap(), "OpenBao is down");
 }
 

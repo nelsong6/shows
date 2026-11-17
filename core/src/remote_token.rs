@@ -90,7 +90,12 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
     fn token(kid: &str, claims: Value) -> String {
         let mut header = Header::new(Algorithm::ES256);
         header.kid = Some(kid.into());
-        encode(&header, &claims, &EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap()).unwrap()
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_ec_pem(KEY.as_bytes()).unwrap(),
+        )
+        .unwrap()
     }
 
     fn claims(aud: &str, iss: &str, left: i64) -> Value {
@@ -113,7 +118,9 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
     fn a_shows_token_from_openbao_passes_and_keys_are_fetched_only_when_new() {
         let (checker, fetches) = checker("k1");
         for _ in 0..3 {
-            checker.check(&token("k1", claims("shows", ISSUER, 300))).unwrap();
+            checker
+                .check(&token("k1", claims("shows", ISSUER, 300)))
+                .unwrap();
         }
         assert_eq!(fetches.load(Ordering::SeqCst), 1);
     }
@@ -121,10 +128,26 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
     #[test]
     fn another_audience_issuer_key_or_an_expired_token_is_refused() {
         let (checker, _) = checker("k1");
-        assert!(checker.check(&token("k1", claims("openproject", ISSUER, 300))).is_err());
-        assert!(checker.check(&token("k1", claims("shows", "https://elsewhere", 300))).is_err());
-        assert!(checker.check(&token("k1", claims("shows", ISSUER, -600))).is_err());
-        assert!(checker.check(&token("unknown", claims("shows", ISSUER, 300))).is_err());
+        assert!(
+            checker
+                .check(&token("k1", claims("openproject", ISSUER, 300)))
+                .is_err()
+        );
+        assert!(
+            checker
+                .check(&token("k1", claims("shows", "https://elsewhere", 300)))
+                .is_err()
+        );
+        assert!(
+            checker
+                .check(&token("k1", claims("shows", ISSUER, -600)))
+                .is_err()
+        );
+        assert!(
+            checker
+                .check(&token("unknown", claims("shows", ISSUER, 300)))
+                .is_err()
+        );
         assert!(checker.check("not a token").is_err());
     }
 
@@ -134,7 +157,8 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
         let good = token("k1", claims("shows", ISSUER, 300));
         let (head, rest) = good.split_once('.').unwrap();
         let (_, sig) = rest.rsplit_once('.').unwrap();
-        let forged = serde_json::to_vec(&json!({"aud":"shows","iss":ISSUER,"exp":4102444800u64})).unwrap();
+        let forged =
+            serde_json::to_vec(&json!({"aud":"shows","iss":ISSUER,"exp":4102444800u64})).unwrap();
         use base64::Engine;
         let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(forged);
         assert!(checker.check(&format!("{head}.{body}.{sig}")).is_err());
@@ -143,6 +167,11 @@ RXcElwx4NzzIjreNOTuPo860Vm9cKijgXPCxamwY+f4Lt32uD/NqurAW
     #[test]
     fn an_unreachable_key_source_refuses_rather_than_passes() {
         let checker = TokenChecker::with_fetch(Box::new(|| Err("OpenBao is down".into())));
-        assert_eq!(checker.check(&token("k1", claims("shows", ISSUER, 300))).unwrap_err(), "OpenBao is down");
+        assert_eq!(
+            checker
+                .check(&token("k1", claims("shows", ISSUER, 300)))
+                .unwrap_err(),
+            "OpenBao is down"
+        );
     }
 }
