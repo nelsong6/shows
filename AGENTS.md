@@ -130,4 +130,4 @@ remains the hash-verified CI artifact; preview code never replaces it.
 
 ## Release
 
-CI comes from pipeline-templates' suites (this repository's entry in its `fleet.json`). The release builds on Windows, where `desktop/build.rs` embeds the React distribution, packs `shows-desktop.exe` with `libmpv-2.dll` as `shows-desktop-windows-amd64.zip`, signs both, and publishes a Forgejo Release. The independent remote is never compiled or bundled here. The desktop is not deployed to AKS.
+CI comes from pipeline-templates' suites (this repository's entry in its `fleet.json`). The release builds on Windows, where `desktop/build.rs` embeds the React distribution, packs `shows-desktop.exe` with `libmpv-2.dll` (the mpv build `release/dependencies.json` names by address and SHA-256, downloaded through Artifact Keeper) as `shows-desktop-windows-amd64.zip`, signs both, and publishes a Forgejo Release. The independent remote is never compiled or bundled here. The desktop is not deployed to AKS.

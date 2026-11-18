@@ -1,0 +1,8 @@
+[
+  {
+    "url": "https://artifacts.home.romaine.life/general/sourceforge/project/mpv-player-windows/libmpv/mpv-dev-x86_64-20250420-git-3600c71.7z",
+    "sha256": "c13f26bdca62e5e52990dbc82920e05734d7922889acc48c38b8a1c5da6b8f9c",
+    "extract": "libmpv-2.dll",
+    "destination": "dist/libmpv-2.dll"
+  }
+]
