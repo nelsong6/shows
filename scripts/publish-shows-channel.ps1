@@ -35,6 +35,8 @@ if ($Channel -eq "stable") {
     $env:GCM_INTERACTIVE = $previousInteractive
   }
   $repoApi = 'https://forgejo.romaine.life/api/v1/repos/nelsong6/shows'
+  # The release's files, and the names the channel keeps them under.
+  $releaseAssets = [ordered]@{ 'shows-desktop-windows-amd64.exe' = 'shows-desktop.exe'; 'libmpv-2.dll' = 'libmpv-2.dll' }
   $releaseApi = "$repoApi/releases"
   # The release CI numbered on a commit: the v<series>.N tag release-version reserved on it.
   function Find-ReleaseTag([string]$commit) {
@@ -60,7 +62,7 @@ if ($Channel -eq "stable") {
       } else {
         $published = Invoke-RestMethod "$releaseApi/tags/$([Uri]::EscapeDataString($Release))" -Headers $releaseHeaders -SkipHttpErrorCheck -StatusCodeVariable releaseStatus
       }
-      if ($releaseStatus -eq 200 -and -not $published.draft -and ($published.assets | Where-Object { $_.name -eq 'shows-desktop-windows-amd64.zip' -and $_.size -gt 0 })) { break }
+      if ($releaseStatus -eq 200 -and -not $published.draft -and @($published.assets | Where-Object { $_.name -in $releaseAssets.Keys -and $_.size -gt 0 }).Count -eq $releaseAssets.Count) { break }
       if ($releaseStatus -notin @(200,404)) { throw "Release lookup failed with HTTP $releaseStatus" }
       if ((Get-Date) -gt $deadline) { throw "Timed out waiting for $Release" }
       if ($releaseSha) {
@@ -80,12 +82,13 @@ if ($Channel -eq "stable") {
 
   $download = Join-Path ([IO.Path]::GetTempPath()) "shows-release-$([guid]::NewGuid().ToString('N'))"
   New-Item -ItemType Directory -Path $download | Out-Null
-  $asset = @($metadata.assets | Where-Object name -eq 'shows-desktop-windows-amd64.zip')
-  if ($asset.Count -ne 1) { throw "Release $Release must contain one shows-desktop-windows-amd64.zip" }
-  Invoke-WebRequest $asset[0].browser_download_url -Headers $releaseHeaders -OutFile (Join-Path $download 'shows-desktop-windows-amd64.zip')
-  Expand-Archive -LiteralPath (Join-Path $download "shows-desktop-windows-amd64.zip") -DestinationPath (Join-Path $download "bundle")
-  $exe = Join-Path $download "bundle\shows-desktop.exe"
-  $LibmpvPath = Join-Path $download "bundle\libmpv-2.dll"
+  foreach ($name in $releaseAssets.Keys) {
+    $asset = @($metadata.assets | Where-Object name -eq $name)
+    if ($asset.Count -ne 1) { throw "Release $Release must contain one $name" }
+    Invoke-WebRequest $asset[0].browser_download_url -Headers $releaseHeaders -OutFile (Join-Path $download $releaseAssets[$name])
+  }
+  $exe = Join-Path $download "shows-desktop.exe"
+  $LibmpvPath = Join-Path $download "libmpv-2.dll"
 } else {
   # A local build is never numbered: it is dev, made unique by when it was published.
   if (-not $Version) { $Version = "dev-$(Get-Date -Format 'yyyyMMddHHmmss')" }
