@@ -841,10 +841,18 @@ impl Runner {
     }
 
     // ── playback callbacks (mpv event thread; keep fast + local) ─────────
-    /// A queued file opened — mark it now-playing, note reachable media, restore
-    /// its saved resume position and per-episode track choices. Without the
-    /// database the file still plays, from the start with default tracks.
-    pub fn on_file_loaded(&self) {
+    /// The queued file at `pos` opened — mark it now-playing, note reachable
+    /// media, restore its saved resume position and per-episode track choices.
+    /// Without the database the file still plays, from the start with default
+    /// tracks.
+    ///
+    /// `pos` is the player's position read when the file loaded, not the last
+    /// `playlist-pos` notification: mpv sends that notification only once its
+    /// event queue is empty, so after a slow end-of-file (the watched mark going
+    /// to the NAS) the load arrives first and the notified position is still
+    /// the finished episode's.
+    pub fn on_file_loaded(&self, pos: usize) {
+        self.set_pos(pos);
         let Some(cur) = self.current() else {
             return;
         };
@@ -1459,8 +1467,7 @@ mod tests {
     }
 
     fn play_sim(runner: &Runner, i: usize) {
-        runner.set_pos(i);
-        runner.on_file_loaded();
+        runner.on_file_loaded(i);
         runner.on_natural_end();
     }
 
@@ -1868,8 +1875,7 @@ mod tests {
             Callbacks::default(),
         );
         set_round(&run);
-        run.set_pos(0);
-        run.on_file_loaded();
+        run.on_file_loaded(0);
         let cur = run.current().unwrap();
         run.defer(); // bumps + marks deferred + player.skip()
         run.on_natural_end(); // a stray EOF for the deferred entry -> no-op
@@ -2039,6 +2045,43 @@ mod tests {
 
     // ── resume ─────────────────────────────────────────────────────────
     #[test]
+    fn a_load_that_outruns_the_position_update_belongs_to_the_loaded_file() {
+        // An episode ran out into the next while its watched mark went to the
+        // NAS, so mpv's position notification still named the finished entry
+        // when the next file loaded (2026-11-19: Daredevil into Battlestar).
+        let r = replica(&[show("s1", "nelson", &["a"]), show("s2", "nelson", &["b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        let round = run.compute_and_save_new_round("nelson").unwrap();
+        run.inner.lock().unwrap().round = Some(round.clone());
+        let (finished, next) = (&round[0], &round[1]);
+        r.set_resume(&finished.episode_id, Some(3609.0)).unwrap();
+        r.set_subtitle_track(&finished.episode_id, "3").unwrap();
+        r.set_resume(&next.episode_id, Some(1450.0)).unwrap();
+        r.set_subtitle_track(&next.episode_id, "2").unwrap();
+
+        run.on_file_loaded(0);
+        run.on_natural_end();
+        // The notification for the move to 1 hasn't come; the load has.
+        assert_eq!(run.inner.lock().unwrap().pos, 0);
+        run.on_file_loaded(1);
+
+        let queue = r.get_round_queue().unwrap();
+        let state = |ep: &str| queue.iter().find(|q| q.0 == ep).unwrap().3.clone();
+        assert_eq!(state(&next.episode_id), "playing");
+        assert_eq!(state(&finished.episode_id), "watched");
+        assert_eq!(*p.seeked.lock().unwrap(), Some(1450.0));
+        assert_eq!(p.sub.lock().unwrap().as_deref(), Some("2"));
+        assert_eq!(run.current().unwrap().episode_id, next.episode_id);
+    }
+
+    #[test]
     fn an_idle_window_never_overwrites_another_computers_place() {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);
         let p = Arc::new(FakePlayer::default());
@@ -2054,7 +2097,7 @@ mod tests {
         r.set_resume(&cur.episode_id, Some(300.0)).unwrap();
 
         // Loaded here at 300 and left paused there.
-        run.on_file_loaded();
+        run.on_file_loaded(0);
         *p.time.lock().unwrap() = Some(300.0);
         run.save_resume();
         // Another computer watches on to 1200.
@@ -2106,7 +2149,7 @@ mod tests {
         run.set_pos(0);
         let cur = run.current().unwrap();
         r.set_resume(&cur.episode_id, Some(200.0)).unwrap();
-        run.on_file_loaded();
+        run.on_file_loaded(0);
         assert_eq!(*p.seeked.lock().unwrap(), Some(200.0));
         assert_eq!(
             run.inner
@@ -2165,7 +2208,7 @@ mod tests {
         r.set_subtitle_track(&cur.episode_id, "3").unwrap();
         r.set_audio_track(&cur.episode_id, "1").unwrap();
 
-        run.on_file_loaded();
+        run.on_file_loaded(0);
 
         assert_eq!(*p.sub.lock().unwrap(), Some("3".into()));
         assert_eq!(*p.audio.lock().unwrap(), Some("1".into()));
@@ -2278,7 +2321,7 @@ mod tests {
         let outcome = run.play_show(&s2.id);
         assert!(outcome.ok());
         assert_eq!(outcome.status(), "playing_selected_show");
-        run.on_file_loaded();
+        run.on_file_loaded(idx_c);
 
         // Verify that:
         // 1. inner.pos is now idx_c
@@ -2316,10 +2359,8 @@ mod tests {
 
         // Finish "a", step back to it, then move on to "c" without finishing.
         play_sim(&run, idx_a);
-        run.set_pos(idx_a);
-        run.on_file_loaded();
-        run.set_pos(idx_c);
-        run.on_file_loaded();
+        run.on_file_loaded(idx_a);
+        run.on_file_loaded(idx_c);
 
         let (_, pos) = run.load_round_from_db("nelson").unwrap();
         assert_eq!(pos, idx_c);
@@ -2327,8 +2368,7 @@ mod tests {
         assert!(watched(&r, "c").is_none());
 
         // Stepping back to the finished "a" is where playback last was.
-        run.set_pos(idx_a);
-        run.on_file_loaded();
+        run.on_file_loaded(idx_a);
         let (_, pos) = run.load_round_from_db("nelson").unwrap();
         assert_eq!(pos, idx_a);
         assert!(watched(&r, "a").is_some());
@@ -2430,8 +2470,7 @@ mod tests {
 
         nas.go_down(&r);
         run.check_database();
-        run.set_pos(1);
-        run.on_file_loaded();
+        run.on_file_loaded(1);
         nas.come_back();
         run.check_database();
 

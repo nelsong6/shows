@@ -359,8 +359,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let c = compositor;
         let auto_fit_needed =
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!c.has_saved()));
-        player.set_on_file_loaded(Box::new(move || {
-            r.on_file_loaded();
+        player.set_on_file_loaded(Box::new(move |pos| {
+            r.on_file_loaded(pos);
             if auto_fit_needed.swap(false, std::sync::atomic::Ordering::Relaxed)
                 && let Some((vw, vh)) = p.video_dimensions()
             {

@@ -56,7 +56,7 @@ pub struct Player {
     cv: Condvar,
     shared: Mutex<Shared>,
     on_natural_end: Mutex<Option<Cb>>,
-    on_file_loaded: Mutex<Option<Cb>>,
+    on_file_loaded: Mutex<Option<PosCb>>,
     on_playback_change: Mutex<Option<Cb>>,
     on_pos: Mutex<Option<PosCb>>,
 }
@@ -95,7 +95,8 @@ impl Player {
     pub fn set_on_natural_end(&self, f: Cb) {
         *self.on_natural_end.lock().unwrap() = Some(f);
     }
-    pub fn set_on_file_loaded(&self, f: Cb) {
+    /// Called with the entry that loaded, read from mpv at the load.
+    pub fn set_on_file_loaded(&self, f: PosCb) {
         *self.on_file_loaded.lock().unwrap() = Some(f);
     }
     pub fn set_on_playback_change(&self, f: Cb) {
@@ -141,8 +142,20 @@ impl Player {
                     }
                 }
                 MPV_EVENT_FILE_LOADED => {
-                    if let Some(cb) = self.on_file_loaded.lock().unwrap().as_ref() {
-                        cb();
+                    // Read the position now: the playlist-pos notification
+                    // comes only once the queue is empty, so after a slow
+                    // end-file handler this load arrives before it.
+                    let pos = self
+                        .handle
+                        .get_property("playlist-pos")
+                        .and_then(|p| p.parse::<usize>().ok());
+                    match pos {
+                        Some(pos) => {
+                            if let Some(cb) = self.on_file_loaded.lock().unwrap().as_ref() {
+                                cb(pos);
+                            }
+                        }
+                        None => log::error!("a file loaded but mpv reported no playlist position"),
                     }
                     self.notify_playback_change();
                 }
