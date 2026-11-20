@@ -398,6 +398,23 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
+/// Releases the video, composition and WebView objects once the message loop
+/// ends, while every thread in the process is still running. Left to the
+/// thread-local's destructor they would be released inside `ExitProcess`, after
+/// Windows has ended the other threads, including the graphics driver's: Intel's
+/// D3D11 driver then spins forever releasing the swap chain, and the process
+/// never finishes exiting (SHOWS-22).
+fn release_render_state() {
+    let Some(state) = STATE.with(|s| s.borrow_mut().take()) else {
+        return;
+    };
+    drop(state.gl);
+    if let Err(e) = unsafe { state.base.Close() } {
+        log::warn!("closing the overlay WebView failed: {e}");
+    }
+    log::info!("render state released");
+}
+
 #[derive(Clone, Copy)]
 pub struct Compositor {
     hwnd: HWND,
@@ -740,6 +757,7 @@ impl Compositor {
                 DispatchMessageW(&msg);
             }
         }
+        release_render_state();
     }
 }
 

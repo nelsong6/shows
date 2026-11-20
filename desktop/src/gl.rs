@@ -21,11 +21,12 @@ use windows::Win32::Graphics::Gdi::{GetDC, HDC};
 use windows::Win32::Graphics::OpenGL::{
     ChoosePixelFormat, HGLRC, PFD_DOUBLEBUFFER, PFD_DRAW_TO_WINDOW, PFD_MAIN_PLANE,
     PFD_SUPPORT_OPENGL, PFD_TYPE_RGBA, PIXELFORMATDESCRIPTOR, SetPixelFormat, wglCreateContext,
-    wglGetProcAddress, wglMakeCurrent,
+    wglDeleteContext, wglGetProcAddress, wglMakeCurrent,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, RegisterClassW, WNDCLASSW, WS_OVERLAPPED,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, WNDCLASSW,
+    WS_OVERLAPPED,
 };
 use windows::core::w;
 use windows::core::{Interface, PCSTR};
@@ -118,6 +119,7 @@ struct GlProcs {
     get_error: unsafe extern "system" fn() -> u32,
     dx_object_access: unsafe extern "system" fn(*mut c_void, u32) -> i32,
     dx_open_device: unsafe extern "system" fn(*mut c_void) -> *mut c_void,
+    dx_close_device: unsafe extern "system" fn(*mut c_void) -> i32,
     dx_register_object:
         unsafe extern "system" fn(*mut c_void, *mut c_void, u32, u32, u32) -> *mut c_void,
     dx_unregister_object: unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32,
@@ -144,6 +146,7 @@ impl GlProcs {
             get_error: load(c"glGetError")?,
             dx_object_access: load(c"wglDXObjectAccessNV")?,
             dx_open_device: load(c"wglDXOpenDeviceNV")?,
+            dx_close_device: load(c"wglDXCloseDeviceNV")?,
             dx_register_object: load(c"wglDXRegisterObjectNV")?,
             dx_unregister_object: load(c"wglDXUnregisterObjectNV")?,
             dx_lock_objects: load(c"wglDXLockObjectsNV")?,
@@ -163,8 +166,8 @@ pub struct GlVideo {
     texture: ID3D11Texture2D,
     w: i32,
     h: i32,
-    _hglrc: HGLRC,
-    _dummy: HWND,
+    hglrc: HGLRC,
+    dummy: HWND,
 }
 
 impl GlVideo {
@@ -313,8 +316,8 @@ impl GlVideo {
                 texture,
                 w,
                 h,
-                _hglrc: hglrc,
-                _dummy: dummy,
+                hglrc,
+                dummy,
             })
         }
     }
@@ -548,6 +551,26 @@ impl GlVideo {
 unsafe impl Send for GlVideo {}
 unsafe impl Sync for GlVideo {}
 
+impl Drop for GlVideo {
+    /// Releases the video path in reverse order of creation: mpv's render
+    /// context, the GL objects and their interop binding, then the WGL context
+    /// and its window. Runs on the UI thread, where the context is current.
+    fn drop(&mut self) {
+        unsafe {
+            (self.handle.api.render_context_free)(self.rctx);
+            let p = &self.procs;
+            (p.bind_framebuffer)(GL_FRAMEBUFFER, 0);
+            (p.delete_framebuffers)(1, &self.fbo);
+            (p.dx_unregister_object)(self.dx_device, self.gl_object);
+            (p.delete_textures)(1, &self.gl_tex);
+            (p.dx_close_device)(self.dx_device);
+            let _ = wglMakeCurrent(HDC::default(), HGLRC::default());
+            let _ = wglDeleteContext(self.hglrc);
+            let _ = DestroyWindow(self.dummy);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,9 +621,7 @@ mod tests {
             }
             Err("Timed out rendering the orientation fixture".to_string())
         })();
-        unsafe {
-            (handle.api.render_context_free)(video.rctx);
-        }
+        drop(video);
         std::fs::remove_file(path).unwrap();
         let captured = captured.unwrap();
         assert_eq!(captured.rows[10], "@".repeat(160), "white top of the video");

@@ -53,5 +53,7 @@ its files match the downloaded artifact and it is still the selected channel.
 The installer uses PowerShell 7; no Windows PowerShell 5.1 launcher is retained.
 A running desktop closes through its resume-saving control and restarts in the
 interactive user session, opening paused on the database's place like any
-launch. A closed app stays closed.
+launch. A closed app stays closed. Closing releases the video, composition and
+WebView objects when the window's message loop ends, before the process exits,
+so the process ends on every graphics driver and the new copy can start.
 See [development-lifecycle.md](development-lifecycle.md).
