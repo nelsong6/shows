@@ -12,6 +12,7 @@ export type CommandState = {
   fullscreen: boolean;
   maximized: boolean;
   dashboardOpen: boolean;
+  databaseReachable: boolean;
   playlist: string;
   playlists: string[];
   round: {show_id: string; show_name: string; playlist?: string}[];
@@ -64,6 +65,12 @@ export function paletteCommands(s: CommandState): Command[] {
     {id: 'next', name: 'Next show', description: 'Mark this episode watched and play the next show', unavailable: round},
     {id: 'previous', name: 'Previous show', description: 'Go back to the previous show in this round', unavailable: round},
     {id: 'defer', name: 'Defer episode', description: 'Play the next show and leave this episode unwatched', unavailable: round},
+    {
+      id: 'catch-up',
+      name: 'Catch up',
+      description: 'Pick up where another computer left this playlist',
+      unavailable: s.databaseReachable ? undefined : 'the NAS database is unreachable',
+    },
     {id: 'back', name: 'Seek back 10 seconds', description: 'Rewind this episode', unavailable: playback},
     {id: 'forward', name: 'Seek forward 10 seconds', description: 'Skip ahead in this episode', unavailable: playback},
     {id: 'louder', name: 'Volume up', description: 'Raise the volume by 5', unavailable: playback},

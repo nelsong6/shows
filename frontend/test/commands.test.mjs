@@ -13,6 +13,7 @@ const playing = {
   fullscreen: false,
   maximized: false,
   dashboardOpen: false,
+  databaseReachable: true,
   playlist: 'nelson',
   playlists: ['nelson', 'kids'],
   round: [
@@ -55,6 +56,13 @@ test('rows name their key and explain what cannot run', () => {
   const noSubs = paletteCommands({...playing, hasSubtitles: false});
   assert.equal(noSubs.find((c) => c.id === 'captions').unavailable, 'this episode has no subtitles');
   assert.equal(rowDescription(paletteCommands(playing).find((c) => c.id === 'pause')), 'Pause playback · Space');
+});
+
+test('catch up runs whenever the database answers', () => {
+  const idle = paletteCommands({...playing, roundActive: false, hasPlayback: false, round: []});
+  assert.equal(idle.find((c) => c.id === 'catch-up').unavailable, undefined, 'a drained or blocked playlist can catch up');
+  const offline = paletteCommands({...playing, databaseReachable: false});
+  assert.equal(offline.find((c) => c.id === 'catch-up').unavailable, 'the NAS database is unreachable');
 });
 
 test('names follow the current state', () => {

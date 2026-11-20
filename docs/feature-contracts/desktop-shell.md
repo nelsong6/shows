@@ -165,6 +165,10 @@ until the first frame's params are known. Windowed mode keeps free resizing.
   of them, and each palette row names its key; a key with no listed command is a
   test failure. Other playlists, the rest of the round and **info** are commands
   too.
+- **Catch up** reloads the round from the NAS database, so a window left open on
+  one computer picks up where another left the playlist without a restart (see
+  "Catch up" in [round-and-advance.md](round-and-advance.md)). It is unavailable
+  only while the database is unreachable.
 - A command that can't run now stays listed with the reason, and choosing it
   shows that reason instead of failing silently.
 - From a text field, `/` opens the palette at the field and the text stays as

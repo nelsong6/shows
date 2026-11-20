@@ -618,6 +618,7 @@ function App() {
     fullscreen: !!status.window_fullscreen,
     maximized: !!status.window_maximized,
     dashboardOpen: showSettings,
+    databaseReachable: status.database?.reachable ?? false,
     playlist: status.playlist,
     playlists: status.playlists ?? [],
     round,
@@ -652,6 +653,10 @@ function App() {
         break;
       case 'defer':
         void runControl(defer);
+        break;
+      case 'catch-up':
+        setSelected(null);
+        void runControl(reloadRound, {success: true});
         break;
       case 'back':
         void runControl(() => seekRelative(-10));

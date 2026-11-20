@@ -79,6 +79,16 @@ The only local write path is the pending-watch list under
 - An already-loaded in-memory round remains immutable under M1. External edits
   affect the next database read or round boundary; they do not restructure the
   playlist currently handed to mpv.
+- **Catch up** (the palette command, `runner.reload_round`, `POST /round/reload`)
+  is that read on demand: it drops the loaded round without saving its position
+  and reads the playlist's round again, so it resumes at the `"playing"` entry and
+  resume position another computer left (M3). It also wakes a runner waiting with
+  nothing to play (L4), marks nothing watched, and needs the database: offline it
+  answers 503 `database_unavailable` and the loaded round plays on.
+- A computer writes an episode's resume position only when its own playback has
+  moved from the position it last wrote or read. The periodic save and the save on
+  close never put an idle or paused window's place back over another computer's
+  progress.
 - The local media-file cache remains disposable. It does not contain library or
   watch-state authority.
 
@@ -142,7 +152,7 @@ Invariants:
 - **L1. Each playlist keeps its own round.** Starting a round replaces only that playlist's `round_queue` rows (`replica.save_round_queue`), so switching away and back resumes at the `"playing"` entry by M3. The same save drops any entry whose show has since moved to another playlist or left the library.
 - **L2. A switch saves before it moves.** The choice is written before playback changes, and the current episode's resume position is saved; a choice that can't be written changes nothing and reports why. Only a playlist holding a show can be chosen, so selecting needs the database (O6).
 - **L3. A switch reloads at once.** The loaded round is interrupted and the next round is read for the new playlist, as `/round/reload` does. Nothing is marked watched.
-- **L4. Nothing to play waits for a switch.** A drained playlist, a round that can't be read, and a round with no playable media wait for another playlist to be chosen, not for a restart.
+- **L4. Nothing to play waits for a switch.** A drained playlist, a round that can't be read, and a round with no playable media wait for another playlist to be chosen or a catch-up, not for a restart.
 - **L5. A moved show leaves its old round.** A round being loaded skips entries whose show is no longer in that playlist.
 
 ## Advance timing (per-episode)

@@ -99,7 +99,8 @@ When `round_blocked` is true and `file_sync.problems` includes bad entries, the
 frontend may call `POST /round/remove-entry` for one or more `episode_id`s. The
 server removes those rows from the authoritative `round_queue`.
 
-The frontend must then call `POST /round/reload`. Reload interrupts the player,
-causing the runner to rebuild from the repaired `round_queue` without restarting
+The frontend must then call `POST /round/reload`, the palette's **Catch up**.
+Reload interrupts the player and wakes a runner waiting on the blocked round,
+causing it to rebuild from the repaired `round_queue` without restarting
 the app. Reload is deliberate; removing entries alone does not mutate the
 already-loaded in-memory playlist.

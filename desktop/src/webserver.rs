@@ -653,10 +653,7 @@ impl ControlServer {
                 self.respond_runner_outcome(request, |r| r.select_playlist(&playlist));
             }
             "/round/reload" => {
-                self.push_status(StatusPatch::phase(
-                    StatusPhase::Fetching,
-                    "reloading repaired round",
-                ));
+                // Catch up to another computer, or rebuild a repaired round.
                 self.respond_runner_outcome(request, |r| r.reload_round());
             }
             "/fullscreen" => {

@@ -383,6 +383,10 @@ struct Inner {
     deferred: HashSet<String>,
     playing: Option<RoundEntry>,
     loaded_any: bool,
+    /// The resume position this computer last wrote or read for an episode.
+    /// [`Runner::save_resume`] writes only when playback here has moved from
+    /// it, so an idle window never overwrites another computer's progress.
+    resume_seen: Option<(String, f64)>,
 }
 
 pub struct Runner {
@@ -394,9 +398,10 @@ pub struct Runner {
     choice: Arc<PlaylistChoice>,
     /// The playlist the loaded round came from; none before the first round.
     playlist: Mutex<Option<String>>,
-    /// Counts [`Runner::select_playlist`] switches, so the run loop can tell
-    /// one happened while it was busy or waiting.
-    switches: AtomicU64,
+    /// Counts requests to reread the round from the database (a playlist
+    /// switch or [`Runner::reload_round`]), so the run loop can tell one
+    /// happened while it was busy or waiting.
+    reloads: AtomicU64,
     stop: Arc<StopFlag>,
     cb: Callbacks,
     inner: Mutex<Inner>,
@@ -418,7 +423,7 @@ impl Runner {
             player,
             choice,
             playlist: Mutex::new(None),
-            switches: AtomicU64::new(0),
+            reloads: AtomicU64::new(0),
             stop,
             cb,
             inner: Mutex::new(Inner {
@@ -427,6 +432,7 @@ impl Runner {
                 deferred: HashSet::new(),
                 playing: None,
                 loaded_any: false,
+                resume_seen: None,
             }),
         }
     }
@@ -440,7 +446,7 @@ impl Runner {
 
     fn run_loop(&self) {
         while !self.stop.is_set() {
-            let switches = self.switches.load(Ordering::SeqCst);
+            let reloads = self.reloads.load(Ordering::SeqCst);
             let (playlist, round, pos) = match self.next_round_from_db() {
                 Ok(next) => next,
                 Err(e) if self.replica.is_reachable() => {
@@ -450,7 +456,7 @@ impl Runner {
                             "the round could not be read from the database: {e}"
                         ));
                     }
-                    self.wait_for_switch(switches);
+                    self.wait_for_reload(reloads);
                     continue;
                 }
                 Err(e) => {
@@ -467,7 +473,7 @@ impl Runner {
                 if let Some(cb) = &self.cb.on_drained {
                     cb();
                 }
-                self.wait_for_switch(switches);
+                self.wait_for_reload(reloads);
                 continue;
             }
             {
@@ -495,9 +501,9 @@ impl Runner {
                 cb(&round, pos);
             }
 
-            if self.switches.load(Ordering::SeqCst) != switches {
-                // Switched while this round loaded: the switch's interrupt
-                // came before the wait below could see it.
+            if self.reloads.load(Ordering::SeqCst) != reloads {
+                // A switch or reload came while this round loaded: its
+                // interrupt came before the wait below could see it.
                 self.player.playlist_clear();
                 continue;
             }
@@ -513,7 +519,7 @@ impl Runner {
                 return;
             }
             self.player.playlist_clear();
-            if self.switches.load(Ordering::SeqCst) != switches {
+            if self.reloads.load(Ordering::SeqCst) != reloads {
                 continue;
             }
             let loaded_any = {
@@ -526,7 +532,7 @@ impl Runner {
                 if let Some(cb) = &self.cb.on_error {
                     cb("no playable media — check that the show files are reachable");
                 }
-                self.wait_for_switch(switches);
+                self.wait_for_reload(reloads);
             }
         }
     }
@@ -563,10 +569,11 @@ impl Runner {
         self.playlist.lock().unwrap().clone()
     }
 
-    /// Hold until another playlist is chosen: this one has nothing to play.
-    fn wait_for_switch(&self, seen: u64) {
+    /// Hold until another playlist is chosen or the round is reloaded: this
+    /// one has nothing to play.
+    fn wait_for_reload(&self, seen: u64) {
         self.stop
-            .wait_until(|| self.switches.load(Ordering::SeqCst) != seen);
+            .wait_until(|| self.reloads.load(Ordering::SeqCst) != seen);
     }
 
     /// Play `name` from where it was left. The current episode's position is
@@ -598,7 +605,7 @@ impl Runner {
         }
         self.save_resume();
         log::info!("playlist selected: {name}");
-        self.switches.fetch_add(1, Ordering::SeqCst);
+        self.reloads.fetch_add(1, Ordering::SeqCst);
         self.stop.wake();
         self.player.playlist_clear();
         ControlOutcome::applied("playlist_selected", format!("playing {name}"))
@@ -710,9 +717,30 @@ impl Runner {
     /// Deliberately reload the current round from `round_queue`. Manual repair
     /// removes bad queue entries in the database; this interrupts mpv so the run
     /// loop clears the in-memory playlist and rebuilds from the repaired queue.
+    /// Reread the round from the database: catch up to where another computer
+    /// left it, or rebuild a repaired round. The loaded round is dropped
+    /// without saving its position, so the database's progress wins, and a
+    /// runner waiting with nothing to play reads again. Nothing is marked
+    /// watched. Needs the database: offline the loaded round keeps playing.
     pub fn reload_round(&self) -> ControlOutcome {
+        if !self.replica.is_reachable() {
+            return ControlOutcome::failed(
+                "database_unavailable",
+                "the round was not reloaded: the NAS database is unreachable",
+            );
+        }
+        log::info!("round reload requested");
+        // Before the interrupt, so the loaded round's status can't land first.
+        if let Some(cb) = &self.cb.on_status {
+            cb("fetching", "reloading the round from the NAS database");
+        }
+        self.reloads.fetch_add(1, Ordering::SeqCst);
+        self.stop.wake();
         self.player.playlist_clear();
-        ControlOutcome::applied("round_reload_requested", "reloading round")
+        ControlOutcome::applied(
+            "round_reload_requested",
+            "reloading the round from the NAS database",
+        )
     }
 
     /// Defer the current show's pick: bump it locally (D1-D3, not watched), push,
@@ -841,11 +869,17 @@ impl Runner {
         if let Some(aid) = prefs.audio_track.as_deref() {
             self.player.set_audio(aid);
         }
-        if let Ok(Some(pos)) = self.replica.resume_pos(&cur.episode_id)
+        let resume = self.replica.resume_pos(&cur.episode_id);
+        if let Ok(Some(pos)) = resume
             && pos > 1.0
         {
             self.player.seek_absolute(pos);
         }
+        // Offline the file plays from the start, so nothing was read to hold.
+        self.inner.lock().unwrap().resume_seen = match resume {
+            Ok(pos) => Some((cur.episode_id.clone(), pos.unwrap_or(0.0))),
+            Err(_) => None,
+        };
     }
 
     /// The now-playing episode reached its natural end — mark it watched (A1).
@@ -873,16 +907,28 @@ impl Runner {
     }
 
     /// Persist the current episode's position to the database. Called
-    /// periodically and on window close.
+    /// periodically and on window close. A position this computer already
+    /// wrote or read isn't written again: a paused or idle window would
+    /// otherwise put its stale place back over another computer's progress.
     pub fn save_resume(&self) {
         let Some(cur) = self.current() else {
             return;
         };
-        if let Some(pos) = self.player.time_pos()
-            && pos > 1.0
-            && let Err(e) = self.replica.set_resume(&cur.episode_id, Some(pos))
-        {
-            log::debug!("resume position not saved: {e}");
+        let Some(pos) = self.player.time_pos().filter(|p| *p > 1.0) else {
+            return;
+        };
+        let unmoved = matches!(
+            &self.inner.lock().unwrap().resume_seen,
+            Some((ep, seen)) if *ep == cur.episode_id && (pos - seen).abs() < 1.0
+        );
+        if unmoved {
+            return;
+        }
+        match self.replica.set_resume(&cur.episode_id, Some(pos)) {
+            Ok(()) => {
+                self.inner.lock().unwrap().resume_seen = Some((cur.episode_id.clone(), pos));
+            }
+            Err(e) => log::debug!("resume position not saved: {e}"),
         }
     }
 
@@ -1656,6 +1702,68 @@ mod tests {
         assert_eq!(p.clears.load(Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn a_reload_reads_again_when_the_playlist_had_nothing_to_play() {
+        // Everything was watched here; another computer then marks the show
+        // unwatched. Catching up reads the round again without a restart.
+        let r = replica(&[show("s1", "nelson", &["a"])]);
+        r.mark_show_watched("s1").unwrap();
+        let stop = StopFlag::new();
+        let (drained_tx, drained) = std::sync::mpsc::channel();
+        let drained_tx = Mutex::new(drained_tx);
+        let played = Arc::new(Mutex::new(None));
+        let (p2, stop2) = (played.clone(), stop.clone());
+        let cb = Callbacks {
+            on_drained: Some(Box::new(move || {
+                drained_tx.lock().unwrap().send(()).unwrap()
+            })),
+            on_round: Some(Box::new(move |round, pos| {
+                *p2.lock().unwrap() = Some(round[pos].episode_id.clone());
+                stop2.set();
+            })),
+            ..Default::default()
+        };
+        let run = runner(
+            r.clone(),
+            Arc::new(FakePlayer::default()),
+            "nelson",
+            stop.clone(),
+            cb,
+        );
+        let looping = {
+            let run = run.clone();
+            std::thread::spawn(move || run.run_loop())
+        };
+        drained.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.mark_show_unwatched("s1").unwrap();
+        assert!(run.reload_round().ok());
+        looping.join().unwrap();
+        assert_eq!(played.lock().unwrap().as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_reload_without_the_database_keeps_the_loaded_round() {
+        let nas = Nas::new();
+        let r = nas.replica(&[show("s1", "nelson", &["a"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        set_round(&run);
+
+        nas.go_down(&r);
+        assert_eq!(run.check_database(), None);
+        let outcome = run.reload_round();
+
+        assert!(outcome.is_failure(), "{outcome:?}");
+        assert_eq!(outcome.status(), "database_unavailable");
+        assert_eq!(p.clears.load(Ordering::SeqCst), 0);
+    }
+
     // ── per-episode advance (the "watch what's next" model) ───────────
     #[test]
     fn each_finished_episode_is_marked_watched() {
@@ -1930,6 +2038,40 @@ mod tests {
     }
 
     // ── resume ─────────────────────────────────────────────────────────
+    #[test]
+    fn an_idle_window_never_overwrites_another_computers_place() {
+        let r = replica(&[show("s1", "nelson", &["a", "b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        set_round(&run);
+        let cur = run.current().unwrap();
+        r.set_resume(&cur.episode_id, Some(300.0)).unwrap();
+
+        // Loaded here at 300 and left paused there.
+        run.on_file_loaded();
+        *p.time.lock().unwrap() = Some(300.0);
+        run.save_resume();
+        // Another computer watches on to 1200.
+        r.set_resume(&cur.episode_id, Some(1200.0)).unwrap();
+        run.save_resume();
+        assert_eq!(r.resume_pos(&cur.episode_id).unwrap(), Some(1200.0));
+
+        // Watching here again writes this computer's place.
+        *p.time.lock().unwrap() = Some(330.0);
+        run.save_resume();
+        assert_eq!(r.resume_pos(&cur.episode_id).unwrap(), Some(330.0));
+        // ...once: unmoved since, it is not written over the other computer.
+        r.set_resume(&cur.episode_id, Some(1300.0)).unwrap();
+        run.save_resume();
+        assert_eq!(r.resume_pos(&cur.episode_id).unwrap(), Some(1300.0));
+    }
+
     #[test]
     fn save_resume_persists_position() {
         let r = replica(&[show("s1", "nelson", &["a", "b"])]);
