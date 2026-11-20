@@ -864,21 +864,44 @@ impl Replica {
         let now = now();
         self.with_conn(|conn| {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            tx.execute(
-                &format!(
-                    "UPDATE round_queue SET state={DEMOTED_STATE}, updated_at=?1, dirty=0 \
-                     WHERE state='playing' AND episode_id<>?2 AND playlist=?3"
-                ),
-                params![now, episode_id, playlist],
-            )?;
-            tx.execute(
-                "UPDATE round_queue SET state='playing', updated_at=?1, dirty=0 WHERE episode_id=?2",
-                params![now, episode_id],
-            )?;
-            tx.execute(
-                "UPDATE round_queue SET updated_at=?1, dirty=0 WHERE playlist=?2",
-                params![now, playlist],
-            )?;
+            mark_playing(&tx, episode_id, playlist, &now)?;
+            tx.commit()
+        })
+    }
+
+    /// Record where this computer is, as one fact: `episode_id` is the
+    /// `playing` entry of `playlist` (M3) and `pos` its resume position, in
+    /// one transaction, so the two never disagree in the database. Writes only
+    /// what differs, and leaves the marker alone when the episode has no entry
+    /// in that playlist's round.
+    pub fn save_place(&self, episode_id: &str, playlist: &str, pos: f64) -> DbResult<()> {
+        let now = now();
+        self.with_conn(|conn| {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let state: Option<String> = tx
+                .query_row(
+                    "SELECT state FROM round_queue WHERE episode_id=?1 AND playlist=?2",
+                    params![episode_id, playlist],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if state.is_some_and(|s| s != "playing") {
+                mark_playing(&tx, episode_id, playlist, &now)?;
+            }
+            let current = tx
+                .query_row(
+                    "SELECT resume_pos FROM episodes WHERE id=?1",
+                    params![episode_id],
+                    |r| r.get::<_, Option<f64>>(0),
+                )
+                .optional()?
+                .flatten();
+            if !resume_pos_matches(current, Some(pos)) {
+                tx.execute(
+                    "UPDATE episodes SET resume_pos=?1, updated_at=?2, dirty=0 WHERE id=?3",
+                    params![pos, now, episode_id],
+                )?;
+            }
             tx.commit()
         })
     }
@@ -1065,6 +1088,32 @@ impl Replica {
         })
     }
 }
+/// Make `episode_id` the one `playing` entry of `playlist` (M3), returning
+/// the entry it replaces to `watched` or `pending`.
+fn mark_playing(
+    tx: &rusqlite::Transaction<'_>,
+    episode_id: &str,
+    playlist: &str,
+    now: &str,
+) -> DbResult<()> {
+    tx.execute(
+        &format!(
+            "UPDATE round_queue SET state={DEMOTED_STATE}, updated_at=?1, dirty=0 \
+             WHERE state='playing' AND episode_id<>?2 AND playlist=?3"
+        ),
+        params![now, episode_id, playlist],
+    )?;
+    tx.execute(
+        "UPDATE round_queue SET state='playing', updated_at=?1, dirty=0 WHERE episode_id=?2",
+        params![now, episode_id],
+    )?;
+    tx.execute(
+        "UPDATE round_queue SET updated_at=?1, dirty=0 WHERE playlist=?2",
+        params![now, playlist],
+    )?;
+    Ok(())
+}
+
 fn resume_pos_matches(a: Option<f64>, b: Option<f64>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => (a - b).abs() < 0.5,

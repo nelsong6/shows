@@ -914,9 +914,10 @@ impl Runner {
         let _ = self.apply_pending();
     }
 
-    /// Persist the current episode's position to the database. Called
-    /// periodically and on window close. A position this computer already
-    /// wrote or read isn't written again: a paused or idle window would
+    /// Persist where this computer is: the current episode as the round's
+    /// `playing` entry and its position, together ([`Replica::save_place`]).
+    /// Called periodically and on window close. A position this computer
+    /// already wrote or read isn't written again: a paused or idle window would
     /// otherwise put its stale place back over another computer's progress.
     pub fn save_resume(&self) {
         let Some(cur) = self.current() else {
@@ -932,7 +933,7 @@ impl Runner {
         if unmoved {
             return;
         }
-        match self.replica.set_resume(&cur.episode_id, Some(pos)) {
+        match self.replica.save_place(&cur.episode_id, &cur.playlist, pos) {
             Ok(()) => {
                 self.inner.lock().unwrap().resume_seen = Some((cur.episode_id.clone(), pos));
             }
@@ -2079,6 +2080,68 @@ mod tests {
         assert_eq!(*p.seeked.lock().unwrap(), Some(1450.0));
         assert_eq!(p.sub.lock().unwrap().as_deref(), Some("2"));
         assert_eq!(run.current().unwrap().episode_id, next.episode_id);
+    }
+
+    fn playing_entry(r: &Replica) -> Option<String> {
+        r.get_round_queue()
+            .unwrap()
+            .into_iter()
+            .find(|q| q.3 == "playing")
+            .map(|q| q.0)
+    }
+
+    #[test]
+    fn a_save_records_the_episode_with_its_position() {
+        let r = replica(&[show("s1", "nelson", &["a"]), show("s2", "nelson", &["b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        let round = run.compute_and_save_new_round("nelson").unwrap();
+        run.inner.lock().unwrap().round = Some(round.clone());
+        run.on_file_loaded(1);
+        // The marker went wrong somewhere; playback here is on round[1].
+        r.set_round_playing(&round[0].episode_id, "nelson").unwrap();
+
+        *p.time.lock().unwrap() = Some(600.0);
+        run.save_resume();
+
+        assert_eq!(
+            playing_entry(&r).as_deref(),
+            Some(round[1].episode_id.as_str())
+        );
+        assert_eq!(r.resume_pos(&round[1].episode_id).unwrap(), Some(600.0));
+    }
+
+    #[test]
+    fn an_idle_window_leaves_the_marker_where_another_computer_put_it() {
+        let r = replica(&[show("s1", "nelson", &["a"]), show("s2", "nelson", &["b"])]);
+        let p = Arc::new(FakePlayer::default());
+        let run = runner(
+            r.clone(),
+            p.clone(),
+            "nelson",
+            StopFlag::new(),
+            Callbacks::default(),
+        );
+        let round = run.compute_and_save_new_round("nelson").unwrap();
+        run.inner.lock().unwrap().round = Some(round.clone());
+        run.on_file_loaded(0);
+        *p.time.lock().unwrap() = Some(300.0);
+        run.save_resume();
+        // Another computer moves on to round[1]; this window sits paused.
+        r.set_round_playing(&round[1].episode_id, "nelson").unwrap();
+
+        run.save_resume();
+
+        assert_eq!(
+            playing_entry(&r).as_deref(),
+            Some(round[1].episode_id.as_str())
+        );
     }
 
     #[test]

@@ -85,10 +85,12 @@ The only local write path is the pending-watch list under
   resume position another computer left (M3). It also wakes a runner waiting with
   nothing to play (L4), marks nothing watched, and needs the database: offline it
   answers 503 `database_unavailable` and the loaded round plays on.
-- A computer writes an episode's resume position only when its own playback has
-  moved from the position it last wrote or read. The periodic save and the save on
-  close never put an idle or paused window's place back over another computer's
-  progress.
+- A computer's place is one fact: the periodic save and the save on close write
+  the current episode as the round's `"playing"` entry (M3) and its resume
+  position in one transaction, so the two never disagree in the database. They
+  write only when this computer's playback has moved from the position it last
+  wrote or read, so an idle or paused window never puts its stale place back
+  over another computer's progress.
 - The local media-file cache remains disposable. It does not contain library or
   watch-state authority.
 
@@ -141,7 +143,7 @@ Invariants:
 
 - **M1. Round queue contents are immutable once decided.** The list of shows and episodes in a round, along with their relative play positions, is fixed at the start of the round. Clicking "Play Show" never prepends, inserts, or restructures the database queue.
 - **M2. Manual play is pure navigation.** Selecting a show to play simply moves the player's active playlist position directly to the show's stable index in the player (`playlist-pos`).
-- **M3. One entry is playing.** A round has at most one `"playing"` entry per playlist: the episode whose file loaded last, however playback got there (natural advance, skip, previous, defer or Play Show). A file load moves `"playing"` to its entry in one transaction, the entry mpv reports at the load: its `playlist-pos` notification arrives only once mpv's event queue drains, so after a slow end of file it still names the finished entry; the entry it leaves returns to `"watched"` if its episode is watched, otherwise `"pending"`. A partial unique index on `round_queue` enforces it. Startup resumes at the `"playing"` entry, even when that episode is already watched, and falls back to the first `"pending"` entry. Watched status itself is untouched by navigation.
+- **M3. One entry is playing.** A round has at most one `"playing"` entry per playlist: the episode whose file loaded last, however playback got there (natural advance, skip, previous, defer or Play Show). A file load moves `"playing"` to its entry in one transaction, and each save of the place while playing keeps it there (see Failure modes). The entry a load marks is the one mpv reports at the load: its `playlist-pos` notification arrives only once mpv's event queue drains, so after a slow end of file it still names the finished entry; the entry it leaves returns to `"watched"` if its episode is watched, otherwise `"pending"`. A partial unique index on `round_queue` enforces it. Startup resumes at the `"playing"` entry, even when that episode is already watched, and falls back to the first `"pending"` entry. Watched status itself is untouched by navigation.
 
 ## Playlists
 
