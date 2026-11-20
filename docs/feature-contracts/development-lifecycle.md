@@ -23,9 +23,10 @@
   [desktop-distribution.md](desktop-distribution.md) immutable files, hashes,
   channels and local execution. Retrying an existing publication requires the
   same artifact hashes and selected channel.
-- **D7. Updates preserve the viewing session.** A running desktop closes via its
-  normal resume-saving control and restarts in the interactive user session.
-  Pause state is restored after loading. A stopped desktop is not started. SSH,
+- **D7. Updates keep the viewing place.** A running desktop closes via its
+  normal resume-saving control and restarts in the interactive user session,
+  where it opens paused on the database's place like every launch; the update
+  restores nothing from the old window. A stopped desktop is not started. SSH,
   release and installer failures are explicit and bounded; the installer issues
   no new credentials and removes its owned task registration on completion.
 

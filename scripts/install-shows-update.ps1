@@ -76,15 +76,15 @@ try {
   $install = Join-Path $env:LOCALAPPDATA 'shows'
   New-Item -ItemType Directory -Force -Path $install | Out-Null
   $app = Get-Process -Name shows-desktop -ErrorAction SilentlyContinue | Select-Object -First 1
-  $before = $null
+  $oldPort = $null
   if ($app) {
     foreach ($port in @(Get-NetTCPConnection -State Listen -OwningProcess $app.Id | Select-Object -ExpandProperty LocalPort)) {
       try {
         $candidate = Invoke-RestMethod -Uri "http://127.0.0.1:$port/status" -TimeoutSec 2
-        if ($candidate.phase) { $before = $candidate; $oldPort = $port; break }
+        if ($candidate.phase) { $oldPort = $port; break }
       } catch { }
     }
-    if (-not $before) { throw 'Running Shows instance did not provide a status snapshot; it was left running' }
+    if (-not $oldPort) { throw 'Running Shows instance did not answer on its control port; it was left running' }
   }
   & (Join-Path $NasRoot 'install-shows-launcher.ps1') -Channel $Channel -NasRoot $NasRoot
   if (-not (Test-Path -LiteralPath (Join-Path $install "channels\$Channel\shows-desktop.exe"))) { throw 'Verified desktop entry point is missing' }
@@ -104,23 +104,9 @@ try {
     do {
       try {
         $after = Invoke-RestMethod -Uri 'http://127.0.0.1:45831/status' -TimeoutSec 1
+        # The new copy opens paused on the database's place; nothing from the
+        # old window is restored, so this only waits for it to be loaded.
         if ($after.phase -eq 'playing' -and $null -ne $after.playback.time_pos) {
-          $wanted = $before.round[$before.round_pos]
-          if ($after.round[$after.round_pos].episode_id -ne $wanted.episode_id) {
-            if (-not @($after.round | Where-Object episode_id -eq $wanted.episode_id).Count) { throw 'The selected episode is no longer in the shared round' }
-            Invoke-RestMethod -Uri 'http://127.0.0.1:45831/remote/control' -Method Post -ContentType 'application/json' -Body (@{action='play_show';show_id=$wanted.show_id} | ConvertTo-Json -Compress) -TimeoutSec 3 | Out-Null
-            $after = Invoke-RestMethod -Uri 'http://127.0.0.1:45831/status' -TimeoutSec 2
-            if ($after.round[$after.round_pos].episode_id -ne $wanted.episode_id) { Start-Sleep -Milliseconds 100; continue }
-          }
-          if ($before.playback.paused) {
-            Invoke-RestMethod -Uri 'http://127.0.0.1:45831/remote/control' -Method Post -ContentType 'application/json' -Body '{"action":"pause"}' -TimeoutSec 3 | Out-Null
-          }
-          $after = Invoke-RestMethod -Uri 'http://127.0.0.1:45831/status' -TimeoutSec 2
-          $offset = [double]$before.playback.time_pos - [double]$after.playback.time_pos
-          if ([Math]::Abs($offset) -gt 1) {
-            Invoke-RestMethod -Uri 'http://127.0.0.1:45831/remote/control' -Method Post -ContentType 'application/json' -Body (@{action='seek';seconds=$offset} | ConvertTo-Json -Compress) -TimeoutSec 3 | Out-Null
-            $after = Invoke-RestMethod -Uri 'http://127.0.0.1:45831/status' -TimeoutSec 2
-          }
           $info = Invoke-RestMethod -Uri 'http://127.0.0.1:45831/remote/info' -TimeoutSec 2
           break
         }
@@ -128,9 +114,8 @@ try {
       if ($newApp.HasExited) { throw 'Updated Shows exited during startup; inspect shows.log' }
       Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
-    if (-not $info) { throw 'Updated Shows did not become playable within 30 seconds' }
-    if ($after.playback.paused -ne $before.playback.paused) { throw 'Updated Shows did not retain the pause state' }
-    if ($after.round[$after.round_pos].episode_id -ne $before.round[$before.round_pos].episode_id) { throw 'Updated Shows did not retain the selected episode' }
+    if (-not $info) { throw 'Updated Shows did not load within 30 seconds' }
+    if (-not $after.playback.paused) { throw 'Updated Shows opened playing; it must open paused' }
   }
   $result = [ordered]@{
     ok = $true
@@ -139,7 +124,6 @@ try {
     restarted = [bool]$app
     build = $info.build
     paused = $after.playback.paused
-    before_episode = $(if ($before) { $before.round[$before.round_pos].episode_id } else { $null })
     episode = $(if ($after) { $after.round[$after.round_pos].episode_id } else { $null })
     time = $after.playback.time_pos
   }

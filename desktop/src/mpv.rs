@@ -156,7 +156,9 @@ impl Handle {
         h.set_option("vo", "libmpv");
         h.set_option("force-window", "no");
         h.set_option("idle", "yes");
-        #[cfg(debug_assertions)]
+        // Every launch opens paused on the database's place and waits for a
+        // person to press play: an update, a restart or a start on a PC in an
+        // empty room never plays on its own.
         h.set_option("pause", "yes");
         h.set_option("keep-open", "no");
         h.set_option("hwdec", "no");

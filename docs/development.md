@@ -89,9 +89,9 @@ shows-dev ship -Target upstairspc
 This waits for the exact main release, publishes it through the existing NAS
 channel publisher, and installs it locally and on the target. It reuses existing
 SSH and an on-demand interactive user task, so an update reaches the actual TV
-session rather than a hidden SSH desktop. A running player closes gracefully,
-resumes its selected episode and retains its pause state; a closed player stays
-closed. The owned task registration is removed after the result is recorded.
+session rather than a hidden SSH desktop. A running player closes gracefully
+and reopens paused on the database's place, like any launch; a closed player
+stays closed. The owned task registration is removed after the result is recorded.
 Timeouts and failed releases/installations fail explicitly.
 
 Publication retries verify the immutable existing files against the CI artifact

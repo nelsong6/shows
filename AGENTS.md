@@ -109,7 +109,7 @@ Use the fast development loop before opening a PR. See
 
 UI previews use tracked Vite HMR against the real engine and SSE feed; they do
 not need a Rust build, a local player, or another database. Native previews
-start paused and require Vite; debug builds do not embed frontend assets.
+require Vite; debug builds do not embed frontend assets.
 `SHOWS_DIST_DIR` and the fixed-path release-copy smoke script are retired.
 
 Keep debug output warm across worktrees in `D:\build\shows\cargo` (override
@@ -124,8 +124,9 @@ on this PC and the TV in one operation:
 .\scripts\dev-shows.ps1 ship -Target upstairspc
 ```
 
-The update command preserves a running TV's selected episode and pause state,
-uses its interactive Windows session, and leaves a closed app closed. Stable
+Every build opens paused on the database's place. The update command restarts a
+running TV in its interactive Windows session, where it opens paused like any
+launch, and leaves a closed app closed. Stable
 remains the hash-verified CI artifact; preview code never replaces it.
 
 ## Release
